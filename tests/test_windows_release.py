@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -2333,6 +2334,356 @@ class PackagedStatusTests(unittest.TestCase):
 
 
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
+
+
+DISPATCH_BOUNDARIES = r"""
+function Assert-SelectedGpuIdentity { 0 }
+function Get-NetTCPConnection { }
+function Get-ScheduledTask {
+    $probe=$null
+    try {
+        $probe=[IO.File]::Open((Join-Path $StateRoot 'run.lock'),'OpenOrCreate','ReadWrite','None')
+        [pscustomobject]@{State='Ready'}
+    } catch [IO.IOException] { [pscustomobject]@{State='Running'} }
+    finally { if($null -ne $probe){$probe.Dispose()} }
+}
+function Get-CimInstance {
+    $rows=Join-Path $StateRoot 'census.json'
+    if(Test-Path $rows){Get-Content -Raw $rows|ConvertFrom-Json;return}
+    $runtime=Get-RuntimeState
+    if($null -ne $runtime -and $null -ne $runtime.pid -and
+       $null -ne (Get-Process -Id $runtime.pid -ErrorAction SilentlyContinue)){
+        [pscustomobject]@{Name='ninfer-serve.exe';ProcessId=$runtime.pid
+            ExecutablePath=(Join-Path (Join-Path (Join-Path (Join-Path $StateRoot 'releases') $runtime.release_id) 'bin') 'ninfer-serve.exe')}
+    }
+}
+function Get-ScheduledTaskInfo {
+    $mutation=Join-Path $StateRoot 'mutation.json'
+    if(Test-Path $mutation){
+        $update=Get-Content -Raw $mutation|ConvertFrom-Json
+        Remove-Item $mutation
+        if(Get-Command Invoke-WithHoldsLock -ErrorAction SilentlyContinue){
+            Invoke-WithHoldsLock { Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $update }
+        } else { Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $update }
+    }
+}
+function Request-ManagedStop {
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'child-exit'),'stop')
+    return 'signalled'
+}
+function Stop-ScheduledTask {
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'child-exit'),'force')
+}
+function Start-ScheduledTask {
+    $psi=[Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $psi.Arguments='-NoProfile -NonInteractive -File "'+(Join-Path $StateRoot 'Control-Release.ps1')+'" -Action Run -StateRoot "'+$StateRoot+'"'
+    $psi.UseShellExecute=$false
+    $psi.RedirectStandardOutput=$true
+    $psi.RedirectStandardError=$true
+    $wrapper=[Diagnostics.Process]::Start($psi)
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper.pid'),[string]$wrapper.Id)
+}
+function Start-FixtureChild {
+    Remove-Item (Join-Path $StateRoot 'child-exit') -ErrorAction SilentlyContinue
+    $psi=[Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $psi.Arguments='-NoProfile -NonInteractive -File "'+(Join-Path $StateRoot 'fixture-child.ps1')+'" -Root "'+$StateRoot+'"'
+    $psi.UseShellExecute=$false
+    $psi.RedirectStandardOutput=$true
+    $psi.RedirectStandardError=$true
+    return [Diagnostics.Process]::Start($psi)
+}
+function Test-ServerStartGpu {
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper-ready'),'ready')
+    $true
+}
+function Wait-Ready {
+    $deadline=[DateTime]::UtcNow.AddSeconds(20)
+    while([DateTime]::UtcNow -lt $deadline){
+        $rt=Get-RuntimeState
+        if($null -ne $rt -and $rt.gpu_uuid_verified){return}
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'fixture wrapper never published ready attribution'
+}
+$stateFile=Join-Path $StateRoot 'state.json'
+if(Test-Path $stateFile){
+    $fixtureState=Read-JsonFile $stateFile
+    foreach($entry in $fixtureState.releases.PSObject.Properties){
+        $model=Get-Item $entry.Value.model_artifact
+        $entry.Value.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
+        $entry.Value.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
+    }
+    Write-JsonAtomic $stateFile $fixtureState
+}
+$script:publication=${function:Write-JsonAtomic}
+function Write-JsonAtomic([string]$Path,[object]$Value) {
+    $barrier=Join-Path $StateRoot ('barrier-'+$Action)
+    if([IO.Path]::GetFileName($Path) -ceq 'shutdown-holds.json' -and (Test-Path $barrier)){
+        [IO.File]::WriteAllText(($barrier+'.entered'),'entered')
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        while(-not(Test-Path ($barrier+'.release'))){
+            if([DateTime]::UtcNow -ge $deadline){throw 'fixture barrier deadline'}
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    & $script:publication $Path $Value
+}
+"""
+
+
+def dispatcher_fixture(directory: Path, source: bytes | None = None) -> SimpleNamespace:
+    lane = installed_release(directory)
+    state = json.loads((lane.root / "state.json").read_text())
+    lane.instance = state["active_release"]
+    source = source if source is not None else (WINDOWS / "Control-Release.ps1").read_bytes()
+    source = source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+    source = source.replace(b"switch ($Action) {", DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+    install_script(source, lane.root / "Control-Release.ps1")
+    install_script(source, lane.bin / "lifecycle" / "Control-Release.ps1")
+    (lane.root / "fixture-child.ps1").write_text(r"""
+param([string]$Root)
+$deadline=[DateTime]::UtcNow.AddSeconds(60)
+while(-not(Test-Path (Join-Path $Root 'child-exit'))){
+    if([DateTime]::UtcNow -ge $deadline){exit 7}
+    Start-Sleep -Milliseconds 100
+}
+$runtime=Get-Content -Raw (Join-Path $Root 'runtime.json')|ConvertFrom-Json
+if($null -ne $runtime.shutdown_report){
+    [IO.File]::WriteAllText($runtime.shutdown_report,(@{
+        artifact_type='ninfer_serve_shutdown_report';schema_version=1;launch_id=$runtime.launch_id
+        complete=$true;saved=1;skipped=0;refused=0
+    }|ConvertTo-Json))
+}
+""", encoding="utf-8")
+    return lane
+
+
+@unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for dispatcher regressions")
+class ManagedShutdownDispatcherTests(unittest.TestCase):
+    def dispatch(self, lane: SimpleNamespace, action: str, *args: str,
+                 background: bool = False, packaged: bool = False):
+        controller = (lane.bin / "lifecycle" if packaged else lane.root) / "Control-Release.ps1"
+        command = [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(controller),
+                   "-Action", action, "-StateRoot", str(lane.root), *args]
+        if background:
+            return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return subprocess.run(command, capture_output=True, text=True, timeout=45)
+
+    def seed(self, lane: SimpleNamespace, key: str = "1" * 32, report: dict | None = None,
+             mode: str = "stop-event") -> dict:
+        runtime = {
+            "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+            "release_id": lane.instance, "launch_id": key, "pid": None,
+            "start_time_utc_ticks": None, "managed_stop": mode,
+            "stop_event": "Global\\NInfer-Serve-Stop-" + key,
+            "shutdown_report": str(lane.release / "logs" / "shutdown.json"),
+        }
+        (lane.root / "runtime.json").write_text(json.dumps(runtime))
+        if report is not None:
+            report = {"artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                      "launch_id": key, "complete": True, "saved": 0, "skipped": 0, "refused": 0,
+                      **report}
+            (lane.release / "logs" / "shutdown.json").write_text(json.dumps(report))
+        return runtime
+
+    def holds(self, lane: SimpleNamespace) -> list[dict]:
+        path = lane.root / "shutdown-holds.json"
+        self.assertTrue(path.exists(), "incomplete final-save evidence must become a durable hold")
+        return json.loads(path.read_text())["holds"]
+
+    def wait_file(self, path: Path) -> None:
+        deadline = time.monotonic() + 25
+        while not path.exists():
+            if time.monotonic() >= deadline:
+                self.fail(f"dispatcher barrier not reached: {path.name}")
+            time.sleep(.05)
+
+    def test_t1_stop_outcome_table(self) -> None:
+        for report in (None, {"complete": False}, {"refused": 1}, {"launch_id": "f" * 32},
+                       {"saved": "0"}, {"skipped": False}, {"refused": .5}):
+            with self.subTest(report=report), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, report=report)
+                result = self.dispatch(lane, "Stop")
+                self.assertNotEqual(result.returncode, 0, "ordinary Stop must report a held final save")
+                hold = self.holds(lane)[0]
+                self.assertEqual(hold["launch_id"], "1" * 32)
+                self.assertFalse((lane.root / "runtime.json").exists())
+                self.assertTrue(lane.release.exists())
+                self.assertEqual(hold["stop_receipt"]["launch_id"], "1" * 32)
+                self.assertEqual(self.dispatch(lane, "Stop").returncode, 0)
+        for mode, report in (("stop-event", {}), ("terminate", None)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, report=report, mode=mode)
+                result = self.dispatch(lane, "Stop")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((lane.root / "runtime.json").exists())
+
+    def test_t2_sticky_refusal_across_real_start_and_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            self.seed(lane, report={"refused": 1})
+            first = self.dispatch(lane, "Stop")
+            self.assertNotEqual(first.returncode, 0)
+            held = copy.deepcopy(self.holds(lane))
+            start = self.dispatch(lane, "Start")
+            self.assertEqual(start.returncode, 0, start.stderr)
+            runtime = json.loads((lane.root / "runtime.json").read_text())
+            self.assertNotEqual(runtime["launch_id"], "1" * 32)
+            self.assertTrue(runtime["gpu_uuid_verified"])
+            stop = self.dispatch(lane, "Stop")
+            self.assertEqual(stop.returncode, 0, stop.stderr)
+            self.assertEqual(self.holds(lane), held)
+            self.assertFalse((lane.root / "runtime.json").exists())
+
+    def test_t5_latest_same_key_runtime_is_held(self) -> None:
+        for changed_key in (False, True):
+            with self.subTest(changed_key=changed_key), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                runtime = self.seed(lane, report={"refused": 1})
+                runtime.update(pid=987654, start_time_utc_ticks=4, gpu_uuid_verified=True)
+                if changed_key:
+                    runtime["launch_id"] = "2" * 32
+                (lane.root / "mutation.json").write_text(json.dumps(runtime))
+                result = self.dispatch(lane, "Stop")
+                self.assertNotEqual(result.returncode, 0)
+                if changed_key:
+                    self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), runtime)
+                else:
+                    self.assertEqual(self.holds(lane)[0]["runtime"], runtime)
+                    self.assertFalse((lane.root / "runtime.json").exists())
+
+    def test_t6_run_and_reconcile_serialize_the_envelope(self) -> None:
+        for first in ("Reconcile", "Run"):
+            with self.subTest(first=first), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, "a" * 32, {"refused": 1})
+                self.dispatch(lane, "Stop")
+                self.seed(lane, "c" * 32, {"refused": 1})
+                self.dispatch(lane, "Stop")
+                # Select only one release's entry, leaving a sentinel for a removed release.
+                holds = self.holds(lane)
+                sentinel = holds[1]
+                sentinel["release_id"] = "sentinel"
+                sentinel["release_root"] = str(lane.root / "releases" / "sentinel")
+                sentinel["runtime"]["release_id"] = "sentinel"
+                sentinel["runtime"]["shutdown_report"] = str(lane.root / "releases" / "sentinel" / "logs" / "shutdown.json")
+                sentinel["stop_receipt"]["release_id"] = "sentinel"
+                (lane.root / "shutdown-holds.json").write_text(json.dumps({
+                    "artifact_type": "ninfer_windows_shutdown_holds", "schema_version": 1, "holds": holds}))
+                runtime = self.seed(lane, "b" * 32)
+                runtime["release_id"] = "removed-b"
+                runtime["shutdown_report"] = str(lane.root / "releases" / "removed-b" / "logs" / "shutdown.json")
+                (lane.root / "runtime.json").write_text(json.dumps(runtime))
+                barrier = lane.root / ("barrier-" + first)
+                barrier.touch()
+                args = ("-ReleaseId", lane.instance) if first == "Reconcile" else ()
+                one = self.dispatch(lane, first, *args, background=True)
+                self.addCleanup(lambda p=one: p.poll() is None and p.kill())
+                self.wait_file(Path(str(barrier) + ".entered"))
+                second = "Run" if first == "Reconcile" else "Reconcile"
+                args = ("-ReleaseId", lane.instance) if second == "Reconcile" else ()
+                two = self.dispatch(lane, second, *args, background=True)
+                self.addCleanup(lambda p=two: p.poll() is None and p.kill())
+                time.sleep(.3)
+                self.assertIsNone(two.poll(), "second writer must wait for the actual holds leaf")
+                self.assertEqual({h["launch_id"] for h in self.holds(lane)}, {"a" * 32, "c" * 32})
+                Path(str(barrier) + ".release").touch()
+                self.wait_file(lane.root / "wrapper-ready")
+                (lane.root / "child-exit").touch()
+                for process in (one, two):
+                    stdout, stderr = process.communicate(timeout=30)
+                    self.assertEqual(process.returncode, 0, stdout + stderr)
+                self.assertEqual({h["launch_id"] for h in self.holds(lane)}, {"b" * 32, "c" * 32})
+                receipts = list((lane.root / "receipts").glob("shutdown-reconcile-*.json"))
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual([h["launch_id"] for h in json.loads(receipts[0].read_text())["cleared_holds"]],
+                                 ["a" * 32])
+
+    def test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(self) -> None:
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                candidate = lane.instance
+                incumbent = "incumbent"
+                incumbent_root = lane.root / "releases" / incumbent
+                shutil.copytree(lane.release, incumbent_root)
+                state = json.loads((lane.root / "state.json").read_text())
+                old_record = copy.deepcopy(state["releases"][candidate])
+                for field in ("release_root", "server_executable", "config_file", "receipts_root",
+                              "cache_root", "api_key_file"):
+                    old_record[field] = old_record[field].replace(candidate, incumbent)
+                for kind in ("secrets", "cache"):
+                    shutil.copytree(lane.root / kind / candidate, lane.root / kind / incumbent)
+                state["releases"][incumbent] = old_record
+                state["previous_release"] = incumbent
+                (lane.root / "state.json").write_text(json.dumps(state))
+                operation = "5" * 32
+                transaction_root = lane.root / "receipts" / "install-transactions" / operation
+                snapshots = transaction_root / "snapshots"
+                snapshots.mkdir(parents=True)
+                old_state = copy.deepcopy(state)
+                old_state.update(active_release=incumbent, previous_release=None)
+                del old_state["releases"][candidate]
+                (snapshots / "state.bin").write_text(json.dumps(old_state))
+                old_source = (committed_bytes("0628db0b0997c8bda4ac37c8e84da95986890014",
+                                             "packaging/windows/Control-Release.ps1")
+                              if legacy else (WINDOWS / "Control-Release.ps1").read_bytes())
+                old_source = old_source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+                old_source = old_source.replace(b"switch ($Action) {",
+                                                DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+                (snapshots / "controller.bin").write_bytes(old_source)
+                (snapshots / "state-helper.bin").write_text(PROTECTED_STATE_STUB)
+                (snapshots / "scheduled-task.xml").write_text("<Task/>")
+                stage = lane.root / ("staging-" + operation)
+                stage.mkdir()
+                journal = transaction_root / "journal.json"
+                journal.write_text(json.dumps({
+                    "artifact_type": "ninfer_windows_install_transaction", "schema_version": 1,
+                    "operation_id": operation, "status": "in_progress", "phase": "candidate_activated",
+                    "started_utc": "2026-01-01T00:00:00Z", "updated_utc": None,
+                    "journal_path": str(journal), "instance_id": candidate, "state_root": str(lane.root),
+                    "release_root": str(lane.release), "secret_directory": str(lane.root / "secrets" / candidate),
+                    "cache_root": str(lane.root / "cache" / candidate), "stage_path": str(stage),
+                    "task_name": state["task_name"], "task_existed": True, "task_was_running": True,
+                    "task_xml_path": str(snapshots / "scheduled-task.xml"),
+                    "flags": {"incumbent_touched": True, "controller_touched": True, "state_activated": True,
+                              "task_touched": True, "state_helpers_touched": False, "owner_controller_touched": False},
+                    "snapshots": {field: {"exists": True, "backup_path": str(snapshots / (name + ".bin"))}
+                                  for field, name in (("state", "state"), ("controller", "controller"))},
+                }))
+                self.seed(lane, report={"refused": 1})
+                upgrade = SimpleNamespace(root=lane.root, journal=journal)
+                attempt = (ps_assignments(StateRoot=lane.root, Journal=journal, Mode="repair", LiveProcesses="[]")
+                           + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
+                result = PowerShellContractTests().invoke(attempt)
+                self.assertFalse(result["completed"])
+                self.assertEqual(json.loads(journal.read_text())["status"], "held_cleanup")
+                held = self.holds(lane)
+                runtime = json.loads((lane.root / "runtime.json").read_text())
+                self.assertEqual(runtime["release_id"], incumbent)
+                self.assertNotEqual(runtime["launch_id"], "1" * 32)
+                self.assertTrue(runtime["gpu_uuid_verified"])
+                controller_before = (lane.root / "Control-Release.ps1").read_bytes()
+                log_before = (lane.root / "controller.log").read_bytes()
+                PowerShellContractTests().invoke(attempt)
+                self.assertEqual((lane.root / "controller.log").read_bytes(), log_before)
+                self.assertEqual((lane.root / "Control-Release.ps1").read_bytes(), controller_before)
+                self.assertEqual(self.holds(lane), held)
+                reconciled = self.dispatch(lane, "Reconcile", "-ReleaseId", candidate, packaged=True)
+                self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+                self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), runtime)
+                receipts = {path: path.read_bytes() for path in (lane.root / "receipts").glob("shutdown-reconcile-*.json")}
+                self.assertTrue(PowerShellContractTests().invoke(attempt)["completed"])
+                self.assertFalse(lane.release.exists())
+                self.assertTrue(incumbent_root.exists())
+                self.assertEqual({path: path.read_bytes() for path in receipts}, receipts)
+                self.assertEqual(json.loads(journal.read_text())["status"], "repaired")
+                stopped = self.dispatch(lane, "Stop")
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
 
 
 @unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for executable script contracts")

@@ -717,5 +717,15 @@ class NativeChainBoundaryTests(unittest.TestCase):
                 self.assertEqual(self.stage_state('finish', attempt)['status'], 'failed')
                 self.assertEqual(self.instances[-1].state['status'], 'failed')
 
+def load_tests(loader, tests, pattern):
+    # Keep the public lifecycle dispatcher proofs on both release-driver operating systems.
+    spec = importlib.util.spec_from_file_location(
+        'windows_dispatch_contracts', ROOT / 'tests/test_windows_release.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    tests.addTests(loader.loadTestsFromTestCase(module.ManagedShutdownDispatcherTests))
+    return tests
+
+
 if __name__ == '__main__':
     unittest.main()
