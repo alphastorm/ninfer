@@ -2196,7 +2196,7 @@ void test_proven_export_closure_and_protections() {
         Fixture f(128);
         const auto block = f.program.host_block(64);
         const auto named = f.program.add({1, 2}, {block}, Role::Continuation);
-        const auto ordinary = f.program.add({9}, {block});
+        const auto ordinary = f.program.add({9}, {block}, Role::Continuation);
         const auto owner = f.publish(named, 1);
         const auto ordinary_owner = f.publish(ordinary, 2);
         f.cache.set_checkpoint_identity(owner, "victim", "tag");
@@ -2205,7 +2205,8 @@ void test_proven_export_closure_and_protections() {
         if (protection == 2) f.cache.set_checkpoint_identity(ordinary_owner, "other", "tag");
         if (protection == 3) f.program.contents[ordinary.index].leased = true;
         if (protection >= 4) {
-            f.cache.retain_source(f.program, 100, f.source(Base{.tokens = {9}}, ordinary));
+            f.cache.retain_source(f.program, 100,
+                f.source(Base{.tokens = {9}, .advice = {.session_key = 2}}, ordinary));
             if (protection == 5) f.cache.binding_started(100, {}, {});
         }
         auto cursor = f.cache.begin_reclaim(f.program, {}, {ReclaimPurpose::OptionalWrite});
@@ -2218,7 +2219,7 @@ void test_proven_export_closure_and_protections() {
         const auto closure = f.cache.proven_victim_closure(f.program, victim, cursor, exported, excluded);
         if (protection) {
             require(closure.empty() && f.program.released.empty(),
-                    "ineligible physical closure was partially authorized");
+                    "ineligible physical closure was partially authorized: " + std::to_string(protection));
         } else {
             require(closure.size() == 2 && f.cache.release_proven_durable_victim(
                         f.program, victim, closure, cursor, exported, excluded) &&

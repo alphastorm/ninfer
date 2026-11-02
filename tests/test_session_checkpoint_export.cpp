@@ -137,8 +137,8 @@ void final_second_pass() {
     }
 }
 void receipts_and_survivors() {
-    for (unsigned mode = 0; mode != 4; ++mode) {
-        Fixture f;
+    for (unsigned mode = 0; mode != 6; ++mode) {
+        Fixture f(mode == 5 ? 1 : 1ULL << 24);
         const std::string session(64, 'c');
         f.responses.put(response(session, "resp_old", 1));
         f.responses.put(response(session, "resp_current", 2));
@@ -147,9 +147,17 @@ void receipts_and_survivors() {
             require(intent == (mode >= 2 ? DurableSaveIntent::Survivor : DurableSaveIntent::Explicit),
                     "service gave survivor export durable-proof authority");
             if (mode == 3) return DurableExportResult{.reason = DurableReason::Capacity, .reclaim = summary()};
+            if (mode == 4) return DurableExportResult{.reason = DurableReason::TransactionBusy, .reclaim = summary()};
             return exported(writer);
         };
-        if (mode >= 2) require(f.service->erase_response("resp_old", session), "survivor export/fallback failed");
+        if (mode == 3 || mode == 5) {
+            bool refused = false;
+            try { (void)f.service->erase_response("resp_old", session); }
+            catch (const std::exception&) { refused = true; }
+            require(refused && f.responses.get_for_session("resp_old", session),
+                    "native/store refusal deleted an unacknowledged response");
+        }
+        else if (mode >= 2) require(f.service->erase_response("resp_old", session), "survivor export/fallback failed");
         else {
             const auto saved = f.service->save(session);
             has_summary(saved);
@@ -158,7 +166,11 @@ void receipts_and_survivors() {
         const auto receipts = f.receipts();
         require(!receipts.empty(), "save receipt absent");
         has_summary(receipts.back());
-        require(receipts.back().at("committed") == (mode != 1), "survivor receipt changed committed semantics");
+        require(receipts.back().at("committed") == (mode != 1 && mode != 3 && mode != 5),
+                "survivor receipt changed committed semantics");
+        if (mode == 3 || mode == 5)
+            require(receipts.back().at("reason") == (mode == 3 ? "capacity" : "quota"),
+                    "survivor receipt replaced its native/store refusal reason");
     }
 }
 

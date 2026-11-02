@@ -234,6 +234,7 @@ int partially_reclaiming_refusal_does_not_self_wake() {
     ProgressFixture f;
     f.refusal = Reason::Capacity;
     ninfer::runtime::CheckpointControl engine;
+    const auto initial_progress = engine.observed_progress();
     AutomaticCheckpointCoordinator coordinator(
         [&](std::string_view, std::optional<std::string_view> tag) {
             // EngineCore's matching regression proves these notifications follow real
@@ -249,7 +250,7 @@ int partially_reclaiming_refusal_does_not_self_wake() {
                          "partially reclaiming Capacity attempt did not defer");
     {
         std::lock_guard lock(f.mutex);
-        failures += check(f.calls == 1 && engine.observed_progress() == 0,
+        failures += check(f.calls == 1 && engine.observed_progress() == initial_progress,
                           "save-owned cleanup woke its own Capacity retry");
         f.refusal = Reason::None;
     }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 import test_serve_shutdown_capacity_real as capacity_runner
@@ -84,6 +85,21 @@ class RunnerContractTest(unittest.TestCase):
         self.assertEqual(len(capacity_runner.read_metrics(text)), len(capacity_runner.METRICS))
         with self.assertRaisesRegex(RuntimeError, "absent"):
             capacity_runner.read_metrics("")
+
+    def test_predecessor_classification_is_site_and_binary_bound(self):
+        record = {"schema": "ninfer-export-host-classification/1", "base_sha": capacity_runner.BASE,
+                  "native_site": "StateImageStore::prepare_host_export", "kind": "HostCapacity",
+                  "shortage_bytes": 256}
+        log = json.dumps(record)
+        result = capacity_runner.extract_classification("ordinary log\n" + log, "a" * 40, "b" * 64, "a" * 40)
+        self.assertEqual(result["shortage_bytes"], 256)
+        self.assertEqual(result["diagnostic_delta_sha"], result["source_sha"])
+        for bad in ("", log + "\n" + log, json.dumps({**record, "shortage_bytes": 0}),
+                    json.dumps({**record, "kind": "HostContiguity"})):
+            with self.subTest(log=bad), self.assertRaises(RuntimeError):
+                capacity_runner.extract_classification(bad, "a" * 40, "b" * 64, "a" * 40)
+        with self.assertRaises(RuntimeError):
+            capacity_runner.extract_classification(log, "c" * 40, "b" * 64, "a" * 40)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,27 @@ def pressure_proof(metrics: dict, a: dict, b: dict, capacity: int) -> int:
     return demand - free
 
 
+def extract_classification(log: str, source: str, binary: str, delta: str) -> dict:
+    require(re.fullmatch(r"[0-9a-f]{40}", delta or "") is not None and source == delta and
+            re.fullmatch(r"[0-9a-f]{64}", binary) is not None,
+            "classification binary must be the clean diagnostic commit")
+    records = []
+    for line in log.splitlines():
+        try: record = json.loads(line)
+        except ValueError: continue
+        if isinstance(record, dict) and record.get("schema") == "ninfer-export-host-classification/1":
+            records.append(record)
+    require(len(records) == 1, "expected exactly one native Host refusal classification")
+    record = records[0]
+    require(record.get("base_sha") == BASE and
+            record.get("native_site") == "StateImageStore::prepare_host_export" and
+            record.get("kind") == "HostCapacity" and
+            type(record.get("shortage_bytes")) is int and record["shortage_bytes"] > 0,
+            "diagnostic did not classify the predecessor byte-shortage site")
+    return {key: record[key] for key in ("base_sha", "native_site", "kind", "shortage_bytes")} | {
+        "source_sha": source, "binary_sha256": binary, "diagnostic_delta_sha": delta}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)
@@ -93,11 +114,16 @@ def main() -> int:
     parser.add_argument("--roomy-host-mib", type=int, default=16384)
     parser.add_argument("--frontier-tolerance", type=int, default=64)
     parser.add_argument("--port", type=int, default=18132)
-    parser.add_argument("--expect-defect", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--expect-defect", action="store_true")
+    mode.add_argument("--classify", action="store_true",
+                      help="run instrumented predecessor and extract binary-bound native evidence")
+    parser.add_argument("--diagnostic-delta-sha")
     parser.add_argument("--predecessor-classification", type=Path,
                         help="binary-bound classification-only diagnostic evidence for the predecessor")
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
+    defect_mode = args.expect_defect or args.classify
     if args.artifact is None:
         print("SKIP: explicit real-model artifact is required")
         return 77
@@ -110,19 +136,24 @@ def main() -> int:
     version = subprocess.run([str(args.server), "--version"], check=True, capture_output=True, text=True).stdout.strip()
     source, upstream = build_provenance(version)
     classification = None
+    if args.classify:
+        require(args.predecessor_classification is not None and
+                args.diagnostic_delta_sha == source,
+                "classification output and exact diagnostic commit are required")
     if args.expect_defect:
         require(args.predecessor_classification is not None,
                 "predecessor red requires native refusal-site evidence, not just reason=capacity")
         classification = json.loads(args.predecessor_classification.read_text(encoding="utf-8"))
         require(classification.get("base_sha") == BASE and classification.get("binary_sha256") == binary_sha and
                 classification.get("source_sha") == source and
+                classification.get("diagnostic_delta_sha") == source and
                 classification.get("native_site") == "StateImageStore::prepare_host_export" and
                 classification.get("kind") == "HostCapacity" and
                 re.fullmatch(r"[0-9a-f]{40}", classification.get("diagnostic_delta_sha", "")) is not None,
                 "missing binary-bound classification-only predecessor instrumentation evidence")
     receipt = {"artifact_type": "ninfer-serve-shutdown-capacity-proof/1", "source": source,
                "upstream_base_sha": upstream, "binary_sha256": binary_sha, "artifact_sha256": artifact_sha,
-               "expect_defect": args.expect_defect, "production_path": True,
+               "expect_defect": defect_mode, "classification_only": args.classify, "production_path": True,
                "fixture": {"extra_device_state_slots": args.device_state_slots, "spec": args.spec,
                            "prompt_lines": args.prompt_lines, "kv_capacity": args.kv_capacity}}
     with proof_workdir() as root:
@@ -243,14 +274,21 @@ def main() -> int:
             receipt["host_shortage_bytes"] = shortage
             pointer = checkpoints / "sessions" / sessions[0] / "current"
             a_pointer = digest_file(pointer)
-            if args.expect_defect:
+            if defect_mode:
+                receipt["stop"] = active.stop({"saved": 0, "skipped": 1, "refused": 1, "complete": False})
+                if args.classify:
+                    classification = extract_classification(
+                        active.log_path.read_text(encoding="utf-8", errors="replace"),
+                        source, binary_sha, args.diagnostic_delta_sha)
                 require(classification.get("shortage_bytes") == shortage, "native diagnostic deficit differs from measured fixture")
                 receipt["predecessor_classification"] = {key: classification[key] for key in (
                     "base_sha", "source_sha", "binary_sha256", "diagnostic_delta_sha", "native_site",
                     "kind", "shortage_bytes")}
-                receipt["stop"] = active.stop({"saved": 0, "skipped": 1, "refused": 1, "complete": False})
                 require(any(v.get("operation") == "save" and v.get("reason") == "capacity" and
                             not v.get("committed") for v in active.receipts()), "predecessor did not refuse native Capacity")
+                if args.classify:
+                    args.predecessor_classification.write_text(
+                        json.dumps(classification, sort_keys=True, indent=2) + "\n", encoding="utf-8")
                 active = None
             else:
                 receipt["stop"] = active.stop({"saved": 1, "skipped": 1, "refused": 0, "complete": True})

@@ -482,6 +482,34 @@ That JSON has `base_sha`, `source_sha`, `binary_sha256`, `diagnostic_delta_sha` 
 separately identified instrumentation commit), `native_site` equal to
 `StateImageStore::prepare_host_export`, `kind` equal to `HostCapacity`, and measured
 `shortage_bytes`. A public Capacity reason alone is not the required refusal-site proof.
+The diagnostic-only branch `p17/78-predecessor-classification` has head
+`a73f4fa02fa1d81b934a109fc66f4abd21eb51ec`: exactly that predecessor plus a JSON
+stderr record at its existing failed Host reservation. It does not change the return,
+allocation or copy path. Build it cleanly, then use the **candidate's runner** for all
+three commands below. `--classify` executes the calibrated predecessor fixture and
+extracts its native log into the binary-bound JSON; it rejects absent, duplicate,
+non-byte-shortage or wrong-source diagnostics.
+
+```sh
+: "${NINFER_TEST_ARTIFACT:?select the authorized artifact}"
+: "${NINFER_TEST_DEVICE_STATE_SLOTS:?select extra slots for this artifact/backend}"
+: "${NINFER_PREDECESSOR_SERVER:?select the clean diagnostic binary}"
+: "${NINFER_CANDIDATE_SERVER:?select the clean candidate binary}"
+export NINFER_TEST_ARTIFACT NINFER_TEST_DEVICE_STATE_SLOTS
+export NINFER_TEST_SPEC="${NINFER_TEST_SPEC:-dflash2}"
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_PREDECESSOR_SERVER" --classify \
+  --diagnostic-delta-sha a73f4fa02fa1d81b934a109fc66f4abd21eb51ec \
+  --predecessor-classification predecessor-classification.json --receipt classification-proof.json
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_PREDECESSOR_SERVER" --expect-defect \
+  --predecessor-classification predecessor-classification.json --receipt predecessor-red.json
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_CANDIDATE_SERVER" --receipt candidate-green.json
+```
+
+Keep all geometry/backend options identical across those invocations. The red command
+uses the same instrumented binary, not a rebuild or an uninstrumented substitute.
 The runner compares that deficit with its calibrated pre-stop metrics. No predecessor
 or candidate GPU result is implied by host CI. Candidate green requires exact shutdown
 totals, positive reclaimed owners/bytes, deterministic native restore, an unchanged and

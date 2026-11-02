@@ -744,7 +744,7 @@ public:
     // Like native checkpoint storage, a record pinned by an export lease cannot be erased.
     [[nodiscard]] bool release_checkpoint(Checkpoint checkpoint) noexcept {
         if (!valid_checkpoint(checkpoint) || records_[checkpoint.index].pins != 0) { return false; }
-        if (zero_arena_gain && checkpoint.index == 0)
+        if (zero_arena_gain && checkpoint.index == 1)
             retained_extent_bytes_ += records_[checkpoint.index].host_bytes;
         records_[checkpoint.index].valid = false;
         return true;
