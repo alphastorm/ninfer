@@ -67,9 +67,9 @@ Round 2 confirmed the held-stop recovery class again; it was not another green p
 
 ## 2. Verified baseline
 
-All links below pin exact ranges at the examined commit. Approximate preparation
-line numbers have been replaced, not copied. Function names identify the affected
-boundaries; these observations are not claims that the proposals already exist.
+All links below pin exact ranges at the examined commit. Function names identify
+the affected boundaries; these observations are not claims that the proposals
+already exist.
 
 | Evidence | Current behavior |
 |---|---|
@@ -386,8 +386,8 @@ completed restoration are the guards making that cleanup-only path safe. A recor
 contradicting those guards refuses cleanup rather than re-entering restoration.
 
 A snapshot is not, by itself, exclusion from a future launch. The retained run
-fence in steps 2–4 closes the managed task-retry window omitted by the preparation
-plan. A late task cannot read candidate state and then spawn after restoration:
+fence in steps 2–4 closes the managed task-retry window that a snapshot-only
+design leaves open. A late task cannot read candidate state and then spawn after restoration:
 Run acquires run.lock **before** reading state (E7). External controller calls,
 including Start, are never made while the installer owns their action/run locks.
 
@@ -567,13 +567,13 @@ terminate behavior remains scoped as above. Package bytes will change only in th
 implementation/release, requiring the normal rebuild and affected release
 qualifications, not a retroactive patch to the earlier published package.
 
-## 11. Corrections to the preparation plan
+## 11. Design choices and rejected variants
 
-The preparation plan is context, not authority. This document deliberately changes:
+These choices replace simpler variants that would reintroduce the held classes:
 
-1. **Exact anchors and caller inventory.** No approximate offsets; qualification
-   Stop callers are enumerated in §2. The baseline writes runtime at 1335/1339/1350,
-   and action-lock acquisition is 300 seconds, not the proposed leaf's 60 seconds.
+1. **Callers are enumerated, not assumed.** §2 lists every qualification Stop
+   caller. The baseline writes runtime at 1335/1339/1350, and action-lock
+   acquisition waits 300 seconds, longer than the leaf lock's 60 seconds.
 2. **No unsafe “held runtime is harmless” exception.** Installer requires candidate
    runtime absent, including hold-plus-runtime crash windows, before *either*
    controller generation starts. Corrupt runtime never counts as absent.
@@ -593,9 +593,9 @@ The preparation plan is context, not authority. This document deliberately chang
 7. **Real test scheduling.** Two processes and parent-controlled barriers, not a
    writer waiting for an operation blocked by its own lock; real Start/Run for the
    restored incumbent, not a sentinel substituted for lifecycle code.
-8. **Qualification recovery is in scope.** Unlike the plan's “no change” proposal,
-   final restoration must finish safe incumbent recovery on held scratch Stop
-   while keeping qualification failed. All evidence/admission Stops remain strict.
+8. **Qualification recovery is in scope.** Rather than leaving the qualification
+   caller unchanged, final restoration must finish safe incumbent recovery on held
+   scratch Stop while keeping qualification failed. All evidence/admission Stops remain strict.
 
 ## 12. Implementation order and open questions
 
