@@ -89,7 +89,8 @@ DurableCheckpointStats checkpoint_stats() {
 struct ExportProgram {
     struct Usage { struct { std::size_t host_bytes = 0; } occupied; };
     Usage physical_usage() const { return {}; }
-    std::size_t release_redundant_host(std::span<const int>) { return 0; }
+    unsigned redundant_calls = 0;
+    std::size_t release_redundant_host(std::span<const int>) { ++redundant_calls; return 0; }
     struct Image {
         bool device = false;
         unsigned readers = 0;
@@ -97,6 +98,7 @@ struct ExportProgram {
     };
     std::vector<Image> images;
     bool refuse_export = false;
+    bool host_refusal = false;
     unsigned export_acquisitions = 0;
     unsigned export_retirements = 0;
     bool off_worker_retirement = false;
@@ -113,7 +115,9 @@ struct ExportProgram {
         ExportProgram* owner = nullptr;
         std::vector<int> handles;
         std::thread::id worker;
+        bool host_refusal = false;
         explicit Lease(ExportProgram& program, std::span<const int> points) {
+            host_refusal = program.host_refusal;
             if (program.refuse_export) { return; }
             handles.assign(points.begin(), points.end());
             owner = &program;
@@ -123,7 +127,7 @@ struct ExportProgram {
         }
         Lease(Lease&& other) noexcept
             : owner(std::exchange(other.owner, nullptr)), handles(std::move(other.handles)),
-              worker(other.worker) {}
+              worker(other.worker), host_refusal(other.host_refusal) {}
         ~Lease() {
             if (owner) {
                 owner->off_worker_retirement |= std::this_thread::get_id() != worker;
@@ -136,8 +140,8 @@ struct ExportProgram {
         }
         DurableReason reason() const { return owner ? DurableReason::None : DurableReason::Capacity; }
         enum class HostKind { Prepared, HostCapacity, HostContiguity };
-        HostKind host_shortage_kind() const { return HostKind::Prepared; }
-        std::size_t host_shortage_bytes() const { return 0; }
+        HostKind host_shortage_kind() const { return host_refusal ? HostKind::HostCapacity : HostKind::Prepared; }
+        std::size_t host_shortage_bytes() const { return host_refusal ? 1 : 0; }
         DurableExportResult write(ContinuationCheckpointWriter& writer) {
             if (!owner) { return {.reason = DurableReason::Capacity}; }
             const std::array<std::byte, 1> bytes{};
@@ -395,6 +399,12 @@ public:
     template <class Function>
     auto on_worker(Function&& function) {
         return checkpoint_call(std::forward<Function>(function));
+    }
+    void run_pressure() {
+        on_worker([&] {
+            PressureCheckpointVictim victim{"first", "turn"};
+            (void)checkpoint_pressure({&victim, 1});
+        });
     }
     // Restore whose epoch was captured before its disk load; None means Imported.
     DurableReason restore_captured(const std::string& session, DurableSessionEpoch captured) {
@@ -669,6 +679,33 @@ void evicted_session_gate_retires_and_resident_one_stays() {
             "a sweep dropped the committed endpoint of a resident session");
 }
 
+void pressure_callback_export_does_not_reclaim() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    struct Handler final : PressureCheckpointHandler {
+        std::function<void()> callback;
+        unsigned calls = 0;
+        void save_before_eviction(std::span<PressureCheckpointVictim>) noexcept override {
+            ++calls;
+            callback();
+        }
+    };
+    auto handler = std::make_shared<Handler>();
+    DurableExportResult result;
+    NullWriter writer;
+    handler->callback = [&] {
+        result = core.export_session("first", "turn", writer, {}, DurableSaveIntent::Explicit);
+    };
+    core.set_pressure_checkpoint_handler(handler);
+    core.on_worker([&] { program.refuse_export = true; program.host_refusal = true; });
+    core.run_pressure();
+    require(handler->calls == 1 && result.reason == DurableReason::Capacity &&
+                result.reclaim.prepare_attempts == 1 && !result.reclaim.considered &&
+                program.redundant_calls == 0,
+            "inline pressure save recursively changed an outer quoted plan");
+}
+
 void restore_lookup_pins_its_gate_through_sweeps() {
     ExportProgram program;
     AdapterFixture<ExportContract> core(program);
@@ -703,6 +740,7 @@ int main() {
          [] { export_retirement_survives_allocation_failure(true, true); }},
         {"export_command_allocation_failure", export_command_allocation_failures_precede_native_lease},
         {"overlapping_exports", overlapping_exports_retain_progress_until_last_release},
+        {"pressure_callback_export", pressure_callback_export_does_not_reclaim},
         {"genuine_capacity", genuine_capacity_and_unprepared_export_do_not_defer},
         {"unseen_session_gates", unseen_sessions_leave_bounded_gates},
         {"evicted_session_gate", evicted_session_gate_retires_and_resident_one_stays},

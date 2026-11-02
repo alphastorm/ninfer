@@ -282,6 +282,11 @@ DurableEngineImport::~DurableEngineImport() = default;
 DurableImportResult DurableEngineImport::commit() noexcept { std::terminate(); }
 void DurableEngineImport::abort() noexcept { std::terminate(); }
 }
+namespace ninfer::serve {
+std::string resolve_public_model_id(const ServeOptions& options, std::string_view artifact_model_name) {
+    return options.model_id_override.value_or(std::string(artifact_model_name));
+}
+}
 int main() {
     try {
         final_second_pass();

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import secrets
 import signal
 import subprocess
@@ -13,6 +15,11 @@ class ManagedProcess:
         if os.name == "nt":
             self.stop_event = "Local\\NInfer-Serve-Stop-" + secrets.token_hex(16)
             argv = [*argv, "--stop-event", self.stop_event]
+            if "--config-sha256" in argv:
+                at = argv.index("--config-sha256")
+                projection = argv[:at] + argv[at + 2:]
+                argv[at + 1] = hashlib.sha256(
+                    json.dumps(projection, separators=(",", ":")).encode()).hexdigest()
         self.child = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
 
     def stop(self, timeout: int = 180) -> int:

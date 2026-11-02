@@ -249,7 +249,7 @@ void unavailable_and_fragmented(DeviceContext& device) {
     right.reset();
     // Use a separate physical store so logical source slots have one owner.
     StateImageStorage physical({f.backing.data(), f.backing.size(), device.device()}, f.schema);
-    Store images(physical, &fragmented, 3);
+    Store images(physical, &fragmented, 8);
     const auto image = images.reserve_destination();
     require(image.has_value(), "fragmentation source");
     images.complete_initialization(*image);

@@ -247,6 +247,7 @@ public:
                 throw std::logic_error("proven export release changed before commit");
             forget(handle);
         }
+        std::erase_if(owners_, [](const auto& owner) { return !owner.active && owner.points.empty(); });
         std::erase_if(cursor.victims, [&](const auto& entry) { return contains(closure, entry.handle); });
         return true;
     }

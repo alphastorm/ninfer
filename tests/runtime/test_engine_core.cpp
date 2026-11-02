@@ -1164,7 +1164,8 @@ struct Outcome {
 class IndexReader final : public rt::ContinuationCheckpointReader {
 public:
     bool fresh_available = true, readable = true, complete = true;
-    std::string digest = std::string(64, 'a');
+    std::string digest = "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d";
+    mutable bool consumed = false;
     [[nodiscard]] std::optional<std::uint64_t> file_size(std::string_view path) const override {
         return path == "engine/index.cbor" ? std::optional<std::uint64_t>(1) : std::nullopt;
     }
@@ -1175,11 +1176,12 @@ public:
     }
 
     bool read_file(std::string_view, std::uint64_t, std::span<std::byte> destination) const override {
+        consumed = true;
         std::fill(destination.begin(), destination.end(), std::byte{});
         return readable;
     }
 
-    [[nodiscard]] bool verify_complete() const override { return complete; }
+    [[nodiscard]] bool verify_complete() const override { return complete && readable && consumed; }
 
     [[nodiscard]] rt::DurableReason failure_reason() const noexcept override {
         return rt::DurableReason::None;
@@ -1195,10 +1197,12 @@ class VictimOracle final : public rt::ReclaimableSessionOracle {
 public:
     mutable std::size_t calls = 0;
     bool missing = false, missing_current = false, changed = false;
+    std::string required_tag;
     IndexReader reader;
     std::shared_ptr<const rt::ContinuationCheckpointReader>
-    pin_recoverable(std::string_view, std::string_view) const noexcept override {
+    pin_recoverable(std::string_view, std::string_view tag) const noexcept override {
         ++calls;
+        if (!required_tag.empty() && required_tag != tag) return {};
         if (missing || (missing_current && calls % 2 == 0)) return {};
         auto pin = std::make_shared<IndexReader>(reader);
         if (changed && calls % 2 == 0) pin->digest = std::string(64, 'b');
@@ -1707,7 +1711,7 @@ void export_proven_victim() {
 }
 
 void export_proof_failures_and_intents() {
-    for (unsigned failure = 0; failure != 9; ++failure) {
+    for (unsigned failure = 0; failure != 10; ++failure) {
         Harness h(1, true);
         acknowledged_turn(h, "victim", "a");
         acknowledged_turn(h, kSession, "b");
@@ -1718,6 +1722,7 @@ void export_proof_failures_and_intents() {
         oracle->reader.complete = failure != 4;
         oracle->missing_current = failure == 5;
         oracle->changed = failure == 6;
+        if (failure == 9) oracle->required_tag = "newer-tag";
         if (failure) h.core().set_reclaimable_session_oracle(oracle);
         h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; });
         const auto intent = failure == 7 ? rt::DurableSaveIntent::Automatic :
@@ -1726,7 +1731,7 @@ void export_proof_failures_and_intents() {
         require(result.reason == rt::DurableReason::Capacity && result.reclaim.prepare_attempts == 1 &&
                     result.reclaim.reclaimed_owners == 0 && result.reclaim.reclaimed_host_bytes == 0,
                 "unproved or policy-disabled victim was reclaimed");
-        if (failure >= 7) require(oracle->calls == 0, "automatic/survivor save performed disk proof");
+        if (failure == 7 || failure == 8) require(oracle->calls == 0, "automatic/survivor save performed disk proof");
         require_durable(h.observed_stats(), {.catalog = 2, .host = 2}, "declined victim remains resident");
     }
 }
@@ -1807,22 +1812,48 @@ void export_zero_progress_and_residual() {
     }
 }
 
-void export_pressure_reentry() {
-    Harness h(1, true);
-    acknowledged_turn(h, "victim", "a");
-    acknowledged_turn(h, kSession, "b");
-    auto handler = std::make_shared<PendingHandler>();
-    rt::DurableExportResult result;
-    handler->callback = [&] { result = h.save("b", kSession, rt::DurableSaveIntent::Explicit); };
-    h.core().set_pressure_checkpoint_handler(handler);
-    h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; p.redundant_bytes = 1; });
-    h.core().checkpoint_call([&] {
-        rt::PressureCheckpointVictim victim{"victim", "a"};
-        (void)h.core().checkpoint_pressure({&victim, 1});
-    });
-    require(handler->calls == 1 && result.reason == rt::DurableReason::Capacity &&
-                result.reclaim.prepare_attempts == 1 && !result.reclaim.considered,
-            "inline pressure save recursively changed an outer quoted plan");
+void export_exception_and_writer_epoch() {
+    {
+        Harness h(1, true);
+        acknowledged_turn(h, "first", "a");
+        acknowledged_turn(h, "second", "b");
+        acknowledged_turn(h, kSession, "c");
+        h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+        unsigned validations = 0;
+        h.configure([&](Program& p) {
+            p.host_capacity = 3 * kCheckpointHostBytes;
+            p.zero_arena_gain = true;
+            p.validation_callback = [&] { if (++validations == 2) throw std::bad_alloc(); };
+        });
+        const auto clock = h.core().checkpoint_progress();
+        const auto result = h.save("c", kSession, rt::DurableSaveIntent::Final);
+        require(result.reason == rt::DurableReason::Capacity && result.reclaim.prepare_attempts == 1 &&
+                    result.reclaim.reclaimed_owners == 1 && result.reclaim.reclaimed_host_bytes == 0 &&
+                    result.proof_pins.size() == 2 && h.core().checkpoint_progress() == clock,
+                "optional allocation failure lost earlier release pins or fabricated progress");
+        require_durable(h.observed_stats(), {.catalog = 2, .host = 3},
+                        "catalog mutation before optional reclaim failure");
+    }
+    {
+        Harness h(1, true);
+        acknowledged_turn(h, "victim", "a");
+        acknowledged_turn(h, kSession, "b");
+        h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+        h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; });
+        CallbackWriter writer([&] {
+            // Waiting for this native work proves the writer is not holding execution.
+            acknowledged_turn(h, kSession, "newer");
+        });
+        const auto result = h.core().export_session(
+            kSession, "b", writer, {}, rt::DurableSaveIntent::Explicit);
+        bool published = false;
+        const auto final = h.core().publish_export(kSession, "b", result.captured_epoch,
+            [&] { published = true; return true; });
+        require(result.state == rt::DurableExportState::Exported && result.proof_pins.size() == 2 &&
+                    result.reclaim.reclaimed_owners == 1 && !published &&
+                    final.state == rt::DurableExportState::Stale,
+                "writer assignment discarded reclaim evidence or bypassed epoch publication");
+    }
 }
 
 } // namespace
@@ -1856,7 +1887,7 @@ int main() {
         Case{"export_proof_failures_and_intents", export_proof_failures_and_intents},
         Case{"export_classification_and_contiguity", export_classification_and_contiguity},
         Case{"export_zero_progress_and_residual", export_zero_progress_and_residual},
-        Case{"export_pressure_reentry", export_pressure_reentry},
+        Case{"export_exception_and_writer_epoch", export_exception_and_writer_epoch},
     };
     int failures = 0;
     for (const auto& test : cases) {

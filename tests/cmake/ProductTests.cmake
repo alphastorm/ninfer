@@ -51,10 +51,14 @@ ninfer_add_test(ninfer_session_checkpoint_export_test
           "${PROJECT_SOURCE_DIR}/src/serve/opaque_id.cpp"
   LIBRARIES ninfer_session_checkpoint_store)
 set_tests_properties(ninfer_session_checkpoint_export_test PROPERTIES TIMEOUT 30)
+if(WIN32)
+  target_link_libraries(ninfer_session_checkpoint_export_test PRIVATE bcrypt advapi32)
+endif()
 
 add_test(NAME ninfer_serve_restore_runner_test
   COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_runner.py")
 set_tests_properties(ninfer_serve_restore_runner_test PROPERTIES LABELS "host")
+ninfer_test_host_lanes(ninfer_serve_restore_runner_test ninfer_session_checkpoint_export_test bounded native)
 
 if(TARGET ninfer-serve)
   add_test(NAME ninfer_serve_restore_real_test
