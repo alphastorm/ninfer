@@ -78,17 +78,171 @@ function Resolve-LifecycleTaskName([object]$Spec, [string]$Root, [string]$Suffix
 }
 
 function Write-JsonAtomic([string]$Path, [object]$Value) {
+    if ([IO.Path]::GetFileName($Path) -cin @('runtime.json', 'shutdown-holds.json', 'last-stop.json') -or
+        [IO.Path]::GetFileName($Path) -clike 'shutdown-reconcile-*.json') { Assert-HoldsLock }
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
-    try {
-        [IO.File]::WriteAllText(
-            $temporary,
-            ($Value | ConvertTo-Json -Depth 20),
-            [Text.UTF8Encoding]::new($false)
-        )
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 24),
+                           [Text.UTF8Encoding]::new($false))
+    # Keep an interrupted first publication visible to strict readers. Replacement never
+    # unlinks a destination: concurrent readers see the complete old or complete new file.
+    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
+    else { [IO.File]::Move($temporary, $Path) }
+}
+
+function Invoke-WithHoldsLock([ScriptBlock]$Body) {
+    if (Get-Variable NInferHoldsHeld -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        throw 'launch-attribution lock is not reentrant'
     }
-    finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    $handle = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ($null -eq $handle) {
+        try {
+            $handle = [IO.File]::Open((Join-Path $StateRoot 'holds.lock'),
+                [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'launch-attribution lock acquisition timed out' }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    $script:NInferHoldsHeld = $true
+    try { & $Body }
+    finally { $script:NInferHoldsHeld = $false; $handle.Dispose() }
+}
+
+function Assert-HoldsLock {
+    if (-not (Get-Variable NInferHoldsHeld -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+        throw 'launch-attribution mutation requires holds.lock'
+    }
+}
+
+function Read-AttributionJson([string]$Name) {
+    Assert-HoldsLock
+    $path = Join-Path $StateRoot $Name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if ((Test-Path -LiteralPath $path) -or
+            @(Get-ChildItem -LiteralPath $StateRoot -Filter "$Name.*.tmp" -Force).Count -ne 0) {
+            throw "missing or invalid attribution destination with interrupted publication: $Name"
+        }
+        return $null
+    }
+    $record = Read-JsonFile $path
+    if ($null -eq $record -or $record -isnot [pscustomobject]) {
+        throw "invalid attribution object: $Name"
+    }
+    return $record
+}
+
+function Get-AttributionField([object]$Record, [string]$Name) {
+    if ($null -eq $Record) { return $null }
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -ne $property) { return ,$property.Value }
+    return $null
+}
+
+function Get-LaunchRoot([string]$Id) {
+    if ($Id -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw 'invalid launch release id' }
+    return Join-Path (Join-Path $StateRoot 'releases') $Id
+}
+
+function Get-LaunchKey([object]$Runtime) {
+    $key = [string](Get-AttributionField $Runtime 'launch_id')
+    if ($key -cnotmatch '^[0-9a-f]{32}$') {
+        if ([string](Get-AttributionField $Runtime 'managed_stop') -ceq 'stop-event' -or
+            -not [string]::IsNullOrEmpty($key)) { throw 'invalid stop-event launch id' }
+        return $null
+    }
+    return $key
+}
+
+function Get-RuntimeStrict {
+    $runtime = Read-AttributionJson 'runtime.json'
+    if ($null -eq $runtime) { return $null }
+    if ([string](Get-AttributionField $runtime 'artifact_type') -cne 'ninfer_windows_runtime_state' -or
+        (Get-AttributionField $runtime 'schema_version') -cnotin @(1, 2) -or
+        $null -eq $runtime.PSObject.Properties['pid'] -or
+        $null -eq $runtime.PSObject.Properties['start_time_utc_ticks']) {
+        throw 'invalid runtime attribution envelope'
+    }
+    Get-LaunchRoot ([string]$runtime.release_id) | Out-Null
+    Get-LaunchKey $runtime | Out-Null
+    return $runtime
+}
+
+function Assert-SameLaunch([object]$Expected, [object]$Current) {
+    if ($null -eq $Expected -or $null -eq $Current) {
+        if ($null -ne $Expected -or $null -ne $Current) { throw 'runtime launch changed during proof' }
+        return
+    }
+    if ([string]$Expected.release_id -cne [string]$Current.release_id -or
+        [string](Get-LaunchKey $Expected) -cne [string](Get-LaunchKey $Current)) {
+        throw 'runtime launch changed during proof'
+    }
+    if ($null -eq (Get-LaunchKey $Expected) -and
+        ($Expected.pid -ne $Current.pid -or
+         $Expected.start_time_utc_ticks -ne $Current.start_time_utc_ticks)) {
+        throw 'legacy runtime process attribution changed during proof'
+    }
+}
+
+function Get-ShutdownHolds {
+    $envelope = Read-AttributionJson 'shutdown-holds.json'
+    if ($null -eq $envelope) {
+        return [pscustomobject]@{artifact_type='ninfer_windows_shutdown_holds';schema_version=1;holds=@()}
+    }
+    if ([string](Get-AttributionField $envelope 'artifact_type') -cne 'ninfer_windows_shutdown_holds' -or
+        (Get-AttributionField $envelope 'schema_version') -cne 1 -or
+        (Get-AttributionField $envelope 'holds') -isnot [array]) { throw 'invalid shutdown holds envelope' }
+    $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $envelope.holds) {
+        $key = [string](Get-AttributionField $entry 'launch_id')
+        $id = [string](Get-AttributionField $entry 'release_id')
+        $root = Get-LaunchRoot $id
+        if ($key -cnotmatch '^[0-9a-f]{32}$' -or -not $keys.Add($key) -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string]$entry.release_root),
+                                  $root, [StringComparison]::OrdinalIgnoreCase) -or
+            [string](Get-LaunchKey $entry.runtime) -cne $key -or
+            [string]$entry.runtime.release_id -cne $id -or
+            [string]$entry.runtime.managed_stop -cne 'stop-event' -or
+            [string]$entry.stop_receipt.artifact_type -cne 'ninfer_windows_managed_stop_receipt' -or
+            $entry.stop_receipt.schema_version -cne 1 -or
+            [string]$entry.stop_receipt.launch_id -cne $key -or
+            [string]$entry.stop_receipt.release_id -cne $id -or
+            [string]$entry.stop_receipt.mode -cne 'stop-event') {
+            throw 'invalid or conflicting shutdown hold binding'
+        }
+    }
+    return $envelope
+}
+
+function Get-StickyStopReceipt {
+    $receipt = Read-AttributionJson 'last-stop.json'
+    if ($null -ne $receipt -and
+        ([string](Get-AttributionField $receipt 'artifact_type') -cne 'ninfer_windows_managed_stop_receipt' -or
+         (Get-AttributionField $receipt 'schema_version') -cne 1)) { throw 'invalid managed-stop receipt' }
+    return $receipt
+}
+
+function Remove-RuntimeForLaunch([object]$Expected) {
+    Assert-HoldsLock
+    $current = Get-RuntimeStrict
+    Assert-SameLaunch $Expected $current
+    if ($null -ne $current) { Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force }
+}
+
+function Enter-LaunchFence([string]$Name, [int]$TimeoutSeconds = 60) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            return [IO.File]::Open((Join-Path $StateRoot ($Name + '.lock')),
+                [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw 'Stop the serving launch, then retry repair; managed launch exclusion timed out'
+            }
+            Start-Sleep -Milliseconds 100
+        }
     }
 }
 
@@ -247,7 +401,7 @@ function Get-PendingInstallTransactions([string]$TransactionsRoot) {
             [string]$transaction.journal_path -cne $journalPath) {
             throw "installer transaction journal envelope mismatch: $journalPath"
         }
-        if ([string]$transaction.status -cin @('in_progress', 'repair_required')) {
+        if ([string]$transaction.status -cin @('in_progress', 'repair_required', 'held_cleanup')) {
             Write-Output $transaction
         }
     }
@@ -260,10 +414,10 @@ function Get-TransactionFlag([object]$Transaction, [string]$Name) {
 
 function Get-TransactionCleanupTargets([object]$Transaction) {
     $descriptors = @(
-        [ordered]@{ field = 'release_root'; kind = 'candidate_release'; root = (Join-Path $StateRoot 'releases') },
         [ordered]@{ field = 'secret_directory'; kind = 'candidate_secret'; root = (Join-Path $StateRoot 'secrets') },
         [ordered]@{ field = 'cache_root'; kind = 'candidate_cache'; root = (Join-Path $StateRoot 'cache') },
-        [ordered]@{ field = 'stage_path'; kind = 'package_stage'; root = $StateRoot }
+        [ordered]@{ field = 'stage_path'; kind = 'package_stage'; root = $StateRoot },
+        [ordered]@{ field = 'release_root'; kind = 'candidate_release'; root = (Join-Path $StateRoot 'releases') }
     )
     foreach ($descriptor in $descriptors) {
         $property = $Transaction.PSObject.Properties[[string]$descriptor.field]
@@ -952,7 +1106,7 @@ function Stop-IncumbentForUpgrade(
     [object]$SelectedGpu
 ) {
     Set-TransactionFlag $Transaction 'incumbent_touched'
-    & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    Invoke-HoldAwareStop $controllerPath
     Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
 }
 
@@ -966,16 +1120,21 @@ function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$Sta
     if ((Get-TransactionFlag $Transaction 'state_activated') -and
         (Test-Path -LiteralPath $StatePath -PathType Leaf) -and
         [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
-        & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+        Invoke-HoldAwareStop (Get-TransactionController $Transaction $ControllerPath)
     }
+    Assert-TransactionCandidateCensus $Transaction
+}
+
+function Assert-TransactionCandidateCensus([object]$Transaction) {
     $releaseRoot = [string]$Transaction.release_root
     if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
         $expected = Join-Path (Join-Path $releaseRoot 'bin') 'ninfer-serve.exe'
         $running = @(foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
-                if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+                if ([string]::IsNullOrWhiteSpace([string](Get-AttributionField $entry 'ExecutablePath'))) {
                     $name = $entry.PSObject.Properties['Name']
-                    if ($null -ne $name -and [string]$name.Value -ieq [IO.Path]::GetFileName($expected)) {
-                        throw "cannot exclude an unattributed candidate server with an unreadable image path: $($name.Value) ($($entry.ProcessId))"
+                    if ($null -eq $name -or [string]::IsNullOrWhiteSpace([string]$name.Value) -or
+                        [string]$name.Value -ieq [IO.Path]::GetFileName($expected)) {
+                        throw "cannot exclude an unattributed candidate server with an unreadable image path: $(Get-AttributionField $entry 'Name') ($($entry.ProcessId))"
                     }
                     continue
                 }
@@ -989,6 +1148,67 @@ function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$Sta
     }
 }
 
+function Get-TransactionController([object]$Transaction, [string]$InstalledController) {
+    $packaged = Join-Path (Join-Path (Join-Path ([string]$Transaction.release_root) 'bin') 'lifecycle') 'Control-Release.ps1'
+    if (-not (Test-Path -LiteralPath $packaged -PathType Leaf)) {
+        throw 'candidate packaged controller is missing; retain its repair entrypoint and trees'
+    }
+    return $packaged
+}
+
+function Invoke-HoldAwareStop([string]$Controller) {
+    $arguments = @{Action='Stop';StateRoot=$StateRoot}
+    if ((Get-Command -Name $Controller).Parameters.ContainsKey('AllowHeld')) { $arguments['AllowHeld']=$true }
+    & $Controller @arguments | Out-Null
+}
+
+function Invoke-SuccessorSlotRetirement([object]$Transaction, [string]$InstalledController) {
+    $runtime = Invoke-WithHoldsLock { Get-ShutdownHolds | Out-Null; Get-RuntimeStrict }
+    if ($null -eq $runtime) { return }
+    $successor = Get-TransactionController $Transaction $InstalledController
+    if (-not (Get-Command -Name $successor).Parameters.ContainsKey('AllowHeld')) {
+        throw 'successor packaged controller lacks launch retirement support'
+    }
+    Invoke-HoldAwareStop $successor
+    Invoke-WithHoldsLock {
+        if ($null -ne (Get-RuntimeStrict)) { throw 'successor Stop left an unevaluated runtime slot' }
+    }
+}
+
+function Test-LifecycleRestored([object]$Transaction) {
+    return [string]$Transaction.phase -cin @('rollback_lifecycle_restored', 'repair_lifecycle_restored')
+}
+
+function Assert-TransactionCleanupRecords([object]$Transaction, [string]$StatePath,
+                                           [bool]$RefreshedIncumbent = $false) {
+    return Invoke-WithHoldsLock {
+        $holds = Get-ShutdownHolds
+        $runtime = Get-RuntimeStrict
+        $candidate = [string]$Transaction.instance_id
+        if ($null -ne $runtime -and [string]$runtime.release_id -ceq $candidate) {
+            throw 'candidate runtime is not retired; use the packaged managed Stop before cleanup'
+        }
+        $state = if (Test-Path -LiteralPath $StatePath -PathType Leaf) { Read-JsonFile $StatePath } else { $null }
+        if ($null -ne $state -and [string]$state.active_release -ceq $candidate) {
+            throw 'candidate still owns the installed lifecycle; cleanup refused'
+        }
+        if ($null -ne $state -and $null -ne $state.PSObject.Properties['releases'] -and
+            $null -ne $state.releases.PSObject.Properties[$candidate]) {
+            throw 'candidate remains installed after restoration; cleanup refused'
+        }
+        $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+        if (Test-Path -LiteralPath $leasePath) {
+            $lease = Read-JsonFile $leasePath
+            if (-not $RefreshedIncumbent -or $null -eq $state -or
+                [string]$lease.release_id -ceq $candidate -or
+                [string]$lease.release_id -cne [string]$state.active_release) {
+                throw 'GPU-owner lease attribution is unknown or candidate-owned; explicitly Stop the serving launch, then retry repair'
+            }
+        }
+        return @($holds.holds | Where-Object { [string]$_.release_id -ceq $candidate })
+    }
+}
+
 function Invoke-InstallTransactionRollback(
     [object]$Transaction,
     [string]$StatePath,
@@ -996,97 +1216,119 @@ function Invoke-InstallTransactionRollback(
     [string]$OwnerControllerPath,
     [ValidateSet('rollback', 'repair')][string]$Mode
 ) {
-    $failures = [Collections.Generic.List[string]]::new()
     $cleanupActions = [Collections.Generic.List[object]]::new()
-    Write-InstallEvent "${Mode}_started" "Installer $Mode started" ([ordered]@{
-            operation_id = [string]$Transaction.operation_id
-            phase = [string]$Transaction.phase
-        })
-
-    # Nothing is restored, deleted, or restarted until the candidate is proven quiescent: one that
-    # may still run keeps the lifecycle state, controller, trees, and lease that stop it.
-    try { Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath }
-    catch { $failures.Add("candidate quiescence: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    if ($failures.Count -eq 0) {
-        if (Get-TransactionFlag $Transaction 'state_activated') {
-            try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
-            catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        }
-        if (Get-TransactionFlag $Transaction 'controller_touched') {
-            try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
-            catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        }
-        if (Get-TransactionFlag $Transaction 'task_touched') {
-            try {
-                $taskXml = if ([bool]$Transaction.task_existed) {
-                    Get-Content -LiteralPath ([string]$Transaction.task_xml_path) -Raw -Encoding UTF8
-                }
-                else {
-                    $null
-                }
-                Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $taskXml
-            }
-            catch { $failures.Add("task restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        }
-        if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
-            try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
-            catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        }
-        if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
-            try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
-            catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-            try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
-            catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        }
+    $restored = Test-LifecycleRestored $Transaction
+    $heldStatus = [string]$Transaction.status -ceq 'held_cleanup'
+    $touched = $false
+    foreach ($flag in @('state_activated', 'controller_touched', 'task_touched',
+                        'owner_controller_touched', 'state_helpers_touched')) {
+        if (Get-TransactionFlag $Transaction $flag) { $touched = $true }
     }
-
-    # The candidate's trees are deleted, and the incumbent restarted, only over the restored
-    # lifecycle: against a state that still names the candidate, the restart would launch it.
-    if ($failures.Count -eq 0) {
-        $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
-        Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
-                operation_id = [string]$Transaction.operation_id
-                target_count = $cleanupTargets.Count
-                targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
-            })
-        foreach ($target in $cleanupTargets) {
-            try {
-                $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+    $actionFence = $null
+    $runFence = $null
+    $refreshedIncumbent = $false
+    $stage = 'candidate quiescence'
+    try {
+        # Child actions own/release action.lock themselves. Neutral retries never suppress a
+        # serving wrapper's post-run owner handback, including a restored older controller.
+        if (-not $restored) {
+            Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath
+            if ($touched -or (Get-TransactionFlag $Transaction 'incumbent_touched')) {
+                Invoke-SuccessorSlotRetirement $Transaction $ControllerPath
             }
-            catch {
-                $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+            if ($touched) {
+                $stage = 'lifecycle restoration'
+                $actionFence = Enter-LaunchFence 'action'
+                $runFence = Enter-LaunchFence 'run'
+                Assert-TransactionCandidateCensus $Transaction
+                Invoke-WithHoldsLock {
+                    Get-ShutdownHolds | Out-Null
+                    if ($null -ne (Get-RuntimeStrict)) { throw 'Stop the serving launch, then retry repair; runtime slot is not empty' }
+                    if (Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')) {
+                        throw 'GPU-owner lease must be retired by managed Stop before lifecycle restoration'
+                    }
+                }
+                $failures = [Collections.Generic.List[string]]::new()
+                foreach ($item in @(
+                    @('state_activated', $StatePath, 'state'),
+                    @('controller_touched', $ControllerPath, 'controller'),
+                    @('owner_controller_touched', $OwnerControllerPath, 'owner_controller'),
+                    @('state_helpers_touched', (Join-Path $StateRoot 'Protect-StateRoot.ps1'), 'state_helper'),
+                    @('state_helpers_touched', (Join-Path (Split-Path -Parent $OwnerControllerPath) 'Protect-StateRoot.ps1'), 'owner_state_helper')
+                )) {
+                    if (Get-TransactionFlag $Transaction ([string]$item[0])) {
+                        try { Restore-PersistedFileSnapshot ([string]$item[1]) $Transaction.snapshots.([string]$item[2]) }
+                        catch { $failures.Add("$($item[2]) restore: $($_.Exception.Message)") }
+                    }
+                }
+                if (Get-TransactionFlag $Transaction 'task_touched') {
+                    try {
+                        $xml = if ($Transaction.task_existed) { Get-Content -LiteralPath $Transaction.task_xml_path -Raw -Encoding UTF8 } else { $null }
+                        Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $xml
+                    }
+                    catch { $failures.Add("task restore: $($_.Exception.Message)") }
+                }
+                if ($failures.Count -ne 0) { throw [string]::Join('; ', $failures) }
             }
+            # Publish the milestone before releasing the restoration fence. Never overwrite it
+            # on a later Start, cleanup, or diagnostic failure.
+            Set-TransactionPhase $Transaction "${Mode}_lifecycle_restored"
+            $restored = $true
+            if ($null -ne $runFence) { $runFence.Dispose(); $runFence = $null }
+            if ($null -ne $actionFence) { $actionFence.Dispose(); $actionFence = $null }
         }
+        else { Assert-TransactionCandidateCensus $Transaction }
 
-        if (Get-TransactionFlag $Transaction 'incumbent_touched') {
-            try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
-            catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        $oldDiagnostics = @(Get-AttributionField $Transaction 'diagnostics')
+        $cleanupRetry = $oldDiagnostics.Count -ne 0 -and
+            @($oldDiagnostics | Where-Object { [string]$_ -notlike '* cleanup:*' }).Count -eq 0
+        if (-not $heldStatus -and -not $cleanupRetry -and
+            (Get-TransactionFlag $Transaction 'incumbent_touched')) {
+            $stage = 'incumbent restart'
+            # A fresh Start requires an empty slot. An idempotent Start after a crash may verify
+            # the same serving incumbent; it must never replay snapshots under its run lock.
+            & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null
+            $refreshedIncumbent = (Get-Command -Name $ControllerPath).Parameters.ContainsKey('AllowHeld')
         }
-    }
-
-    $cleanupArray = @($cleanupActions | ForEach-Object { $_ })
-    $diagnosticArray = @($failures | Select-Object -First 16 | ForEach-Object { [string]$_ })
-    Set-ObjectProperty $Transaction 'cleanup_actions' $cleanupArray
-    Set-ObjectProperty $Transaction 'diagnostics' $diagnosticArray
-    if ($failures.Count -eq 0) {
+        $stage = 'candidate cleanup'
+        $candidateHolds = @(Assert-TransactionCleanupRecords $Transaction $StatePath $refreshedIncumbent)
+        if ($candidateHolds.Count -ne 0) {
+            Set-ObjectProperty $Transaction 'status' 'held_cleanup'
+            $command = 'Use the retained packaged Control-Release.ps1 -Action Reconcile -ReleaseId ' +
+                [string]$Transaction.instance_id + ', then the updated Install-Release.ps1 -RepairInterruptedInstall'
+            Set-ObjectProperty $Transaction 'diagnostics' @($command)
+            Write-InstallTransaction $Transaction
+            throw $command
+        }
+        Assert-TransactionCandidateCensus $Transaction
+        foreach ($target in @(Get-TransactionCleanupTargets $Transaction)) {
+            # Validate fresh records before each destructive target; no tree operation under leaf.
+            if (@(Assert-TransactionCleanupRecords $Transaction $StatePath $refreshedIncumbent).Count -ne 0) {
+                throw 'candidate acquired held evidence before cleanup'
+            }
+            $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+        }
+        Set-ObjectProperty $Transaction 'cleanup_actions' @($cleanupActions | ForEach-Object { $_ })
+        Set-ObjectProperty $Transaction 'diagnostics' @()
         Set-ObjectProperty $Transaction 'status' $(if ($Mode -ceq 'repair') { 'repaired' } else { 'rolled_back' })
         Set-ObjectProperty $Transaction 'phase' $(if ($Mode -ceq 'repair') { 'repair_completed' } else { 'rollback_completed' })
         Write-InstallTransaction $Transaction
-        Write-InstallEvent "${Mode}_completed" "Installer $Mode completed" ([ordered]@{
-                operation_id = [string]$Transaction.operation_id
-                cleanup_action_count = $cleanupArray.Count
-            })
-        return $cleanupArray
+        return @($cleanupActions | ForEach-Object { $_ })
     }
-
-    Set-ObjectProperty $Transaction 'status' 'repair_required'
-    Set-ObjectProperty $Transaction 'phase' "${Mode}_incomplete"
-    Write-InstallTransaction $Transaction
-    Write-InstallEvent ($Mode + '_incomplete') "Installer $Mode requires repair" ([ordered]@{
-            operation_id = [string]$Transaction.operation_id
-            diagnostics = $diagnosticArray
-        })
-    throw "installer $Mode was incomplete: $([string]::Join('; ', $diagnosticArray))"
+    catch {
+        $failure = $_
+        $stillHeld = [string]$Transaction.status -ceq 'held_cleanup'
+        Set-ObjectProperty $Transaction 'status' $(if ($stillHeld) { 'held_cleanup' } else { 'repair_required' })
+        if (-not $restored) { Set-ObjectProperty $Transaction 'phase' "${Mode}_incomplete" }
+        Set-ObjectProperty $Transaction 'diagnostics' @("${stage}: $(Get-BoundedDiagnostic $failure.Exception.Message)")
+        Set-ObjectProperty $Transaction 'cleanup_actions' @($cleanupActions | ForEach-Object { $_ })
+        Write-InstallTransaction $Transaction
+        throw "installer $Mode was incomplete: ${stage}: $($failure.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $runFence) { $runFence.Dispose() }
+        if ($null -ne $actionFence) { $actionFence.Dispose() }
+    }
 }
 
 $StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
@@ -1541,6 +1783,27 @@ try {
             Stop-IncumbentForUpgrade $transaction $ownerControllerSource $successorOwnerPolicy $selectedGpu
         }
 
+        # Task state and an absent lease do not exclude a failure-retry wrapper. Retire an
+        # exited predecessor through successor verdict rules, then retain action/run through
+        # every installed lifecycle replacement, including the NoStart path.
+        Invoke-SuccessorSlotRetirement $transaction $controllerPath
+        $activationAction = $null
+        $activationRun = $null
+        try {
+        $activationAction = Enter-LaunchFence 'action'
+        $activationRun = Enter-LaunchFence 'run'
+        Assert-TransactionCandidateCensus $transaction
+        if ($null -ne $oldState) {
+            $oldRelease = $oldState.releases.PSObject.Properties[[string]$oldState.active_release].Value
+            Assert-TransactionCandidateCensus ([pscustomobject]@{release_root=[string]$oldRelease.release_root})
+        }
+        Invoke-WithHoldsLock {
+            Get-ShutdownHolds | Out-Null
+            if ($null -ne (Get-RuntimeStrict)) { throw 'runtime appeared before activation; managed Stop must retire it outside the fence' }
+            if (Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')) {
+                throw 'GPU-owner lease remains before activation; original managed Stop is required'
+            }
+        }
         Set-TransactionFlag $transaction 'state_helpers_touched'
         if ($null -ne $ownerControllerSource) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ownerControllerPath) | Out-Null
@@ -1577,6 +1840,11 @@ try {
 
         Set-TransactionFlag $transaction 'task_touched'
         Register-ReleaseTask $taskName $controllerPath
+        }
+        finally {
+            if ($null -ne $activationRun) { $activationRun.Dispose() }
+            if ($null -ne $activationAction) { $activationAction.Dispose() }
+        }
 
         if (-not $NoStart) {
             & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null

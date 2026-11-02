@@ -646,7 +646,9 @@ def require_product_protocol(value: dict[str, Any]) -> None:
 def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lane: Lane) -> dict[str, Any]:
     """Adapt completed receipts, not asserted flags, to the product's native lane shape."""
     if (state.get("status") != "passed" or summary.get("status") != "passed" or
-            summary.get("restoration", {}).get("status") != "passed"):
+            summary.get("restoration", {}).get("status") != "passed" or
+            state.get("restoration", {}).get("held_launch_ids") or
+            summary.get("restoration", {}).get("held_launch_ids")):
         raise LaneError("cannot stage an incomplete or unrestored native qualification")
     phases = state["phases"]
     if any(phases.get(name, {}).get("status") != "passed" for name in PHASES):
@@ -1035,8 +1037,7 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             if name == "restore":
-                self.state["restoration"] = {"status": "failed", "error": str(error)}
-                self._record_summary_restoration(self.state["restoration"])
+                self._record_summary_restoration({"status": "failed", "error": str(error)})
             self._save()
             raise
         receipt_path = self.receipt_dir / f"{name}.json"
@@ -1143,9 +1144,8 @@ $ompModels=@(@(($listing|ConvertFrom-Json).models)|ForEach-Object{{[string]$_.se
             # A crash after Stop must not turn an outstanding restart obligation into 'found stopped'.
             found["incumbent_was_running"] |= pending["incumbent_was_running"]
         self.state["found_incumbent"] = found
-        self.state["restoration"] = {"status": "required"}
         self.state["phases"].pop("restore", None)
-        self._record_summary_restoration(self.state["restoration"])
+        self._record_summary_restoration({"status": "required"})
         self._save()  # Write-ahead: no target-side stop is permitted before this succeeds.
         status = self.remote_json(
             self.config.target,
@@ -1958,6 +1958,13 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         return summary
 
     def _record_summary_restoration(self, restoration: dict[str, Any]) -> None:
+        held = sorted(set(self.state.get("restoration", {}).get("held_launch_ids", [])) |
+                      set(restoration.get("held_launch_ids", [])))
+        restoration = {**restoration, "held_launch_ids": held}
+        self.state["restoration"] = restoration
+        if held:
+            self.state["status"] = "failed"
+        self._save()
         path = self.config.state_dir / "qualification-summary.json"
         if not path.is_file():
             return
@@ -1967,7 +1974,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             for name in PHASES if name != "restore"
         )
         if restoration["status"] == "passed":
-            summary["status"] = "passed" if checks_passed else "failed"
+            summary["status"] = "passed" if checks_passed and not held else "failed"
         else:
             summary["status"] = "restore-failed" if restoration["status"] == "failed" else "restore-pending"
         summary["qualified_utc"] = (
@@ -1994,6 +2001,36 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         found = self.state.get("found_incumbent", {})
         incumbent = found.get("incumbent_state_root", "")
         restart_incumbent = bool(found.get("incumbent_was_running")) and bool(incumbent)
+        # Observe and durably record Stop separately: a later owner/census/Start failure must
+        # not discard a held final-save verdict, including on automatic cleanup re-entry.
+        stopped = self.remote_json(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$controller=Join-Path $root 'Control-Release.ps1'
+$held=@()
+if(Test-Path (Join-Path $root 'state.json')){{
+  $bound=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
+  if([string]$bound.task_name -cne {ps_quote(self.task_name)}){{throw 'refusing restoration through a foreign lifecycle task'}}
+}}
+if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{
+  $arguments=@{{Action='Stop';StateRoot=$root}}
+  if((Get-Command $controller).Parameters.ContainsKey('AllowHeld')){{$arguments.AllowHeld=$true}}
+  $stopped=&$controller @arguments|ConvertFrom-Json
+  $holdPath=Join-Path $root 'shutdown-holds.json'
+  if(Test-Path $holdPath){{
+    $envelope=Get-Content $holdPath -Raw|ConvertFrom-Json
+    if($envelope.artifact_type -cne 'ninfer_windows_shutdown_holds' -or $envelope.schema_version -ne 1){{throw 'invalid restoration hold envelope'}}
+    $held=@($envelope.holds|ForEach-Object{{[string]$_.launch_id}})
+  }}
+}}
+[ordered]@{{status='stop-observed';held_launch_ids=@($held)}}|ConvertTo-Json -Compress
+""",
+            timeout=900,
+        )
+        self._record_summary_restoration(
+            {"status": "required", "held_launch_ids": stopped.get("held_launch_ids", [])})
         status = self.remote_json(
             self.config.target,
             f"""
@@ -2006,7 +2043,6 @@ if(Test-Path (Join-Path $root 'state.json')){{
   if([string]$bound.task_name -cne $taskName){{throw 'refusing restoration through a foreign lifecycle task'}}
 }}
 $scoped=(Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)
-if($scoped){{&$controller -Action Stop -StateRoot $root|Out-Null}}
 $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if($null -ne $task -and $task.State -eq 'Running'){{throw 'managed wrapper did not finish restoration'}}
 $leaseActive=$false
@@ -2027,17 +2063,15 @@ $owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-O
         )
         if status["process_count"] != 0:
             raise LaneError("scratch-owned process remained after restoration")
-        self.state["restoration"] = status
         self._record_summary_restoration(status)
-        return status
+        return self.state["restoration"]
 
     def cleanup(self) -> None:
         try:
             receipt = self.restore()
             self.state["restoration"] = receipt
         except Exception as error:
-            self.state["restoration"] = {"status": "failed", "error": str(error)}
-            self._record_summary_restoration(self.state["restoration"])
+            self._record_summary_restoration({"status": "failed", "error": str(error)})
         self._save()
 
     def execute(self) -> dict[str, Any]:
@@ -2086,6 +2120,10 @@ $owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-O
             if not restored:
                 self.cleanup()
         self.state["status"] = "passed" if completed_all else "paused"
+        if self.state.get("restoration", {}).get("held_launch_ids"):
+            self.state["status"] = "failed"
+            self._save()
+            raise LaneError("managed final-save evidence remains held; safe restoration is not qualification")
         if completed_all:
             try:
                 lane_receipt = stage_lane_qualification(

@@ -128,8 +128,14 @@ function Assert-NInferProtectedStateTree([string]$Path) { }
 
 
 def committed_bytes(commit: str, path: str) -> bytes:
-    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, capture_output=True,
-                          check=True).stdout
+    result = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, capture_output=True)
+    if result.returncode:
+        # Release-driver jobs use shallow checkout; fetch this exact immutable fixture only.
+        subprocess.run(["git", "fetch", "--no-tags", "origin", commit], cwd=ROOT,
+                       capture_output=True, check=True)
+        result = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT,
+                                capture_output=True, check=True)
+    return result.stdout
 
 
 def ps_assignments(**values: object) -> str:
@@ -322,6 +328,9 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
     (root / "state.json").write_text(lifecycle(candidate, incumbent), encoding="utf-8")
     (snapshots / "state.bin").write_text(lifecycle(incumbent, None), encoding="utf-8")
     (root / "Control-Release.ps1").write_text(CANDIDATE_CONTROLLER_STUB, encoding="utf-8")
+    packaged = root / "releases" / candidate / "bin" / "lifecycle"
+    packaged.mkdir(parents=True)
+    (packaged / "Control-Release.ps1").write_text(CANDIDATE_CONTROLLER_STUB, encoding="utf-8")
     (snapshots / "controller.bin").write_text(INCUMBENT_CONTROLLER_STUB, encoding="utf-8")
     for path, name in ((root / "gpu-owner" / "Control-GpuOwner.ps1", "owner-controller"),
                        (root / "Protect-StateRoot.ps1", "state-helper"),
@@ -537,6 +546,7 @@ function Get-CimInstance {
 function Stop-ManagedProcess {
   if($StopOutcome -ceq 'survived'){throw 'owned server process did not stop'}
   $global:server.Kill();$global:server.WaitForExit();Remove-Item -LiteralPath $runtimePath
+  [pscustomobject]@{stopped=$true;held_launch_ids=@()}
 }
 try{
   $failure=$null
@@ -854,6 +864,9 @@ class QualificationRestorationTests(unittest.TestCase):
                         self.assertNotIn("restore", durable["phases"])
                         self.assertIn("-Action Stop", script)
                         raise qualify_native.LaneError("target refused after incumbent stop")
+                    if "status='stop-observed'" in script:
+                        self.assertIn("Parameters.ContainsKey('AllowHeld')", script)
+                        return {"status": "stop-observed", "held_launch_ids": []}
                     self.assertIn("$incumbentRoot='C:/incumbent'", script)
                     self.assertIn("if($true){if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot))", script)
                     return {"status": "passed", "process_count": 0}
@@ -866,7 +879,7 @@ class QualificationRestorationTests(unittest.TestCase):
                 subject.config.incumbent_state_root = "C:/not-the-recorded-root"
                 subject.cleanup()
                 self.assertEqual(subject.state["restoration"]["status"], "passed")
-                self.assertEqual(len(scripts), 3)
+                self.assertEqual(len(scripts), 4)
 
     def test_preflight_receipt_hides_operator_paths_and_host_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1250,6 +1263,43 @@ class QualificationRestorationTests(unittest.TestCase):
             summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
             self.assertEqual(summary["status"], "failed")
             self.assertIsNone(summary["qualified_utc"])
+
+    def test_held_restore_observation_survives_failure_and_empty_cleanup_reentry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.ready_for_receipt(Path(temporary))
+            subject.phase("receipt", subject.receipt)
+            key = "d" * 32
+            calls = []
+
+            def remote(host: str, script: str, **kwargs: object) -> dict:
+                calls.append(script)
+                if "status='stop-observed'" in script:
+                    return {"status": "stop-observed", "held_launch_ids": [key] if len(calls) == 1 else []}
+                durable = json.loads(subject.state_path.read_text())
+                self.assertEqual(durable["restoration"]["held_launch_ids"], [key])
+                if len(calls) == 2:
+                    raise qualify_native.LaneError("owner recovery interrupted after held observation")
+                return {"status": "passed", "process_count": 0}
+
+            subject.remote_json = remote
+            with self.assertRaisesRegex(qualify_native.LaneError, "recovery interrupted"):
+                subject.phase("restore", subject.restore)
+            self.assertEqual(subject.state["restoration"]["held_launch_ids"], [key])
+            subject.cleanup()
+            self.assertEqual(subject.state["restoration"]["status"], "passed")
+            self.assertEqual(subject.state["restoration"]["held_launch_ids"], [key])
+            self.assertEqual(subject.state["status"], "failed")
+            summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["restoration"]["status"], "passed")
+            self.assertEqual(summary["restoration"]["held_launch_ids"], [key])
+            self.assertIsNone(summary["qualified_utc"])
+            phase = subject.state["phases"]["receipt"]
+            self.assertEqual(phase["receipt_sha256"], qualify_native.sha256_file(subject.receipt_dir / "receipt.json"))
+            self.assertEqual(phase["receipt"]["receipt_sha256"],
+                             qualify_native.sha256_file(Path(temporary) / "qualification-summary.json"))
+            with self.assertRaises(qualify_native.LaneError):
+                qualify_native.stage_lane_qualification(subject.state, summary, subject.lane)
 
 
 class RestartFixtureTests(unittest.TestCase):
@@ -1971,12 +2021,14 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertRegex(terminate, r"try \{\s*\n\s*Stop-Process -Id \$live\.Id -Force")
         stop = body("Stop-ManagedProcess")
         # Fresh reads, not the opening snapshot, decide what still needs stopping.
-        self.assertEqual(stop.count("Get-OwnedProcess (Get-RuntimeState) $release"), 2)
-        self.assertEqual(terminate.count("Get-OwnedProcess (Get-RuntimeState) $Release"), 2)
-        self.assertIn("Stop-LaunchNow $release $taskName $receipt", stop)
+        self.assertIn("Get-OwnedProcess (Read-StopRuntime $runtime) $release", stop)
+        self.assertIn("Get-OwnedProcess $fresh $release", stop)
+        self.assertEqual(terminate.count("Read-StopRuntime $ExpectedRuntime"), 2)
+        self.assertIn("Stop-LaunchNow $release ([string]$state.task_name) $receipt $runtime", stop)
         # The receipt records every outcome, including the ones that throw.
-        self.assertRegex(stop, r"finally \{\s*\n(\s*.*\n)*?\s*Write-ManagedStopReceipt \$receipt")
-        self.assertIn("graceful_incomplete_shutdown", stop)
+        self.assertIn("Write-ManagedStopReceipt $receipt", stop)
+        self.assertIn("Complete-LaunchRetirement $runtime $release $receipt", stop)
+        self.assertIn("graceful_incomplete_shutdown", body("Set-StopReportVerdict"))
         # Concurrent mutating actions cannot interleave over the lease.
         for action in ("Start-ManagedRelease", "Stop-ManagedRelease"):
             self.assertIn(f"Invoke-WithActionLock {{ {action}", controller)
@@ -2000,7 +2052,9 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertEqual(request.count("catch"), 3)
         self.assertLess(stop.index("try {"), stop.index("Request-ManagedStop $eventName"))
         # A shutdown report is evidence only when it is this launch's.
-        self.assertIn("[string]$report.launch_id -cne $expectedLaunch", stop)
+        verdict = body("Set-StopReportVerdict")
+        self.assertIn("'launch_id') -ceq [string](Get-LaunchKey $Runtime)", verdict)
+        self.assertIn("Test-SamePath $path $expected", verdict)
         run = body("Invoke-Run")
         self.assertIn("launch_id = $launchId", run)
         # A launch that ended by request must not be retried by the scheduler.
@@ -2063,13 +2117,13 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         """The manager can only record what the server tells it: a flush that could not save a
         live session must fail the exit, not log and return zero."""
         controller = (WINDOWS / "Control-Release.ps1").read_text()
-        stop = ps_function(controller, "Stop-ManagedProcess")
-        self.assertIn("[int]$report.schema_version -ne 1", stop)
-        self.assertIn("$report.complete -isnot [bool]", stop)
-        self.assertIn("[int]$report.refused -ne 0", stop)
-        self.assertIn("sessions_skipped = $null", stop)
-        self.assertIn("$receipt.sessions_skipped = [int]$report.skipped", stop)
-        self.assertIn("graceful_incomplete_shutdown", stop)
+        verdict = ps_function(controller, "Set-StopReportVerdict")
+        self.assertIn("'schema_version') -ceq 1", verdict)
+        self.assertIn("'complete') -is [bool]", verdict)
+        self.assertIn("$report.refused -ne 0", verdict)
+        self.assertIn("sessions_skipped=$null", ps_function(controller, "New-StopReceipt"))
+        self.assertIn("$Receipt.sessions_skipped = [int]$report.skipped", verdict)
+        self.assertIn("graceful_incomplete_shutdown", verdict)
 
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
@@ -2337,6 +2391,7 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 
 DISPATCH_BOUNDARIES = r"""
+$WarningPreference='SilentlyContinue'
 function Assert-SelectedGpuIdentity { 0 }
 function Get-NetTCPConnection { }
 function Get-ScheduledTask {
@@ -2466,7 +2521,7 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                  background: bool = False, packaged: bool = False):
         controller = (lane.bin / "lifecycle" if packaged else lane.root) / "Control-Release.ps1"
         command = [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(controller),
-                   "-Action", action, "-StateRoot", str(lane.root), *args]
+                   "-Action", action, "-StateRoot", str(lane.root), "-WarningAction", "SilentlyContinue", *args]
         if background:
             return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         return subprocess.run(command, capture_output=True, text=True, timeout=45)
@@ -2691,7 +2746,7 @@ class PowerShellContractTests(unittest.TestCase):
     def invoke(self, script: str) -> object:
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
-             "$ErrorActionPreference='Stop';\n" + script],
+             "$ErrorActionPreference='Stop';$WarningPreference='SilentlyContinue';\n" + script],
             text=True, capture_output=True,
         )
         if result.returncode != 0:
@@ -3390,53 +3445,6 @@ New-TransactionDirectory $transaction $Field $Target
                 self.assertTrue(target.is_dir())
                 self.assertTrue(all(path.is_dir() for path in upgrade.incumbent_trees))
 
-    def test_incomplete_shutdown_blocks_rollback_and_repeated_repair(self) -> None:
-        """DB-R2: real managed Stop consumes a launch-bound report; no cache is disposable."""
-        for complete, refused in ((False, 0), (True, 1)):
-            with self.subTest(complete=complete, refused=refused), tempfile.TemporaryDirectory() as directory:
-                upgrade = interrupted_upgrade(Path(directory))
-                report_path = upgrade.candidate_targets[0] / "shutdown.json"
-                report_path.write_text(json.dumps({
-                    "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
-                    "launch_id": "1" * 32, "complete": complete, "saved": 0, "skipped": 0,
-                    "refused": refused,
-                }))
-                runtime = {
-                    "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
-                    "release_id": upgrade.candidate, "pid": 4242, "start_time_utc_ticks": 1,
-                    "managed_stop": "stop-event", "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
-                    "launch_id": "1" * 32, "shutdown_report": str(report_path),
-                }
-                runtime_path = upgrade.root / "runtime.json"
-                runtime_path.write_text(json.dumps(runtime))
-                # Real Stop, JSON I/O and receipt publication; Windows process/event APIs are stubs.
-                (upgrade.root / "Control-Release.ps1").write_text(
-                    "param([string]$Action,[string]$StateRoot)\n$ErrorActionPreference='Stop'\n"
-                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
-function Get-State { Read-JsonFile (Join-Path $StateRoot 'state.json') }
-function Get-Release { [pscustomobject]@{managed_stop='stop-event';graceful_stop_timeout_seconds=1;server_executable=(Join-Path $StateRoot 'server.exe')} }
-$script:live=-not(Test-Path (Join-Path $StateRoot 'last-stop.json'))
-$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=0}
-$script:child|Add-Member ScriptMethod WaitForExit {$this.HasExited=$true;$script:live=$false}
-function Get-OwnedProcess { if($script:live){$script:child} }
-function Get-CimInstance { }
-function Get-ScheduledTaskInfo { }
-function Wait-ManagedWrapperExit { $true }
-function Request-ManagedStop { 'signalled' }
-Stop-ManagedProcess
-""")
-                for mode in ("rollback", "repair"):
-                    result = self.rollback_attempt(upgrade, mode)
-                    self.assertFalse(result["completed"], result)
-                    self.assertIn("incomplete", result["failure"])
-                    self.assertTrue(runtime_path.exists())
-                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
-                    self.assertEqual(json.loads(upgrade.journal.read_text())["status"], "repair_required")
-                    self.assertEqual(json.loads((upgrade.root / "last-stop.json").read_text())["outcome"],
-                                     "graceful_incomplete_shutdown")
-                    self.assertEqual(json.loads((upgrade.root / "state.json").read_text())["active_release"],
-                                     upgrade.candidate)
-
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_nonrunning_beta3_stale_inner_lease_refuses_before_cutover(self) -> None:
         """CM-R2: killed beta.3 wrapper left its lease; successor bytes differ, caps do not."""
@@ -3555,7 +3563,12 @@ try{Invoke-Run}catch{}
 $leasePath=Join-Path $StateRoot 'gpu-owner-lease.json'
 Write-JsonAtomic $leasePath @{artifact_type='ninfer_gpu_owner_lease';schema_version=1;prior_paused=$false}
 if($Pending -ceq 'True'){
-  Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') @{pid=$null;release_id=$state.active_release}
+  Invoke-WithHoldsLock {
+    Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') @{
+      artifact_type='ninfer_windows_runtime_state';schema_version=2
+      pid=$null;start_time_utc_ticks=$null;release_id=$state.active_release
+    }
+  }
 }
 function Get-CimInstance { [pscustomobject]@{ExecutablePath=$release.server_executable;ProcessId=4242} }
 function Get-ScheduledTaskInfo { }
@@ -3732,7 +3745,7 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
         entries = [
             {"ProcessId": 4242, "Name": "unrelated.exe", "ExecutablePath": image}
             for image in (None, "", " \t\r\n")
-        ] + [{"ProcessId": 4242, "ExecutablePath": image} for image in (None, "", " \t\r\n")]
+        ]
         for entry in (*entries, None):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
                 upgrade = interrupted_upgrade(Path(directory))
@@ -3777,7 +3790,7 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                 "existing-stage": {"refused": True, "recorded": [], "deleted": []},
                 "fresh": {"refused": False,
                           "recorded": ["stage_path", "release_root", "secret_directory", "cache_root"],
-                          "deleted": ["candidate_release", "candidate_secret", "candidate_cache", "package_stage"]},
+                          "deleted": ["candidate_secret", "candidate_cache", "package_stage", "candidate_release"]},
             })
             for scenario, tree in existing.items():
                 with self.subTest(scenario=scenario):

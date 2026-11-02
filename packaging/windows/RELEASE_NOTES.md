@@ -1,5 +1,68 @@
 # NInfer native Windows lanes
 
+## Unreleased — Managed final-save holds (after v0.16.2)
+
+Managed Stop now distinguishes proven process exit from a complete final save.
+Missing, malformed, foreign-launch or path-mismatched reports, refused sessions,
+and observed forced/nonzero/signal-failed stops retain immutable evidence in
+`shutdown-holds.json`, keyed by launch id. A durable hold precedes retirement of
+`runtime.json`; subsequent Start/Run can serve without erasing it. A persisted
+first non-clean receipt remains sticky across retries. If that first receipt
+cannot be written at all, the failing invocation retains runtime/ownership, but
+a later invocation can evaluate only the evidence that actually survived.
+
+Standalone `-Action Stop` prints status then fails on a newly held launch even
+when process exit and owner restoration succeeded. `-Action Stop -AllowHeld`
+deliberately tolerates only that stopped/held result, never an unproven wrapper,
+live process, census uncertainty, or filesystem/owner failure. Restart and
+pointer-only Rollback may restore service while warning about retained evidence.
+The whole release-root census also includes helper images; blank image paths
+with absent/blank process names refuse exit proof.
+
+After inspecting possible lost final saves, acknowledge a release explicitly:
+
+```powershell
+& $updatedController -Action Reconcile -StateRoot $stateRoot -ReleaseId $releaseId
+& $updatedInstaller -RepairInterruptedInstall -StateRoot $stateRoot
+```
+
+For rolled-back or first-install recovery, use the retained candidate's
+`releases\<release-id>\bin\lifecycle\Control-Release.ps1` and installer.
+Reconcile works without lifecycle state, does not stop a serving incumbent,
+and writes acknowledgement receipts in `StateRoot\receipts`, outside candidate
+cleanup. It acknowledges inspected evidence; it does **not** recover refused
+sessions or promise that retained checkpoints contain unsaved changes.
+Never delete hold/runtime/lease files to bypass acknowledgement.
+
+Rollback restores the lifecycle under action/run exclusion and journals that
+milestone before restarting the incumbent. Candidate holds produce failed
+`held_cleanup`, retaining release, cache/checkpoints, secrets and staging.
+Repeated held repair never replays snapshots or Start. After acknowledgement,
+repair deletes secrets, cache and stage before the candidate release root, so an
+earlier deletion failure keeps packaged repair tools. A repair without the
+restored milestone requires Stop-then-retry if an incumbent already serves.
+Cleanup never infers safe lease attribution from a matching release id alone;
+without a refresh witnessed in the current successor operation, an explicit
+managed Stop must retire the unknown lease before cleanup.
+
+Qualification admission and evidence Stops remain strict. Final restoration can
+tolerate a proven held Stop to restore the incumbent safely, but durably unions
+observed held launch ids across cleanup re-entry. Those ids keep qualification and
+its summary failed, clear the qualified timestamp and block passing publication,
+even when host restoration itself passed.
+
+Older controllers/installers do not understand holds or `held_cleanup`.
+Restoring an older incumbent does not retrofit its Uninstall: old tools can
+delete retained evidence. Use updated packaged tools for acknowledgement and
+repair. No server/checkpoint format, package inventory, lane power policy or
+published component is changed by this draft.
+
+Required supported-Windows proofs remain open: Windows PowerShell 5.1 and pwsh
+antivirus-enabled replacement/handle stress; queued Task Scheduler failure-retry
+exclusion across interrupted restoration; four-minute held-Stop retry observation;
+and concurrent packaged-tool overlaps with the broadened census. Portable tests
+are not those release or hardware qualifications.
+
 ## 2026-11-02 — Native component 0.8.0-beta.2 (qualification pending)
 
 The native component candidates are `v0.8.0-qwen38-4090-beta.2` and
@@ -77,11 +140,10 @@ after refusing pre-existing paths. Repair can therefore remove an interrupted
 candidate and allow same-instance reinstall even when interruption lands directly
 after directory creation; incumbent trees remain excluded from cleanup.
 
-Managed Stop now fails on a launch-bound incomplete or refused final-save report.
-The runtime attribution, report and candidate checkpoint/cache trees are retained;
-repeating rollback or repair does not reinterpret the stopped process as permission
-to discard those trees. Reconciliation of the retained candidate state is required
-before destructive rollback. This is containment, not recovery of unsaved sessions.
+The unreleased managed-hold behavior above supersedes the earlier
+explicit-refusal-only containment: proven stopped attribution is retired only
+after its incomplete evidence is durably held, and cleanup requires explicit
+acknowledgement. This is evidence retention, not recovery of unsaved sessions.
 
 The wrapper publishes launch intent before spawning its child, and retains
 `runtime.json` until managed Stop retires it. Failed child termination retains

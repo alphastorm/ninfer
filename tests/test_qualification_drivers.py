@@ -399,6 +399,9 @@ class NativeChainBoundaryTests(unittest.TestCase):
                             'model_sha256': case.lane.model_sha256,
                             'power_limit_w': case.lane.owner_power_limit_w,
                             'gpu': case.lane.spec['gpu']['name']}
+                if "status='stop-observed'" in script:
+                    case.host['candidate_running'] = False
+                    return {'status': 'stop-observed', 'held_launch_ids': []}
                 if "$incumbentState='untouched'" in script:
                     case.host['candidate_running'] = False
                     case.host['incumbent_running'] = bool(
@@ -724,6 +727,7 @@ def load_tests(loader, tests, pattern):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     tests.addTests(loader.loadTestsFromTestCase(module.ManagedShutdownDispatcherTests))
+    tests.addTests(loader.loadTestsFromTestCase(module.QualificationRestorationTests))
     return tests
 
 
