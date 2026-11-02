@@ -2010,6 +2010,7 @@ $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $controller=Join-Path $root 'Control-Release.ps1'
 $held=@()
+$stopError=$null
 if(Test-Path (Join-Path $root 'state.json')){{
   $bound=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
   if([string]$bound.task_name -cne {ps_quote(self.task_name)}){{throw 'refusing restoration through a foreign lifecycle task'}}
@@ -2017,7 +2018,7 @@ if(Test-Path (Join-Path $root 'state.json')){{
 if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{
   $arguments=@{{Action='Stop';StateRoot=$root}}
   if((Get-Command $controller).Parameters.ContainsKey('AllowHeld')){{$arguments.AllowHeld=$true}}
-  $stopped=&$controller @arguments|ConvertFrom-Json
+  try{{$stopped=&$controller @arguments|ConvertFrom-Json}}catch{{$stopError=$_.Exception.Message}}
   $holdPath=Join-Path $root 'shutdown-holds.json'
   if(Test-Path $holdPath){{
     $envelope=Get-Content $holdPath -Raw|ConvertFrom-Json
@@ -2025,12 +2026,14 @@ if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{
     $held=@($envelope.holds|ForEach-Object{{[string]$_.launch_id}})
   }}
 }}
-[ordered]@{{status='stop-observed';held_launch_ids=@($held)}}|ConvertTo-Json -Compress
+[ordered]@{{status='stop-observed';held_launch_ids=@($held);stop_succeeded=($null -eq $stopError);stop_error=$stopError}}|ConvertTo-Json -Compress
 """,
             timeout=900,
         )
         self._record_summary_restoration(
             {"status": "required", "held_launch_ids": stopped.get("held_launch_ids", [])})
+        if not stopped.get("stop_succeeded", True):
+            raise LaneError(f"scratch Stop failed after evidence observation: {stopped.get('stop_error')}")
         status = self.remote_json(
             self.config.target,
             f"""

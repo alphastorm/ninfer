@@ -1304,6 +1304,50 @@ class QualificationRestorationTests(unittest.TestCase):
             with self.assertRaises(qualify_native.LaneError):
                 qualify_native.stage_lane_qualification(subject.state, summary, subject.lane)
 
+    def test_phase15_failure_runs_automatic_empty_restore_without_erasing_held_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.ready_for_receipt(Path(temporary))
+            subject.config.dry_run = False
+            subject.config.resume = False
+            subject.config.through_phase = None
+            key = "e" * 32
+            stop_calls = 0
+            recover_calls = 0
+
+            def remote(host: str, script: str, **kwargs: object) -> dict:
+                nonlocal stop_calls, recover_calls
+                if "status='stop-observed'" in script:
+                    stop_calls += 1
+                    return {"status": "stop-observed", "held_launch_ids": [key] if stop_calls == 1 else []}
+                recover_calls += 1
+                self.assertEqual(json.loads(subject.state_path.read_text())["restoration"]["held_launch_ids"], [key])
+                if recover_calls == 1:
+                    raise qualify_native.LaneError("phase15 recovery boundary")
+                return {"status": "passed", "process_count": 0}
+
+            subject.remote_json = remote
+            methods = ("preflight", "neutral_build", "private_scan", "package", "transfer_install", "protocol",
+                       "pressure_protocol", "context", "restart", "rollback", "security", "omp", "benchmark")
+            phases = qualify_native.PHASES[:13]
+            mocks = [patch.object(subject, name, return_value=copy.deepcopy(
+                subject.state["phases"][phase].get("receipt", {"status": "passed"})))
+                for name, phase in zip(methods, phases)]
+            for mock in mocks:
+                mock.start()
+                self.addCleanup(mock.stop)
+            with patch.object(subject, "preflight_protocol"), \
+                    patch.object(qualify_native, "stage_lane_qualification") as publish:
+                with self.assertRaisesRegex(qualify_native.LaneError, "phase15 recovery boundary"):
+                    subject.execute()
+                publish.assert_not_called()
+            self.assertEqual((stop_calls, recover_calls), (2, 2))
+            self.assertEqual(subject.state["restoration"]["status"], "passed")
+            self.assertEqual(subject.state["restoration"]["held_launch_ids"], [key])
+            summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
+            self.assertEqual(summary["status"], "failed")
+            self.assertIsNone(summary["qualified_utc"])
+            self.assertFalse((Path(temporary) / "rtx3090.json").exists())
+
 
 class RestartFixtureTests(unittest.TestCase):
     @staticmethod
@@ -2408,12 +2452,20 @@ function Assert-SelectedGpuIdentity {
     0
 }
 function Get-NetTCPConnection { }
-function Get-ScheduledTask {
-    $wrapperPath=Join-Path $StateRoot 'wrapper.pid'
-    if((Test-Path $wrapperPath) -and
-       $null -ne (Get-Process -Id ([int][IO.File]::ReadAllText($wrapperPath)) -ErrorAction SilentlyContinue)){
-        return [pscustomobject]@{State='Running'}
+function Get-Process([int]$Id,[string]$ErrorAction) {
+    $process=Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction SilentlyContinue
+    $birth=Join-Path $StateRoot 'child-process.json'
+    if($null -ne $process -and (Test-Path $birth)){
+        $identity=Get-Content -Raw $birth|ConvertFrom-Json
+        if([int]$identity.pid -eq $Id){
+            # Windows creation time is stable across callers; Linux .NET derives it from
+            # separate boot-clock observations. Keep that Windows OS boundary deterministic.
+            $process|Add-Member NoteProperty StartTime ([DateTime]::new([long]$identity.ticks,[DateTimeKind]::Utc)) -Force
+        }
     }
+    return $process
+}
+function Get-ScheduledTask {
     $probe=$null
     try {
         $probe=[IO.File]::Open((Join-Path $StateRoot 'run.lock'),'OpenOrCreate','ReadWrite','None')
@@ -2468,7 +2520,11 @@ function Start-FixtureChild {
     $psi.UseShellExecute=$false
     $psi.RedirectStandardOutput=$true
     $psi.RedirectStandardError=$true
-    return [Diagnostics.Process]::Start($psi)
+    $child=[Diagnostics.Process]::Start($psi)
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'child-process.json'),(@{
+        pid=$child.Id;ticks=$child.StartTime.ToUniversalTime().Ticks
+    }|ConvertTo-Json))
+    return $child
 }
 function Test-ServerStartGpu {
     [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper-ready'),'ready')
@@ -2619,12 +2675,123 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                         getattr(lane, "last_result", SimpleNamespace(stderr="")).stderr)
         return json.loads(path.read_text())["holds"]
 
-    def wait_file(self, path: Path) -> None:
+    def wait_file(self, path: Path, process=None) -> None:
         deadline = time.monotonic() + 25
         while not path.exists():
+            if process is not None and process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.fail("dispatcher exited before barrier: " + stdout + stderr)
             if time.monotonic() >= deadline:
                 self.fail(f"dispatcher barrier not reached: {path.name}")
             time.sleep(.05)
+
+    def first_install_journal(self, lane: SimpleNamespace) -> Path:
+        state = json.loads((lane.root / "state.json").read_text())
+        operation = "6" * 32
+        transaction_root = lane.root / "receipts" / "install-transactions" / operation
+        transaction_root.mkdir(parents=True)
+        stage = lane.root / ("staging-" + operation)
+        stage.mkdir()
+        journal = transaction_root / "journal.json"
+        journal.write_text(json.dumps({
+            "artifact_type": "ninfer_windows_install_transaction", "schema_version": 1,
+            "operation_id": operation, "status": "in_progress", "phase": "candidate_activated",
+            "started_utc": "2026-01-01T00:00:00Z", "updated_utc": None,
+            "journal_path": str(journal), "instance_id": lane.instance, "state_root": str(lane.root),
+            "release_root": str(lane.release), "secret_directory": str(lane.root / "secrets" / lane.instance),
+            "cache_root": str(lane.root / "cache" / lane.instance), "stage_path": str(stage),
+            "task_name": state["task_name"], "task_existed": False, "task_was_running": False,
+            "task_xml_path": None,
+            "flags": {"incumbent_touched": False, "controller_touched": True, "state_activated": True,
+                      "task_touched": True, "state_helpers_touched": False, "owner_controller_touched": False},
+            "snapshots": {field: {"exists": False, "backup_path": None} for field in ("state", "controller")},
+        }))
+        return journal
+
+    def installer_attempt(self, lane: SimpleNamespace, journal: Path, injection: str = "") -> dict:
+        return PowerShellContractTests().invoke(
+            ps_assignments(StateRoot=lane.root, Journal=journal, Mode="repair", LiveProcesses="[]")
+            + ps_definitions(WINDOWS / "Install-Release.ps1") + injection + ROLLBACK_ATTEMPT)
+
+    def test_t9_first_install_retains_repair_tools_on_each_earlier_cleanup_failure(self) -> None:
+        for kind in ("candidate_secret", "candidate_cache", "package_stage"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                journal = self.first_install_journal(lane)
+                self.seed(lane, report=None if kind == "candidate_secret" else {"complete": False})
+                first = self.installer_attempt(lane, journal)
+                self.assertFalse(first["completed"], first)
+                durable = json.loads(journal.read_text())
+                self.assertEqual(durable["status"], "held_cleanup")
+                self.assertEqual(durable["phase"], "repair_lifecycle_restored")
+                self.assertFalse((lane.root / "state.json").exists())
+                self.assertFalse((lane.root / "Control-Release.ps1").exists())
+                self.assertTrue(lane.release.exists())
+                acknowledgement = self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance, packaged=True)
+                self.assertEqual(acknowledgement.returncode, 0, acknowledgement.stderr)
+                receipts = {p: p.read_bytes() for p in (lane.root / "receipts").glob("shutdown-reconcile-*.json")}
+                fault = ps_assignments(FailedKind=kind) + r"""
+$script:removeTree=${function:Remove-InstallTreeStreaming}
+function Remove-InstallTreeStreaming([object]$Target){
+    if([string]$Target.kind -ceq $FailedKind){throw 'fixture target deletion denial'}
+    & $script:removeTree $Target
+}
+"""
+                failed = self.installer_attempt(lane, journal, fault)
+                self.assertFalse(failed["completed"], failed)
+                self.assertTrue((lane.bin / "lifecycle" / "Control-Release.ps1").exists())
+                self.assertEqual(json.loads(journal.read_text())["phase"], "repair_lifecycle_restored")
+                self.assertTrue(self.installer_attempt(lane, journal)["completed"])
+                self.assertFalse(lane.release.exists())
+                self.assertEqual({p: p.read_bytes() for p in receipts}, receipts)
+                self.assertEqual(json.loads(journal.read_text())["status"], "repaired")
+
+    def test_t10_milestone_controls_fenced_snapshot_retry_not_task_state(self) -> None:
+        for restored in (False, True):
+            with self.subTest(restored=restored), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+                shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+                (upgrade.root / "gpu-owner-lease.json").unlink()
+                journal = json.loads(upgrade.journal.read_text())
+                journal.update(status="repair_required", phase=("rollback_lifecycle_restored" if restored else "rollback_incomplete"))
+                if restored:
+                    journal["diagnostics"] = ["candidate cleanup: interrupted after incumbent availability"]
+                upgrade.journal.write_text(json.dumps(journal))
+                before = (upgrade.root / "state.json").read_bytes()
+                gate = upgrade.root / "fence-holder"
+                script = ps_assignments(StateRoot=upgrade.root, Gate=gate) + r"""
+$lock=[IO.File]::Open((Join-Path $StateRoot 'run.lock'),'OpenOrCreate','ReadWrite','None')
+try{
+  [IO.File]::WriteAllText(($Gate+'.entered'),'entered')
+  $deadline=[DateTime]::UtcNow.AddSeconds(20)
+  while(-not(Test-Path ($Gate+'.release'))){
+    if([DateTime]::UtcNow -ge $deadline){throw 'fixture fence deadline'}
+    Start-Sleep -Milliseconds 50
+  }
+}finally{$lock.Dispose()}
+"""
+                holder = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                self.addCleanup(lambda p=holder: p.poll() is None and p.kill())
+                self.wait_file(Path(str(gate) + ".entered"))
+                bounded = r"""
+$script:realFence=${function:Enter-LaunchFence}
+function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:realFence $Name 1 }
+"""
+                result = self.installer_attempt(upgrade, upgrade.journal, bounded)
+                if restored:
+                    self.assertTrue(result["completed"], result)
+                    self.assertFalse(any(path.exists() for path in upgrade.candidate_targets))
+                else:
+                    self.assertFalse(result["completed"], result)
+                    self.assertIn("Stop the serving launch, then retry repair", result["failure"])
+                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                    self.assertEqual((upgrade.root / "state.json").read_bytes(), before)
+                self.assertFalse((upgrade.root / "controller.log").exists())
+                Path(str(gate) + ".release").touch()
+                stdout, stderr = holder.communicate(timeout=10)
+                self.assertEqual(holder.returncode, 0, stdout + stderr)
 
     def test_t1_stop_outcome_table(self) -> None:
         for report in (None, {"complete": False}, {"refused": 1}, {"launch_id": "f" * 32},
@@ -2812,7 +2979,7 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                     barrier.touch()
                     process = self.dispatch(lane, "Reconcile", "-ReleaseId", selected, background=True, packaged=True)
                     self.addCleanup(lambda p=process: p.poll() is None and p.kill())
-                    self.wait_file(Path(str(barrier) + ".entered"))
+                    self.wait_file(Path(str(barrier) + ".entered"), process)
                     (lane.root / "child-exit").touch()
                     self.wait_file(lane.root / "wrapper-probed")
                     self.assertEqual((lane.root / "wrapper-probed").read_text(), "False")

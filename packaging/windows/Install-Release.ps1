@@ -166,6 +166,15 @@ function Get-RuntimeStrict {
     }
     Get-LaunchRoot ([string]$runtime.release_id) | Out-Null
     Get-LaunchKey $runtime | Out-Null
+    $mode = [string](Get-AttributionField $runtime 'managed_stop')
+    if (-not [string]::IsNullOrEmpty($mode) -and $mode -cnotin @('terminate', 'stop-event')) {
+        throw 'invalid runtime stop mode'
+    }
+    if ($null -ne $runtime.pid -and
+        (-not ($runtime.pid -is [int] -or $runtime.pid -is [long]) -or
+         $runtime.pid -le 0 -or $runtime.pid -gt [int]::MaxValue -or
+         -not ($runtime.start_time_utc_ticks -is [int] -or $runtime.start_time_utc_ticks -is [long]) -or
+         $runtime.start_time_utc_ticks -le 0)) { throw 'invalid runtime process attribution' }
     return $runtime
 }
 
@@ -206,6 +215,8 @@ function Get-ShutdownHolds {
             throw 'shutdown hold canonical root mismatch'
         }
         if (
+            [string]$entry.runtime.artifact_type -cne 'ninfer_windows_runtime_state' -or
+            $entry.runtime.schema_version -cne 2 -or
             [string](Get-LaunchKey $entry.runtime) -cne $key -or
             [string]$entry.runtime.release_id -cne $id -or
             [string]$entry.runtime.managed_stop -cne 'stop-event' -or
@@ -216,6 +227,11 @@ function Get-ShutdownHolds {
             [string]$entry.stop_receipt.mode -cne 'stop-event') {
             throw 'invalid or conflicting shutdown hold runtime/receipt binding'
         }
+        if ($entry.stop_receipt.forced -isnot [bool] -or
+            (-not $entry.stop_receipt.forced -and
+             [string]$entry.stop_receipt.outcome -cin @('graceful', 'already_stopped'))) {
+            throw 'shutdown hold has no non-clean verdict'
+        }
     }
     return $envelope
 }
@@ -224,7 +240,13 @@ function Get-StickyStopReceipt {
     $receipt = Read-AttributionJson 'last-stop.json'
     if ($null -ne $receipt -and
         ([string](Get-AttributionField $receipt 'artifact_type') -cne 'ninfer_windows_managed_stop_receipt' -or
-         (Get-AttributionField $receipt 'schema_version') -cne 1)) { throw 'invalid managed-stop receipt' }
+         (Get-AttributionField $receipt 'schema_version') -cne 1 -or
+         (Get-AttributionField $receipt 'forced') -isnot [bool] -or
+         [string](Get-AttributionField $receipt 'mode') -cnotin @('stop-event', 'terminate') -or
+         [string](Get-AttributionField $receipt 'outcome') -cnotin @(
+             'graceful', 'already_stopped', 'graceful_unreported', 'graceful_incomplete_shutdown',
+             'graceful_wait_expired', 'graceful_nonzero_exit', 'signal_failed', 'terminated',
+             'still_running', 'wrapper_cleanup_stalled', 'stop_unproven'))) { throw 'invalid managed-stop receipt' }
     return $receipt
 }
 
@@ -1263,6 +1285,18 @@ function Assert-TransactionCleanupRecords([object]$Transaction, [string]$StatePa
     }
 }
 
+function Test-AttributedRuntimeLive([object]$Runtime) {
+    if ($null -eq $Runtime -or $null -eq $Runtime.pid) { return $false }
+    $process = Get-Process -Id ([int]$Runtime.pid) -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+    $entry = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($Runtime.pid)" -ErrorAction Stop
+    $image = [string](Get-AttributionField $entry 'ExecutablePath')
+    if ([string]::IsNullOrWhiteSpace($image)) { return $false }
+    $expected = Join-Path (Join-Path (Get-LaunchRoot ([string]$Runtime.release_id)) 'bin') 'ninfer-serve.exe'
+    return [string]::Equals([IO.Path]::GetFullPath($image), $expected, [StringComparison]::OrdinalIgnoreCase) -and
+        $process.StartTime.ToUniversalTime().Ticks -eq [Int64]$Runtime.start_time_utc_ticks
+}
+
 function Invoke-InstallTransactionRollback(
     [object]$Transaction,
     [string]$StatePath,
@@ -1345,8 +1379,15 @@ function Invoke-InstallTransactionRollback(
             $stage = 'incumbent restart'
             # A fresh Start requires an empty slot. An idempotent Start after a crash may verify
             # the same serving incumbent; it must never replay snapshots under its run lock.
+            $beforeStart = Invoke-WithHoldsLock { Get-ShutdownHolds | Out-Null; Get-RuntimeStrict }
+            $freshStart = $null -eq $beforeStart
+            if ($null -ne $beforeStart -and -not (Test-AttributedRuntimeLive $beforeStart)) {
+                Invoke-SuccessorSlotRetirement $Transaction $ControllerPath
+                $freshStart = $true
+            }
             & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null
-            $refreshedIncumbent = (Get-Command -Name $ControllerPath).Parameters.ContainsKey('AllowHeld')
+            $refreshedIncumbent = $freshStart -and
+                (Get-Command -Name $ControllerPath).Parameters.ContainsKey('AllowHeld')
         }
         $stage = 'candidate cleanup'
         Complete-InterruptedTransactionRetirement $Transaction

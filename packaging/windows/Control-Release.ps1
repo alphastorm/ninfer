@@ -196,6 +196,15 @@ function Get-RuntimeStrict {
     }
     Get-LaunchRoot ([string]$runtime.release_id) | Out-Null
     Get-LaunchKey $runtime | Out-Null
+    $mode = [string](Get-AttributionField $runtime 'managed_stop')
+    if (-not [string]::IsNullOrEmpty($mode) -and $mode -cnotin @('terminate', 'stop-event')) {
+        throw 'invalid runtime stop mode'
+    }
+    if ($null -ne $runtime.pid -and
+        (-not ($runtime.pid -is [int] -or $runtime.pid -is [long]) -or
+         $runtime.pid -le 0 -or $runtime.pid -gt [int]::MaxValue -or
+         -not ($runtime.start_time_utc_ticks -is [int] -or $runtime.start_time_utc_ticks -is [long]) -or
+         $runtime.start_time_utc_ticks -le 0)) { throw 'invalid runtime process attribution' }
     return $runtime
 }
 
@@ -236,6 +245,8 @@ function Get-ShutdownHolds {
             throw 'shutdown hold canonical root mismatch'
         }
         if (
+            [string]$entry.runtime.artifact_type -cne 'ninfer_windows_runtime_state' -or
+            $entry.runtime.schema_version -cne 2 -or
             [string](Get-LaunchKey $entry.runtime) -cne $key -or
             [string]$entry.runtime.release_id -cne $id -or
             [string]$entry.runtime.managed_stop -cne 'stop-event' -or
@@ -246,6 +257,11 @@ function Get-ShutdownHolds {
             [string]$entry.stop_receipt.mode -cne 'stop-event') {
             throw 'invalid or conflicting shutdown hold runtime/receipt binding'
         }
+        if ($entry.stop_receipt.forced -isnot [bool] -or
+            (-not $entry.stop_receipt.forced -and
+             [string]$entry.stop_receipt.outcome -cin @('graceful', 'already_stopped'))) {
+            throw 'shutdown hold has no non-clean verdict'
+        }
     }
     return $envelope
 }
@@ -254,7 +270,13 @@ function Get-StickyStopReceipt {
     $receipt = Read-AttributionJson 'last-stop.json'
     if ($null -ne $receipt -and
         ([string](Get-AttributionField $receipt 'artifact_type') -cne 'ninfer_windows_managed_stop_receipt' -or
-         (Get-AttributionField $receipt 'schema_version') -cne 1)) { throw 'invalid managed-stop receipt' }
+         (Get-AttributionField $receipt 'schema_version') -cne 1 -or
+         (Get-AttributionField $receipt 'forced') -isnot [bool] -or
+         [string](Get-AttributionField $receipt 'mode') -cnotin @('stop-event', 'terminate') -or
+         [string](Get-AttributionField $receipt 'outcome') -cnotin @(
+             'graceful', 'already_stopped', 'graceful_unreported', 'graceful_incomplete_shutdown',
+             'graceful_wait_expired', 'graceful_nonzero_exit', 'signal_failed', 'terminated',
+             'still_running', 'wrapper_cleanup_stalled', 'stop_unproven'))) { throw 'invalid managed-stop receipt' }
     return $receipt
 }
 
