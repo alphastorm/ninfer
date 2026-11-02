@@ -1340,6 +1340,35 @@ int test_store_wide_quota_across_sessions() {
                   retained_generation_bytes(protected_temporary.path) <= measured->bytes,
               "active reader ownership rejects admission without exceeding the quota");
 
+    // Export runs outside the catalog mutex. Its returned proof readers must be moved to
+    // service scope: quota runs after the callback and may otherwise evict this very victim.
+    active.checkpoint.reset();
+    std::vector<std::shared_ptr<const runtime::ContinuationCheckpointReader>> proof_pins;
+    bool callback_loaded = false;
+    runtime::SessionCheckpointSkipDetail proof_skip;
+    const auto reclaiming = protected_store.save(second_session, fingerprint(),
+        [&](ContinuationCheckpointWriter& writer) {
+            auto victim = protected_store.load(first_session.client_session_sha256, fingerprint());
+            callback_loaded = victim.checkpoint.has_value();
+            if (!victim.checkpoint) return DurableExportResult{};
+            auto result = exporter(writer);
+            result.proof_pins.push_back(victim.checkpoint->engine);
+            result.proof_pins.push_back(victim.checkpoint->engine->fresh_reader());
+            proof_pins = std::move(result.proof_pins);
+            return result;
+        }, publish_fixture, &proof_skip);
+    failures += check(callback_loaded && !reclaiming &&
+                          proof_skip.durable_reason == runtime::DurableReason::Quota &&
+                          proof_pins.size() == 2 &&
+                          protected_store.status(first_session.client_session_sha256, fingerprint())
+                              .at("state") == "available",
+                      "export callback deadlocked or full-save quota retired its proven victim");
+    proof_pins.clear();
+    failures += check(protected_store.save(second_session, fingerprint(), exporter, publish_fixture).has_value() &&
+                          protected_store.status(first_session.client_session_sha256, fingerprint())
+                              .at("state") == "missing",
+                      "released proof pins granted permanent quota immunity to a cold victim");
+
     TemporaryDirectory failure_temporary;
     bool refuse_cleanup = false;
     SessionCheckpointStore failure_store(

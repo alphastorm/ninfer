@@ -44,6 +44,14 @@ ninfer_add_test(ninfer_session_checkpoint_service_test
   LIBRARIES ninfer_serve_state)
 set_tests_properties(ninfer_session_checkpoint_service_test PROPERTIES LABELS "host" TIMEOUT 30)
 
+ninfer_add_test(ninfer_session_checkpoint_export_test
+  HOST_LANES bounded native
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_export.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/session_checkpoint_service.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/opaque_id.cpp"
+  LIBRARIES ninfer_session_checkpoint_store)
+set_tests_properties(ninfer_session_checkpoint_export_test PROPERTIES TIMEOUT 30)
+
 add_test(NAME ninfer_serve_restore_runner_test
   COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_runner.py")
 set_tests_properties(ninfer_serve_restore_runner_test PROPERTIES LABELS "host")
@@ -54,6 +62,11 @@ if(TARGET ninfer-serve)
             --server $<TARGET_FILE:ninfer-serve>)
   set_tests_properties(ninfer_serve_restore_real_test PROPERTIES
     LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
+  add_test(NAME ninfer_serve_shutdown_capacity_real_test
+    COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_shutdown_capacity_real.py"
+            --server $<TARGET_FILE:ninfer-serve>)
+  set_tests_properties(ninfer_serve_shutdown_capacity_real_test PROPERTIES
+    LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 1800 RUN_SERIAL TRUE)
 endif()
 
 # The close fault uses the Linux link-time stdio wrappers shared with the store tests.

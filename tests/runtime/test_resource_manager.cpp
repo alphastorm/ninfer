@@ -2190,10 +2190,77 @@ void test_named_owner_holds_its_session_until_released() {
             "a released owner still held its session");
 }
 
+void test_proven_export_closure_and_protections() {
+    using namespace ninfer::runtime;
+    for (unsigned protection = 0; protection != 6; ++protection) {
+        Fixture f(128);
+        const auto block = f.program.host_block(64);
+        const auto named = f.program.add({1, 2}, {block}, Role::Continuation);
+        const auto ordinary = f.program.add({9}, {block});
+        const auto owner = f.publish(named, 1);
+        const auto ordinary_owner = f.publish(ordinary, 2);
+        f.cache.set_checkpoint_identity(owner, "victim", "tag");
+        std::vector<Handle> exported;
+        if (protection == 1) exported.push_back(ordinary);
+        if (protection == 2) f.cache.set_checkpoint_identity(ordinary_owner, "other", "tag");
+        if (protection == 3) f.program.contents[ordinary.index].leased = true;
+        if (protection >= 4) {
+            f.cache.retain_source(f.program, 100, f.source(Base{.tokens = {9}}, ordinary));
+            if (protection == 5) f.cache.binding_started(100, {}, {});
+        }
+        auto cursor = f.cache.begin_reclaim(f.program, {}, {ReclaimPurpose::OptionalWrite});
+        const auto excluded = f.cache.export_reclaim_exclusions(exported, true);
+        const auto victim = f.cache.durable_victims("target").front();
+        unsigned guards = 0;
+        f.cache.set_release_guard([&](auto) { ++guards; return false; });
+        require(f.program.host_bytes_released({&named, 1}) == 0 &&
+                    f.program.host_bytes_released({&ordinary, 1}) == 0, "fixture requires union quote");
+        const auto closure = f.cache.proven_victim_closure(f.program, victim, cursor, exported, excluded);
+        if (protection) {
+            require(closure.empty() && f.program.released.empty(),
+                    "ineligible physical closure was partially authorized");
+        } else {
+            require(closure.size() == 2 && f.cache.release_proven_durable_victim(
+                        f.program, victim, closure, cursor, exported, excluded) &&
+                        f.program.physical_usage().occupied.host_bytes == 0 && guards == 0 &&
+                        cursor.victims.empty(),
+                    "eligible physical sharers did not commit as one guard-free consumed closure");
+        }
+    }
+}
+
+void test_proven_export_logical_owner_exclusivity() {
+    using namespace ninfer::runtime;
+    for (unsigned sharing = 0; sharing != 4; ++sharing) {
+        Fixture f(128);
+        const Base base{.tokens = {1, 2}, .advice = {.session_key = 11}};
+        const auto owner = f.begin(base);
+        const auto point = f.program.add({1, 2}, {f.program.host_block(64)}, Role::Continuation);
+        f.cache.publish(f.program, owner, point);
+        f.cache.set_checkpoint_identity(owner, "victim", "tag");
+        f.cache.finish(f.program, owner, base, f.next_order);
+        const Base fork{.tokens = {1, 2, 3}, .advice = {.update_session_index = false, .session_key = 11}};
+        const auto child = f.begin(fork, point, {&point, 1});
+        require(child != owner && !f.cache.points(child).empty(), "fork did not carry shared handle");
+        if (sharing < 2)
+            f.cache.set_checkpoint_identity(child, sharing ? "victim" : "other", "tag");
+        if (sharing != 3) f.cache.finish(f.program, child, fork, f.next_order);
+        auto cursor = f.cache.begin_reclaim(f.program, {}, {ReclaimPurpose::OptionalWrite});
+        const auto excluded = f.cache.export_reclaim_exclusions({}, true);
+        const auto victim = f.cache.durable_victims("target").front();
+        require(f.cache.proven_victim_closure(f.program, victim, cursor, {}, excluded).empty() &&
+                    !f.cache.release_proven_durable_victim(f.program, victim, {&point, 1}, cursor, {}, excluded) &&
+                    f.program.valid_checkpoint(point),
+                "proof for one owner erased another logical owner's handle");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
+        test_proven_export_closure_and_protections();
+        test_proven_export_logical_owner_exclusivity();
         test_abandoned_turn_preserves_committed_owner();
         test_pending_checkpoint_blocks_complete_destructive_plan();
         test_import_publication_is_private_and_freshly_ordered();

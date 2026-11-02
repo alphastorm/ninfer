@@ -1,4 +1,5 @@
 #include "runtime/engine/checkpoint_control.h"
+#include "runtime/engine/context_cache/types.h"
 
 #include <algorithm>
 #include <array>
@@ -86,6 +87,9 @@ DurableCheckpointStats checkpoint_stats() {
 }
 
 struct ExportProgram {
+    struct Usage { struct { std::size_t host_bytes = 0; } occupied; };
+    Usage physical_usage() const { return {}; }
+    std::size_t release_redundant_host(std::span<const int>) { return 0; }
     struct Image {
         bool device = false;
         unsigned readers = 0;
@@ -131,6 +135,9 @@ struct ExportProgram {
             return owner ? DurablePrepareState::Prepared : DurablePrepareState::CapacityRefused;
         }
         DurableReason reason() const { return owner ? DurableReason::None : DurableReason::Capacity; }
+        enum class HostKind { Prepared, HostCapacity, HostContiguity };
+        HostKind host_shortage_kind() const { return HostKind::Prepared; }
+        std::size_t host_shortage_bytes() const { return 0; }
         DurableExportResult write(ContinuationCheckpointWriter& writer) {
             if (!owner) { return {.reason = DurableReason::Capacity}; }
             const std::array<std::byte, 1> bytes{};
@@ -204,6 +211,20 @@ struct ExportResources {
     struct Publication { std::string digest; std::string tag; };
     struct Owner { std::string tag; std::vector<int> points; };
     struct Victim { std::string session; std::string tag; };
+    using DurableVictim = Victim;
+    struct ReclaimCursor { std::vector<int> victims; };
+    struct Shortage { std::size_t host_bytes = 0; };
+    ReclaimCursor begin_reclaim(ExportProgram&, std::nullopt_t, ReclaimRights) { return {}; }
+    std::vector<int> export_reclaim_exclusions(std::span<const int> points, bool) const {
+        return {points.begin(), points.end()};
+    }
+    std::vector<int> proven_victim_closure(ExportProgram&, const Victim&, const ReclaimCursor&,
+                                         std::span<const int>, std::span<const int>) { return {}; }
+    bool release_proven_durable_victim(ExportProgram&, const Victim&, std::span<const int>,
+        ReclaimCursor&, std::span<const int>, std::span<const int>) { return false; }
+    ReclaimProgress reclaim(ExportProgram&, Shortage, std::span<const int>, ReclaimCursor&) {
+        return ReclaimProgress::Blocked;
+    }
     std::map<std::string, Owner, std::less<>> owners;
     Publication prepare_import_publication(const Contract::CacheSessionKey&,
         std::optional<Contract::CacheSessionKey>, std::string digest, std::string tag, std::size_t) {
@@ -324,6 +345,7 @@ class AdapterFixture {
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     std::size_t checkpoint_exports_in_flight_ = 0;
+    std::size_t checkpoint_pressure_depth_ = 0;
     std::exception_ptr checkpoint_publication_failure_;
     std::atomic<bool> admission_check_pending_{false};
     bool stopping_ = false;
@@ -460,7 +482,7 @@ void isolated_import_waits_for_export(bool writer_throws) {
     } catch (const WriterFailure&) { threw = true; }
     require(threw == writer_throws, "writer exception was swallowed or manufactured");
     const auto after = core.progress();
-    require(after.first == before.first + 1 && after.second == before.second + 1,
+    require(after.first == before.first + 1 && after.second == before.second,
             "export retirement did not publish one capacity/admission event");
     require(!core.capacity_pending() && core.on_worker([&] { return program.pinned_device_slots() == 0; }),
             "completed export still owns a native reader or pending-capacity claim");
@@ -499,7 +521,7 @@ void export_retirement_survives_allocation_failure(bool writer_throws, bool inli
                 (writer_throws || result.state == DurableExportState::Exported),
             "allocation failure replaced the writer result or exception");
     const auto after = core.progress();
-    require(after.first == before.first + 1 && after.second == before.second + 1,
+    require(after.first == before.first + 1 && after.second == before.second,
             "allocation-safe retirement did not release capacity exactly once");
     require(core.on_worker([&] {
         return program.export_acquisitions == 1 && program.export_retirements == 1 &&
@@ -562,7 +584,7 @@ void overlapping_exports_retain_progress_until_last_release() {
     second.release();
     require(saving_second.get().state == DurableExportState::Exported, "second overlapping export failed");
     const auto after = core.progress();
-    require(after.first == before.first + 2 && after.second == before.second + 2 &&
+    require(after.first == before.first + 2 && after.second == before.second &&
                 !core.capacity_pending() && core.isolated_admission(),
             "last export retirement failed to unblock lossless admission");
 }

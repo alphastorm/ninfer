@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+import test_serve_shutdown_capacity_real as capacity_runner
 
 spec = importlib.util.spec_from_file_location(
     "serve_restore_real", Path(__file__).with_name("test_serve_restore_real.py"))
@@ -55,6 +56,34 @@ class RunnerContractTest(unittest.TestCase):
         self.assertIs(caught.exception, primary)
         self.assertIs(caught.exception.__cause__, cleanup)
         self.assertEqual(calls, ["stop"])
+
+    def test_capacity_includes_kv_but_not_index(self):
+        a = {"native_bytes": 1024, "state_bytes": 768, "index_bytes": 99999}
+        b = {"native_bytes": 1280, "state_bytes": 1024, "index_bytes": 99999}
+        continuation = {"native_bytes": 1536}
+        self.assertEqual(capacity_runner.constrained_capacity(a, b, continuation), 1536)
+
+    def test_unconstructible_fixture_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "cannot fit"):
+            capacity_runner.constrained_capacity(
+                {"native_bytes": 4096, "state_bytes": 512},
+                {"native_bytes": 4096, "state_bytes": 512}, {"native_bytes": 4096})
+
+    def test_pressure_requires_actual_occupancy(self):
+        a = {"states": 3, "state_bytes": 768}
+        b = {"states": 4, "state_bytes": 1024}
+        metrics = dict(zip(capacity_runner.METRICS, (1536, 768, 0, 3, 0, 4, 8)))
+        self.assertEqual(capacity_runner.pressure_proof(metrics, a, b, 1536), 256)
+        for key in ("host_context_reserved_bytes", "host_kv_used_bytes",
+                    "host_context_used_bytes", "device_state_used_slots"):
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, "invalidates"):
+                capacity_runner.pressure_proof({**metrics, key: metrics[key] + 1}, a, b, 1536)
+
+    def test_capacity_metrics_must_be_complete(self):
+        text = "\n".join(f"ninfer_{name} 256" for name in capacity_runner.METRICS)
+        self.assertEqual(len(capacity_runner.read_metrics(text)), len(capacity_runner.METRICS))
+        with self.assertRaisesRegex(RuntimeError, "absent"):
+            capacity_runner.read_metrics("")
 
 
 if __name__ == "__main__":

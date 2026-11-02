@@ -446,7 +446,7 @@ struct Release {
     Resources released;
 };
 
-// No scripted scenario reclaims a checkpoint, so every catalog plan is empty.
+// Native release quotes are backed by the same per-record Host ledger used by stats.
 struct ReclaimPlan {
     struct Batch {
         bool append(const Demotion&) { return false; }
@@ -687,16 +687,17 @@ public:
         PhysicalUsage usage;
         usage.capacity = {.state_slots    = ninfer::kMaximumConcurrency,
                           .kv_page_groups = {kPageGroups},
-                          .host_bytes     = kHostCapacityBytes};
+                          .host_bytes     = host_capacity};
         for (const auto& lane : lanes_) {
             usage.occupied.state_slots += lane.active ? 1U : 0U;
             usage.occupied.kv_page_groups[0] += lane.active ? 1U : 0U;
         }
-        const auto checkpoints = static_cast<std::size_t>(std::count_if(
-            records_.begin(), records_.end(), [](const Record& record) { return record.valid; }));
+        std::size_t checkpoint_bytes = 0;
+        for (const auto& record : records_) if (record.valid) checkpoint_bytes += record.host_bytes;
         usage.host_reserved_bytes = reserved_points_ * kCheckpointHostBytes;
         usage.occupied.host_bytes =
-            (checkpoints + staged_exports_) * kCheckpointHostBytes + usage.host_reserved_bytes;
+            checkpoint_bytes + staged_exports_ * kCheckpointHostBytes + usage.host_reserved_bytes +
+            redundant_bytes + retained_extent_bytes_;
         return usage;
     }
 
@@ -706,7 +707,7 @@ public:
 
     [[nodiscard]] std::size_t release_redundant_host(std::span<const Checkpoint>,
                                                      std::optional<Sequence> = std::nullopt) {
-        return 0;
+        return std::exchange(redundant_bytes, 0);
     }
 
     [[nodiscard]] bool start_pause(Sequence sequence, bool, rt::ExecutionTiming* = nullptr) {
@@ -743,6 +744,8 @@ public:
     // Like native checkpoint storage, a record pinned by an export lease cannot be erased.
     [[nodiscard]] bool release_checkpoint(Checkpoint checkpoint) noexcept {
         if (!valid_checkpoint(checkpoint) || records_[checkpoint.index].pins != 0) { return false; }
+        if (zero_arena_gain && checkpoint.index == 0)
+            retained_extent_bytes_ += records_[checkpoint.index].host_bytes;
         records_[checkpoint.index].valid = false;
         return true;
     }
@@ -771,17 +774,31 @@ public:
         return 0;
     }
 
-    [[nodiscard]] std::size_t host_bytes_released(std::span<const Checkpoint>) const { return 0; }
+    [[nodiscard]] std::size_t host_bytes_released(std::span<const Checkpoint> points) const {
+        std::size_t bytes = 0;
+        for (auto point : points) {
+            if (!valid_checkpoint(point) || live_record(point).pins) return 0;
+            bytes += live_record(point).host_bytes;
+        }
+        return bytes;
+    }
 
     [[nodiscard]] ReclaimPlan plan_reclaim(std::span<const Checkpoint>, std::span<const Checkpoint>,
                                            Resources) const {
         return {};
     }
 
-    [[nodiscard]] std::vector<Release> plan_releases(std::span<const Checkpoint>,
-                                                     std::span<const Checkpoint>,
-                                                     Resources) const {
-        return {};
+    [[nodiscard]] std::vector<Release> plan_releases(std::span<const Checkpoint> allowed,
+                                                     std::span<const Checkpoint> excluded,
+                                                     Resources shortage) const {
+        std::vector<Release> plans;
+        if (!shortage.host_bytes) return plans;
+        for (auto point : allowed) {
+            if (std::find(excluded.begin(), excluded.end(), point) != excluded.end()) continue;
+            const auto bytes = host_bytes_released({&point, 1});
+            if (bytes) plans.push_back({{point}, {.host_bytes = bytes}});
+        }
+        return plans;
     }
 
     [[nodiscard]] bool start_demote(const Demotion&) { return false; }
@@ -819,29 +836,52 @@ public:
         std::uint32_t points_ = 0;
     };
 
-    // Pins its checkpoints and stages their copy in counted Host memory until it retires.
+    enum class HostKind { Prepared, Busy, NoHostArena, HostCapacity, HostContiguity };
+    std::size_t host_capacity = kHostCapacityBytes;
+    std::size_t redundant_bytes = 0;
+    bool zero_arena_gain = false;
+    std::optional<HostKind> forced_refusal;
+    rt::DurableReason refusal_reason = rt::DurableReason::Capacity;
+    std::uint64_t prepare_calls = 0;
+    std::function<void()> validation_callback;
+    bool validation_valid = true;
+
+    // Refused leases acquire no readers; prepared leases stage counted Host copies.
     class ExportLease {
     public:
         ExportLease(Program& program, std::span<const Checkpoint> points)
             : program_(&program), points_(points.begin(), points.end()) {
+            ++program.prepare_calls;
+            const auto used = program.physical_usage().occupied.host_bytes;
+            if (program.forced_refusal || used + kCheckpointHostBytes > program.host_capacity) {
+                kind_ = program.forced_refusal.value_or(HostKind::HostCapacity);
+                shortage_ = kind_ == HostKind::HostCapacity
+                    ? used + kCheckpointHostBytes - program.host_capacity : 0;
+                reason_ = program.refusal_reason;
+                return;
+            }
             for (const auto point : points_) { ++program.live_record(point).pins; }
             ++program.staged_exports_;
         }
 
         ExportLease(ExportLease&& other) noexcept
-            : program_(std::exchange(other.program_, nullptr)), points_(std::move(other.points_)) {}
+            : program_(std::exchange(other.program_, nullptr)), points_(std::move(other.points_)),
+              kind_(other.kind_), shortage_(other.shortage_), reason_(other.reason_) {}
 
         ExportLease& operator=(ExportLease&&) = delete;
 
         ~ExportLease() {
-            if (program_ != nullptr) { program_->retire_export(points_); }
+            if (program_ != nullptr && kind_ == HostKind::Prepared) { program_->retire_export(points_); }
         }
 
         [[nodiscard]] rt::DurablePrepareState state() const noexcept {
-            return rt::DurablePrepareState::Prepared;
+            return kind_ == HostKind::Prepared ? rt::DurablePrepareState::Prepared
+                                               : rt::DurablePrepareState::CapacityRefused;
         }
 
-        [[nodiscard]] rt::DurableReason reason() const noexcept { return rt::DurableReason::None; }
+        [[nodiscard]] rt::DurableReason reason() const noexcept { return reason_; }
+        [[nodiscard]] HostKind host_shortage_kind() const noexcept { return kind_; }
+        [[nodiscard]] std::size_t host_shortage_bytes() const noexcept { return shortage_; }
 
         // Runs off the worker and reads only the copy this lease staged.
         [[nodiscard]] rt::DurableExportResult write(rt::ContinuationCheckpointWriter& writer) {
@@ -856,6 +896,9 @@ public:
     private:
         Program* program_ = nullptr;
         std::vector<Checkpoint> points_;
+        HostKind kind_ = HostKind::Prepared;
+        std::size_t shortage_ = 0;
+        rt::DurableReason reason_ = rt::DurableReason::None;
     };
 
     [[nodiscard]] rt::DurableNativeLayout checkpoint_layout() const { return {}; }
@@ -868,14 +911,16 @@ public:
     }
 
     struct ImportValidation {
-        enum class State : std::uint8_t { Validated } state = State::Validated;
+        enum class State : std::uint8_t { Validated, Corrupt } state = State::Validated;
         rt::DurableReason reason = rt::DurableReason::None;
     };
 
     [[nodiscard]] ImportValidation validate_checkpoint_import(const rt::DurableCheckpointSet&,
-                                                              const rt::ContinuationCheckpointReader&,
+                                                              const rt::ContinuationCheckpointReader& reader,
                                                               const rt::DurableLimits&) const {
-        return {};
+        if (validation_callback) validation_callback();
+        return validation_valid && reader.verify_complete() ? ImportValidation{} :
+            ImportValidation{ImportValidation::State::Corrupt, rt::DurableReason::PayloadDigestMismatch};
     }
 
     [[nodiscard]] ImportReservation prepare_checkpoint_import(const rt::DurableCheckpointSet& set,
@@ -925,6 +970,7 @@ private:
         std::uint32_t frontier = 0;
         std::uint32_t pins     = 0;
         bool valid             = false;
+        std::size_t host_bytes = kCheckpointHostBytes;
     };
 
     [[nodiscard]] Checkpoint publish_checkpoint(std::uint32_t frontier) noexcept {
@@ -969,6 +1015,7 @@ private:
     }
 
     Events& events_;
+    std::size_t retained_extent_bytes_ = 0;
     std::shared_ptr<PublicationGate> gate_;
     std::array<rt::KvPoolDescriptor, 1> pools_{
         rt::KvPoolDescriptor{.id = {0}, .label = "main", .device_page_groups = kPageGroups}};
@@ -1116,20 +1163,23 @@ struct Outcome {
 // The serving store's authenticated Reader for the one-point scripted session checkpoint.
 class IndexReader final : public rt::ContinuationCheckpointReader {
 public:
+    bool fresh_available = true, readable = true, complete = true;
+    std::string digest = std::string(64, 'a');
     [[nodiscard]] std::optional<std::uint64_t> file_size(std::string_view path) const override {
         return path == "engine/index.cbor" ? std::optional<std::uint64_t>(1) : std::nullopt;
     }
 
-    [[nodiscard]] std::optional<rt::DurablePayload> file_descriptor(std::string_view) const override {
-        return std::nullopt;
+    [[nodiscard]] std::optional<rt::DurablePayload> file_descriptor(std::string_view path) const override {
+        if (path != "engine/index.cbor") return std::nullopt;
+        return rt::DurablePayload{std::string(path), 1, digest, 1};
     }
 
     bool read_file(std::string_view, std::uint64_t, std::span<std::byte> destination) const override {
         std::fill(destination.begin(), destination.end(), std::byte{});
-        return true;
+        return readable;
     }
 
-    [[nodiscard]] bool verify_complete() const override { return true; }
+    [[nodiscard]] bool verify_complete() const override { return complete; }
 
     [[nodiscard]] rt::DurableReason failure_reason() const noexcept override {
         return rt::DurableReason::None;
@@ -1137,7 +1187,22 @@ public:
 
     [[nodiscard]] std::shared_ptr<const rt::ContinuationCheckpointReader>
     fresh_reader() const override {
-        return std::make_shared<IndexReader>();
+        return fresh_available ? std::make_shared<IndexReader>(*this) : nullptr;
+    }
+};
+
+class VictimOracle final : public rt::ReclaimableSessionOracle {
+public:
+    mutable std::size_t calls = 0;
+    bool missing = false, missing_current = false, changed = false;
+    IndexReader reader;
+    std::shared_ptr<const rt::ContinuationCheckpointReader>
+    pin_recoverable(std::string_view, std::string_view) const noexcept override {
+        ++calls;
+        if (missing || (missing_current && calls % 2 == 0)) return {};
+        auto pin = std::make_shared<IndexReader>(reader);
+        if (changed && calls % 2 == 0) pin->digest = std::string(64, 'b');
+        return pin;
     }
 };
 
@@ -1202,13 +1267,14 @@ public:
     }
 
     // A turn of the durable session: its completed continuation becomes a named checkpoint owner.
-    [[nodiscard]] Submission submit_turn(Script script, const std::string& tag) {
+    [[nodiscard]] Submission submit_turn(Script script, const std::string& tag,
+                                         std::string_view session = kSession) {
         Prompt prompt{.script = script, .publish_continuation = true};
         const ninfer::PromptSummary summary{.prompt_tokens = prompt.tokens};
         rt::ResolvedRequestOptions options;
         options.execution.requested_output_tokens = 1;
         return core_->submit(std::move(prompt), summary, 0.0, std::move(options),
-                             ninfer::OutputConsumerMode::Aggregate, {}, {}, kSession, tag);
+                             ninfer::OutputConsumerMode::Aggregate, {}, {}, std::string(session), tag);
     }
 
     // Waits as an HTTP handler would, then reads runtime statistics before anything else runs.
@@ -1245,11 +1311,16 @@ public:
     }
 
     // Exports a durable session endpoint, as the checkpoint service does before publishing it.
-    [[nodiscard]] rt::DurableExportResult save(const std::string& tag) {
+    [[nodiscard]] rt::DurableExportResult save(
+        const std::string& tag, std::string_view session = kSession,
+        rt::DurableSaveIntent intent = rt::DurableSaveIntent::Automatic) {
         NullWriter writer;
-        return core_->export_session(kSession, tag, writer, {});
+        return core_->export_session(session, tag, writer, {}, intent);
     }
 
+    void configure(const std::function<void(Program&)>& action) {
+        core_->checkpoint_call([&] { action(*instance_.program); });
+    }
     void release_stalls() { events_.stall_released.store(true); }
 
     [[nodiscard]] Events& events() noexcept { return events_; }
@@ -1596,6 +1667,164 @@ void late_turn_after_acknowledgement() {
     (void)harness.observed_stats();
 }
 
+void acknowledged_turn(Harness& h, std::string_view session, const std::string& tag) {
+    auto turn = h.submit_turn(Script::Complete, tag, session);
+    require_finished(h.await(turn), FinishReason::OutputLimit, "reclaim fixture turn");
+    h.core().response_stored(session, tag);
+}
+
+class PendingHandler final : public rt::PressureCheckpointHandler {
+public:
+    unsigned calls = 0;
+    std::function<void()> callback;
+    void save_before_eviction(std::span<rt::PressureCheckpointVictim>) noexcept override {
+        ++calls;
+        if (callback) callback();
+    }
+};
+
+void export_proven_victim() {
+    Harness h(1, true);
+    acknowledged_turn(h, "victim", "a");
+    acknowledged_turn(h, kSession, "b");
+    auto oracle = std::make_shared<VictimOracle>();
+    auto pending = std::make_shared<PendingHandler>();
+    h.core().set_reclaimable_session_oracle(oracle);
+    h.core().set_pressure_checkpoint_handler(pending);
+    h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; });
+    const auto clock = h.core().checkpoint_progress();
+    const auto saved = h.save("b", kSession, rt::DurableSaveIntent::Final);
+    require(saved.state == rt::DurableExportState::Exported && oracle->calls == 2 &&
+                pending->calls == 0 && saved.proof_pins.size() == 2 &&
+                saved.reclaim.prepare_attempts == 2 && saved.reclaim.reclaimed_owners == 1 &&
+                saved.reclaim.reclaimed_host_bytes == kCheckpointHostBytes &&
+                saved.reclaim.reclaimed_cache_steps == 0,
+            "fresh proof must bypass stopped/Pending handler and retain both generation pins");
+    require(h.core().checkpoint_progress() == clock, "save-owned release advanced observed progress");
+    require(h.core().publish_export(kSession, "b", saved.captured_epoch, [] { return true; }).state ==
+                rt::DurableExportState::Exported, "reclaim lost the publication gate");
+    require_durable(h.observed_stats(), {.catalog = 1, .host = 1}, "proven victim release stats");
+}
+
+void export_proof_failures_and_intents() {
+    for (unsigned failure = 0; failure != 9; ++failure) {
+        Harness h(1, true);
+        acknowledged_turn(h, "victim", "a");
+        acknowledged_turn(h, kSession, "b");
+        auto oracle = std::make_shared<VictimOracle>();
+        oracle->missing = failure == 1;
+        oracle->reader.fresh_available = failure != 2;
+        oracle->reader.readable = failure != 3;
+        oracle->reader.complete = failure != 4;
+        oracle->missing_current = failure == 5;
+        oracle->changed = failure == 6;
+        if (failure) h.core().set_reclaimable_session_oracle(oracle);
+        h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; });
+        const auto intent = failure == 7 ? rt::DurableSaveIntent::Automatic :
+                            failure == 8 ? rt::DurableSaveIntent::Survivor : rt::DurableSaveIntent::Explicit;
+        const auto result = h.save("b", kSession, intent);
+        require(result.reason == rt::DurableReason::Capacity && result.reclaim.prepare_attempts == 1 &&
+                    result.reclaim.reclaimed_owners == 0 && result.reclaim.reclaimed_host_bytes == 0,
+                "unproved or policy-disabled victim was reclaimed");
+        if (failure >= 7) require(oracle->calls == 0, "automatic/survivor save performed disk proof");
+        require_durable(h.observed_stats(), {.catalog = 2, .host = 2}, "declined victim remains resident");
+    }
+}
+
+void export_classification_and_contiguity() {
+    for (auto kind : {Program::HostKind::Busy, Program::HostKind::NoHostArena,
+                      Program::HostKind::Prepared, Program::HostKind::HostContiguity}) {
+        for (bool cleanup : {false, true}) {
+            Harness h(1, true);
+            acknowledged_turn(h, "victim", "a");
+            acknowledged_turn(h, kSession, "b");
+            auto oracle = std::make_shared<VictimOracle>();
+            h.core().set_reclaimable_session_oracle(oracle);
+            h.configure([&](Program& p) {
+                // Prepared is the unclassified non-Host Capacity site in this fixture.
+                p.forced_refusal = kind == Program::HostKind::Prepared ? Program::HostKind::Busy : kind;
+                p.refusal_reason = kind == Program::HostKind::Prepared
+                    ? rt::DurableReason::TransactionBusy : rt::DurableReason::Capacity;
+                p.redundant_bytes = cleanup ? kCheckpointHostBytes : 0;
+            });
+            const auto result = h.save("b", kSession, rt::DurableSaveIntent::Final);
+            const bool lossless = kind == Program::HostKind::HostContiguity && cleanup;
+            require(result.state == rt::DurableExportState::Refused && oracle->calls == 0 &&
+                        result.reclaim.prepare_attempts == (lossless ? 2 : 1) &&
+                        result.reclaim.reclaimed_owners == 0 && result.reclaim.reclaimed_cache_steps == 0 &&
+                        result.reclaim.reclaimed_host_bytes == (lossless ? kCheckpointHostBytes : 0),
+                    "non-byte shortage performed destructive reclaim or unbacked prepare");
+        }
+    }
+}
+
+void export_zero_progress_and_residual() {
+    {
+        Harness h(1, true);
+        acknowledged_turn(h, "first-victim", "a");
+        acknowledged_turn(h, "second-victim", "b");
+        acknowledged_turn(h, kSession, "c");
+        auto oracle = std::make_shared<VictimOracle>();
+        h.core().set_reclaimable_session_oracle(oracle);
+        h.configure([](Program& p) { p.host_capacity = 3 * kCheckpointHostBytes; p.zero_arena_gain = true; });
+        const auto result = h.save("c", kSession, rt::DurableSaveIntent::Final);
+        require(result.state == rt::DurableExportState::Exported &&
+                    result.reclaim.reclaimed_owners == 2 && result.reclaim.prepare_attempts == 2 &&
+                    result.reclaim.reclaimed_host_bytes == kCheckpointHostBytes,
+                "zero arena gain ended the fixed scan or authorized a prepare");
+    }
+    {
+        Harness h(1, true);
+        acknowledged_turn(h, kSession, "old");
+        acknowledged_turn(h, kSession, "current"); // old becomes ordinary cache
+        h.configure([](Program& p) {
+            p.host_capacity = 2 * kCheckpointHostBytes;
+            p.redundant_bytes = kCheckpointHostBytes / 2;
+        });
+        const auto clock = h.core().checkpoint_progress();
+        const auto result = h.save("current");
+        require(result.state == rt::DurableExportState::Exported &&
+                    result.reclaim.reclaimed_cache_steps == 1 &&
+                    result.reclaim.reclaimed_host_bytes == 3 * kCheckpointHostBytes / 2 &&
+                    result.reclaim.prepare_attempts == 2 && h.core().checkpoint_progress() == clock,
+                "ordinary all-or-nothing plan was given the original rather than residual deficit");
+    }
+    {
+        Harness h(1, true);
+        acknowledged_turn(h, "protected", "a");
+        acknowledged_turn(h, kSession, "b");
+        h.configure([](Program& p) {
+            p.host_capacity = 2 * kCheckpointHostBytes;
+            p.redundant_bytes = kCheckpointHostBytes / 2;
+        });
+        const auto clock = h.core().checkpoint_progress();
+        const auto result = h.save("b");
+        require(result.reason == rt::DurableReason::Capacity &&
+                    result.reclaim.prepare_attempts == 2 &&
+                    result.reclaim.reclaimed_host_bytes == kCheckpointHostBytes / 2 &&
+                    h.core().checkpoint_progress() == clock,
+                "partially reclaiming automatic refusal woke its own deferred retry");
+    }
+}
+
+void export_pressure_reentry() {
+    Harness h(1, true);
+    acknowledged_turn(h, "victim", "a");
+    acknowledged_turn(h, kSession, "b");
+    auto handler = std::make_shared<PendingHandler>();
+    rt::DurableExportResult result;
+    handler->callback = [&] { result = h.save("b", kSession, rt::DurableSaveIntent::Explicit); };
+    h.core().set_pressure_checkpoint_handler(handler);
+    h.configure([](Program& p) { p.host_capacity = 2 * kCheckpointHostBytes; p.redundant_bytes = 1; });
+    h.core().checkpoint_call([&] {
+        rt::PressureCheckpointVictim victim{"victim", "a"};
+        (void)h.core().checkpoint_pressure({&victim, 1});
+    });
+    require(handler->calls == 1 && result.reason == rt::DurableReason::Capacity &&
+                result.reclaim.prepare_attempts == 1 && !result.reclaim.considered,
+            "inline pressure save recursively changed an outer quoted plan");
+}
+
 } // namespace
 
 int main() {
@@ -1623,6 +1852,11 @@ int main() {
         Case{"durable_export_release", durable_export_release},
         Case{"resident_waits_for_export", resident_waits_for_export},
         Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
+        Case{"export_proven_victim", export_proven_victim},
+        Case{"export_proof_failures_and_intents", export_proof_failures_and_intents},
+        Case{"export_classification_and_contiguity", export_classification_and_contiguity},
+        Case{"export_zero_progress_and_residual", export_zero_progress_and_residual},
+        Case{"export_pressure_reentry", export_pressure_reentry},
     };
     int failures = 0;
     for (const auto& test : cases) {
