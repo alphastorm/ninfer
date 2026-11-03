@@ -248,6 +248,7 @@ function Assert-SameLaunch([object]$Expected, [object]$Current) {
 }
 
 function Get-ShutdownHolds {
+    Get-StickyStopReceipt | Out-Null
     $envelope = Read-AttributionJson 'shutdown-holds.json'
     if ($null -eq $envelope) {
         return [pscustomobject]@{artifact_type='ninfer_windows_shutdown_holds';schema_version=1;holds=@()}

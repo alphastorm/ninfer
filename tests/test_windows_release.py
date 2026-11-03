@@ -114,6 +114,7 @@ def product_protocol_fixture() -> dict:
 # scripts and its GPU-owner policy are the predecessor state later releases install over.
 PREDECESSOR_3090 = "2c6f423bd817b6534158553e1b34ab4959c43165"
 PREDECESSOR_3090_BETA2 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
+HELD_STOP_PREDECESSOR = "6a6517711047ee940ac1e591cf3fce09f2b3c770"
 SYNTHETIC_GPU_UUID = "GPU-00000000-0000-4000-8000-000000003090"
 SYNTHETIC_GPU_PCI = "00000000:65:00.0"
 # The protected-state ACLs are Windows-only and are qualified on Windows hosts. These scenarios
@@ -1859,7 +1860,8 @@ class SharedLifecycleTreeTests(unittest.TestCase):
                      "Assert-SameLaunch", "Get-ShutdownHolds", "Get-StickyStopReceipt", "Remove-RuntimeForLaunch",
                      "Enter-LaunchFence"):
             with self.subTest(helper=name):
-                self.assertEqual(ps_function(controller, name).strip(), ps_function(installer, name).strip())
+                self.assertEqual(ps_function(controller, name).rsplit("\n}", 1)[0],
+                                 ps_function(installer, name).rsplit("\n}", 1)[0])
         publication = ps_function(controller, "Write-JsonAtomic")
         self.assertIn("[IO.File]::Replace", publication)
         self.assertIn("[IO.File]::Move", publication)
@@ -2460,6 +2462,11 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 DISPATCH_BOUNDARIES = r"""
 $WarningPreference='SilentlyContinue'
 function Assert-SelectedGpuIdentity {
+    if($Action -ceq 'Start'){
+        $slot=Join-Path $StateRoot 'runtime.json'
+        $before=if(Test-Path $slot){[IO.File]::ReadAllText($slot)}else{'null'}
+        [IO.File]::WriteAllText((Join-Path $StateRoot 'start-slot.json'),$before)
+    }
     $gate=Join-Path $StateRoot 'admission-Run'
     if($Action -ceq 'Run' -and (Test-Path $gate)){
         [IO.File]::WriteAllText(($gate+'.entered'),'entered')
@@ -2667,7 +2674,14 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                    "-Action", action, "-StateRoot", str(lane.root), "-WarningAction", "SilentlyContinue", *args]
         if background:
             return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        lane.last_result = subprocess.run(command, capture_output=True, text=True, timeout=45)
+        # Windows grandchildren can inherit an outer pipe even when their own streams are
+        # redirected. Capture to files so returning Start does not wait for a serving Run's EOF.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout, \
+                tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
+            completed = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=45)
+            stdout.seek(0)
+            stderr.seek(0)
+            lane.last_result = subprocess.CompletedProcess(command, completed.returncode, stdout.read(), stderr.read())
         return lane.last_result
 
     def seed(self, lane: SimpleNamespace, key: str = "1" * 32, report: dict | None = None,
@@ -3008,7 +3022,7 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
                     self.assertFalse((lane.root / "shutdown-holds.json").exists())
 
     def test_t12_strict_corruption_and_unattributable_census_preserve_everything(self) -> None:
-        for corrupt in ("runtime", "holds", "missing-with-temp", "blank-name", "missing-name"):
+        for corrupt in ("runtime", "holds", "missing-with-temp", "receipt-temp", "blank-name", "missing-name"):
             with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as directory:
                 lane = dispatcher_fixture(Path(directory))
                 self.seed(lane, report={})
@@ -3018,6 +3032,8 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
                     (lane.root / "shutdown-holds.json").write_text('{"holds":null}')
                 elif corrupt == "missing-with-temp":
                     (lane.root / "shutdown-holds.json.dead.tmp").write_text("{}")
+                elif corrupt == "receipt-temp":
+                    (lane.root / "last-stop.json.dead.tmp").write_text("{}")
                 else:
                     row = {"ProcessId": 4242, "ExecutablePath": None}
                     if corrupt == "blank-name":
@@ -3163,6 +3179,55 @@ function Get-ShutdownHolds {
                     self.assertEqual(self.holds(lane)[0]["runtime"], runtime)
                     self.assertFalse((lane.root / "runtime.json").exists())
 
+    def test_t5_held_predecessor_negative_control_uses_mutable_record_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Control-Release.ps1")
+            lane = dispatcher_fixture(Path(directory), source)
+            runtime = self.seed(lane, report={"refused": 1})
+            runtime.update(pid=987654, start_time_utc_ticks=4, gpu_uuid_verified=True)
+            (lane.root / "mutation.json").write_text(json.dumps(runtime))
+            result = self.dispatch(lane, "Stop")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("parameter cannot be found", result.stderr.lower())
+            self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), runtime)
+            self.assertIsNone(self.holds(lane)[0]["runtime"]["pid"])
+
+    def test_t6_held_predecessor_negative_control_loses_the_concurrent_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            for key in ("a" * 32, "c" * 32):
+                self.seed(lane, key, {"refused": 1})
+                self.dispatch(lane, "Stop")
+            envelope = json.loads((lane.root / "shutdown-holds.json").read_text())
+            for hold, release_id in zip(envelope["holds"], ("held-a", "sentinel")):
+                hold["release_id"] = release_id
+                hold["release_root"] = str(lane.root / "releases" / release_id)
+                hold["runtime"]["release_id"] = release_id
+                hold["stop_receipt"]["release_id"] = release_id
+            (lane.root / "shutdown-holds.json").write_text(json.dumps(envelope))
+            source = committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Control-Release.ps1")
+            source = source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+            source = source.replace(b"switch ($Action) {", DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+            install_script(source, lane.root / "Control-Release.ps1")
+            self.seed(lane, "b" * 32)
+            barrier = lane.root / "barrier-Reconcile"
+            barrier.touch()
+            one = self.dispatch(lane, "Reconcile", "-ReleaseId", "held-a", background=True)
+            self.addCleanup(lambda p=one: p.poll() is None and p.kill())
+            self.wait_file(Path(str(barrier) + ".entered"), one)
+            two = self.dispatch(lane, "Run", background=True)
+            self.addCleanup(lambda p=two: p.poll() is None and p.kill())
+            self.wait_file(lane.root / "wrapper-ready", two)
+            # The old writers use different locks: B commits while Reconcile's write is paused.
+            self.assertIn("b" * 32, {h["runtime"]["launch_id"] for h in self.holds(lane)})
+            Path(str(barrier) + ".release").touch()
+            stdout, stderr = one.communicate(timeout=30)
+            self.assertEqual(one.returncode, 0, stdout + stderr)
+            self.assertEqual({h["runtime"]["launch_id"] for h in self.holds(lane)}, {"c" * 32})
+            (lane.root / "child-exit").touch()
+            stdout, stderr = two.communicate(timeout=30)
+            self.assertEqual(two.returncode, 0, stdout + stderr)
+
     def test_t6_run_and_reconcile_serialize_the_envelope(self) -> None:
         for first in ("Reconcile", "Run"):
             with self.subTest(first=first), tempfile.TemporaryDirectory() as directory:
@@ -3217,10 +3282,15 @@ function Get-ShutdownHolds {
                 self.assertEqual([h["launch_id"] for h in json.loads(receipts[0].read_text())["cleared_holds"]],
                                  ["a" * 32])
 
-    def test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(self) -> None:
-        for legacy in (False, True):
+    def test_t9_held_predecessor_negative_control_restarts_over_candidate_attribution(self) -> None:
+        self.test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(historical=True)
+
+    def test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(self, historical=False) -> None:
+        for legacy in ((True,) if historical else (False, True)):
             with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as directory:
-                lane = dispatcher_fixture(Path(directory))
+                source = (committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Control-Release.ps1")
+                          if historical else None)
+                lane = dispatcher_fixture(Path(directory), source)
                 candidate = lane.instance
                 incumbent = "incumbent"
                 incumbent_root = lane.root / "releases" / incumbent
@@ -3270,11 +3340,22 @@ function Get-ShutdownHolds {
                                   for field, name in (("state", "state"), ("controller", "controller"))},
                 }))
                 self.seed(lane, report={"refused": 1})
-                upgrade = SimpleNamespace(root=lane.root, journal=journal)
+                installer = WINDOWS / "Install-Release.ps1"
+                if historical:
+                    installer = Path(directory) / "held-installer.ps1"
+                    installer.write_bytes(committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Install-Release.ps1"))
                 attempt = (ps_assignments(StateRoot=lane.root, Journal=journal, Mode="repair", LiveProcesses="[]")
-                           + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
+                           + ps_definitions(installer) + ROLLBACK_ATTEMPT)
                 result = PowerShellContractTests().invoke(attempt)
                 self.assertFalse(result["completed"])
+                if historical:
+                    before_start = json.loads((lane.root / "start-slot.json").read_text())
+                    self.assertEqual(before_start["release_id"], candidate)
+                    self.assertEqual(before_start["launch_id"], "1" * 32)
+                    (lane.root / "child-exit").touch()
+                    self.dispatch(lane, "Stop")
+                    continue
+                self.assertIsNone(json.loads((lane.root / "start-slot.json").read_text()))
                 self.assertEqual(json.loads(journal.read_text())["status"], "held_cleanup", result)
                 held = self.holds(lane)
                 runtime = json.loads((lane.root / "runtime.json").read_text())
@@ -3303,11 +3384,14 @@ function Get-ShutdownHolds {
 @unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for executable script contracts")
 class PowerShellContractTests(unittest.TestCase):
     def invoke(self, script: str) -> object:
-        result = subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
-             "$ErrorActionPreference='Stop';$WarningPreference='SilentlyContinue';\n" + script],
-            text=True, capture_output=True,
-        )
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout, \
+                tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
+            command = [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+                       "$ErrorActionPreference='Stop';$WarningPreference='SilentlyContinue';\n" + script]
+            completed = subprocess.run(command, stdout=stdout, stderr=stderr)
+            stdout.seek(0)
+            stderr.seek(0)
+            result = subprocess.CompletedProcess(command, completed.returncode, stdout.read(), stderr.read())
         if result.returncode != 0:
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
@@ -4269,7 +4353,7 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
         Restored or missing lifecycle state cannot prove that an unattributed server exited."""
         for state_present in (True, False):
             for image, name in ((None, "ninfer-serve.exe"), ("", "NINFER-SERVE.EXE"),
-                                (" \t\r\n", "NInfer-Serve.exe")):
+                                (" \t\r\n", "NInfer-Serve.exe"), (None, None), ("", ""), ("", " \t")):
                 with self.subTest(state_present=state_present, image=image, name=name), \
                         tempfile.TemporaryDirectory() as directory:
                     upgrade = interrupted_upgrade(Path(directory))
@@ -4283,9 +4367,11 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                     before = {path: path.read_bytes() for path in upgrade.root.rglob("*")
                               if path.is_file() and path != upgrade.journal}
                     entry = {"ProcessId": 4242, "Name": name, "ExecutablePath": image}
+                    if name is None:
+                        del entry["Name"]
                     observed = self.rollback_attempt(upgrade, "repair", live_processes=(entry,))
                     self.assertFalse(observed["completed"], observed)
-                    for diagnostic in ("unreadable image path", name, "4242"):
+                    for diagnostic in ("unreadable image path", "4242") + ((name,) if name else ()):
                         self.assertIn(diagnostic, observed["failure"])
                     journal = json.loads(upgrade.journal.read_text(encoding="utf-8"))
                     self.assertEqual(journal["status"], "repair_required")

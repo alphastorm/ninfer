@@ -728,7 +728,7 @@ def load_tests(loader, tests, pattern):
     spec.loader.exec_module(module)
     tests.addTests(loader.loadTestsFromTestCase(module.ManagedShutdownDispatcherTests))
     tests.addTests(loader.loadTestsFromTestCase(module.QualificationRestorationTests))
-    tests.addTests(loader.loadTestsFromTestCase(module.SharedLifecycleTreeTests))
+    tests.addTest(module.SharedLifecycleTreeTests('test_shutdown_attribution_helpers_share_one_mutation_domain'))
     return tests
 
 
