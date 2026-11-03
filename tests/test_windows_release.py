@@ -2568,6 +2568,11 @@ function Test-ServerStartGpu {
     [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper-ready'),'ready')
     $true
 }
+$script:wrapperWait=${function:Wait-ManagedWrapperExit}
+function Wait-ManagedWrapperExit([string]$TaskName,[DateTime]$DeadlineUtc){
+    if(Test-Path (Join-Path $StateRoot 'wrapper-stalls')){return $false}
+    & $script:wrapperWait $TaskName $DeadlineUtc
+}
 function Wait-Ready {
     $deadline=[DateTime]::UtcNow.AddSeconds(20)
     while([DateTime]::UtcNow -lt $deadline){
@@ -2579,7 +2584,12 @@ function Wait-Ready {
         if($null -ne $rt -and [string]$rt.release_id -ceq [string]$bound.active_release -and
            $null -ne $rt.pid -and $null -ne (Get-Process -Id $rt.pid) -and
            $null -ne $rt.PSObject.Properties['gpu_uuid_verified'] -and $rt.gpu_uuid_verified){
-            if(Test-Path (Join-Path $StateRoot 'ready-fails')){throw 'fixture original readiness failure'}
+            $fault=Join-Path $StateRoot 'ready-fails'
+            if((Test-Path $fault) -and
+               ([string]::IsNullOrEmpty([IO.File]::ReadAllText($fault)) -or
+                [IO.File]::ReadAllText($fault) -ceq [string]$rt.release_id)){
+                throw ('fixture original readiness failure for '+[string]$rt.release_id)
+            }
             return
         }
         Start-Sleep -Milliseconds 100
@@ -3052,6 +3062,63 @@ $result|ConvertTo-Json -Compress
             self.assertFalse((lane.root / "runtime.json").exists())
             self.assertTrue((lane.root / "gpu-owner-lease.json").exists())
             self.assertEqual(len(self.holds(lane)), 1)
+
+    def test_t3_allowheld_never_tolerates_unproven_wrapper_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            dispatcher_owner(lane)
+            started = self.dispatch(lane, "Start")
+            self.assertEqual(started.returncode, 0, started.stderr)
+            (lane.root / "wrapper-stalls").touch()
+            stopped = self.dispatch(lane, "Stop", "-AllowHeld")
+            self.assertNotEqual(stopped.returncode, 0)
+            self.assertIn("wrapper did not release", stopped.stderr)
+            self.assertTrue((lane.root / "runtime.json").exists())
+            self.assertTrue((lane.root / "gpu-owner-lease.json").exists())
+            self.assertFalse((lane.root / "shutdown-holds.json").exists())
+            (lane.root / "wrapper-stalls").unlink()
+            retried = self.dispatch(lane, "Stop", "-AllowHeld")
+            self.assertEqual(retried.returncode, 0, retried.stderr)
+            self.assertFalse((lane.root / "runtime.json").exists())
+            self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+            self.assertEqual(self.holds(lane)[0]["stop_receipt"]["outcome"], "wrapper_cleanup_stalled")
+
+    def test_t3_public_rollback_and_recovery_start_accept_held_stop_results(self) -> None:
+        for target_fails in (False, True):
+            with self.subTest(target_fails=target_fails), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                incumbent = "incumbent"
+                incumbent_root = lane.root / "releases" / incumbent
+                shutil.copytree(lane.release, incumbent_root)
+                for kind in ("cache", "secrets"):
+                    shutil.copytree(lane.root / kind / lane.instance, lane.root / kind / incumbent)
+                state = json.loads((lane.root / "state.json").read_text())
+                record = copy.deepcopy(state["releases"][lane.instance])
+                for field in ("release_root", "server_executable", "config_file", "receipts_root",
+                              "cache_root", "api_key_file"):
+                    record[field] = record[field].replace(lane.instance, incumbent)
+                state["releases"][incumbent] = record
+                state["previous_release"] = incumbent
+                (lane.root / "state.json").write_text(json.dumps(state))
+                self.seed(lane, report={"refused": 1})
+                if target_fails:
+                    (lane.root / "ready-fails").write_text(incumbent)
+                result = self.dispatch(lane, "Rollback")
+                if target_fails:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("fixture original readiness failure", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                expected = lane.instance if target_fails else incumbent
+                self.assertEqual(json.loads((lane.root / "state.json").read_text())["active_release"], expected)
+                runtime = json.loads((lane.root / "runtime.json").read_text())
+                self.assertEqual(runtime["release_id"], expected)
+                self.assertTrue(runtime["gpu_uuid_verified"])
+                self.assertIsNone(json.loads((lane.root / "start-slot.json").read_text()))
+                held = self.holds(lane)
+                self.assertEqual(held[0]["launch_id"], "1" * 32)
+                self.assertEqual(self.dispatch(lane, "Stop").returncode, 0)
+                self.assertEqual(self.holds(lane), held)
 
     def test_t7_packaged_reconcile_without_state_and_last_ack_empty_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
