@@ -114,7 +114,7 @@ def product_protocol_fixture() -> dict:
 # scripts and its GPU-owner policy are the predecessor state later releases install over.
 PREDECESSOR_3090 = "2c6f423bd817b6534158553e1b34ab4959c43165"
 PREDECESSOR_3090_BETA2 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
-HELD_STOP_PREDECESSOR = "6a6517711047ee940ac1e591cf3fce09f2b3c770"
+HELD_STOP_PREDECESSOR = "ef8d2583206695bd64fd99f0805733591f4a531c"
 SYNTHETIC_GPU_UUID = "GPU-00000000-0000-4000-8000-000000003090"
 SYNTHETIC_GPU_PCI = "00000000:65:00.0"
 # The protected-state ACLs are Windows-only and are qualified on Windows hosts. These scenarios
@@ -2479,6 +2479,14 @@ function Assert-SelectedGpuIdentity {
     0
 }
 function Get-NetTCPConnection { }
+function Get-Item([string]$LiteralPath) {
+    $item=Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath
+    if($item.Extension -ceq '.ninfer'){
+        $item|Add-Member NoteProperty CreationTimeUtc ([DateTime]::new(0,[DateTimeKind]::Utc)) -Force
+        $item|Add-Member NoteProperty LastWriteTimeUtc ([DateTime]::new(0,[DateTimeKind]::Utc)) -Force
+    }
+    return $item
+}
 function Get-Process([int]$Id,[string]$ErrorAction) {
     $process=Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction SilentlyContinue
     $birth=Join-Path $StateRoot 'child-process.json'
@@ -2567,23 +2575,16 @@ function Wait-Ready {
             throw ('fixture wrapper exited: '+$script:fixtureWrapper.StandardError.ReadToEnd())
         }
         $rt=Get-RuntimeState
-        if($null -ne $rt -and $rt.gpu_uuid_verified){
+        $bound=Read-JsonFile (Join-Path $StateRoot 'state.json')
+        if($null -ne $rt -and [string]$rt.release_id -ceq [string]$bound.active_release -and
+           $null -ne $rt.pid -and $null -ne (Get-Process -Id $rt.pid) -and
+           $null -ne $rt.PSObject.Properties['gpu_uuid_verified'] -and $rt.gpu_uuid_verified){
             if(Test-Path (Join-Path $StateRoot 'ready-fails')){throw 'fixture original readiness failure'}
             return
         }
         Start-Sleep -Milliseconds 100
     }
     throw 'fixture wrapper never published ready attribution'
-}
-$stateFile=Join-Path $StateRoot 'state.json'
-if(Test-Path $stateFile){
-    $fixtureState=Read-JsonFile $stateFile
-    foreach($entry in $fixtureState.releases.PSObject.Properties){
-        $model=Get-Item $entry.Value.model_artifact
-        $entry.Value.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
-        $entry.Value.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
-    }
-    Write-JsonAtomic $stateFile $fixtureState
 }
 $script:publication=${function:Write-JsonAtomic}
 function Write-JsonAtomic([string]$Path,[object]$Value) {
@@ -2829,6 +2830,125 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
                 Path(str(gate) + ".release").touch()
                 stdout, stderr = holder.communicate(timeout=10)
                 self.assertEqual(holder.returncode, 0, stdout + stderr)
+
+    def test_t10_forward_no_start_retires_exited_slot_and_excludes_task_retry(self) -> None:
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        start = installer.index("        Invoke-SuccessorSlotRetirement $transaction $controllerPath")
+        end = installer.index("\n        if (-not $NoStart) {", start)
+        activation = installer[start:end]
+        for before_fence in (False, True):
+            for legacy in (False, True):
+                with self.subTest(before_fence=before_fence, legacy=legacy), tempfile.TemporaryDirectory() as directory:
+                    lane = dispatcher_fixture(Path(directory))
+                    candidate = lane.instance
+                    incumbent = "incumbent"
+                    incumbent_root = lane.root / "releases" / incumbent
+                    shutil.copytree(lane.release, incumbent_root)
+                    state = json.loads((lane.root / "state.json").read_text())
+                    record = copy.deepcopy(state["releases"][candidate])
+                    for field in ("release_root", "server_executable", "config_file", "receipts_root",
+                                  "cache_root", "api_key_file"):
+                        record[field] = record[field].replace(candidate, incumbent)
+                    for kind in ("cache", "secrets"):
+                        shutil.copytree(lane.root / kind / candidate, lane.root / kind / incumbent)
+                    old_state = copy.deepcopy(state)
+                    old_state.update(active_release=incumbent, previous_release=None)
+                    old_state["releases"] = {incumbent: record}
+                    (lane.root / "state.json").write_text(json.dumps(old_state))
+                    (lane.root / "old-state.json").write_text(json.dumps(old_state))
+                    state.update(prepared_release=candidate, active_release=incumbent, previous_release=None)
+                    state["releases"][incumbent] = record
+                    (lane.root / "new-state.json").write_text(json.dumps(state))
+                    if legacy:
+                        old_source = committed_bytes("0628db0b0997c8bda4ac37c8e84da95986890014",
+                                                     "packaging/windows/Control-Release.ps1")
+                        old_source = old_source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+                        old_source = old_source.replace(b"switch ($Action) {",
+                                                        DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+                        install_script(old_source, lane.root / "Control-Release.ps1")
+                    controller_before = (lane.root / "Control-Release.ps1").read_bytes()
+                    runtime = self.seed(lane)
+                    runtime.update(release_id=incumbent,
+                                   shutdown_report=str(incumbent_root / "logs" / "shutdown.json"))
+                    (lane.root / "runtime.json").write_text(json.dumps(runtime))
+                    journal = self.first_install_journal(lane)
+                    transaction = json.loads(journal.read_text())
+                    transaction["flags"] = {key: False for key in transaction["flags"]}
+                    journal.write_text(json.dumps(transaction))
+                    gate = lane.root / "activation"
+                    setup = ps_assignments(StateRoot=lane.root, Journal=journal, Gate=gate,
+                                           Before=before_fence) + ps_definitions(WINDOWS / "Install-Release.ps1") + r"""
+$ErrorActionPreference='Stop';$WarningPreference='SilentlyContinue'
+$statePath=Join-Path $StateRoot 'state.json'
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$stateHelperPath=Join-Path $StateRoot 'Protect-StateRoot.ps1'
+$ownerControllerSource=$null
+$transaction=Read-JsonFile $Journal
+$oldState=Read-JsonFile (Join-Path $StateRoot 'old-state.json')
+$state=Read-JsonFile (Join-Path $StateRoot 'new-state.json')
+$instanceId=[string]$transaction.instance_id
+$incumbent=[string]$oldState.active_release
+$taskName=[string]$oldState.task_name
+$lifecycleBin=Join-Path (Join-Path $transaction.release_root 'bin') 'lifecycle'
+$controllerSource=Join-Path $lifecycleBin 'Control-Release.ps1'
+$secretDirectory=[string]$transaction.secret_directory
+$installedKey=Join-Path $secretDirectory 'api-key.txt'
+function Write-InstallEvent { }
+function Set-NInferProtectedRootAcl { }
+function Set-NInferProtectedFileAcl { }
+function Assert-NInferProtectedStateTree { }
+function Get-CimInstance { }
+function Pause-Activation {
+  [IO.File]::WriteAllText(($Gate+'.entered'),'entered')
+  $deadline=[DateTime]::UtcNow.AddSeconds(20)
+  while(-not(Test-Path ($Gate+'.release'))){
+    if([DateTime]::UtcNow -ge $deadline){throw 'fixture activation deadline'}
+    Start-Sleep -Milliseconds 50
+  }
+}
+$script:realFence=${function:Enter-LaunchFence}
+function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){
+  if($Before -ceq 'True' -and $Name -ceq 'action'){Pause-Activation}
+  & $script:realFence $Name 1
+}
+function Register-ReleaseTask {
+  if($Before -cne 'True'){Pause-Activation}
+}
+$result=@{completed=$true;failure=$null}
+try{
+"""
+                    script = setup + activation + r"""
+}catch{$result.completed=$false;$result.failure=$_.Exception.Message}
+$result|ConvertTo-Json -Compress
+"""
+                    process = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+                    self.wait_file(Path(str(gate) + ".entered"), process)
+                    self.assertFalse((lane.root / "runtime.json").exists())
+                    held = self.holds(lane)[0]
+                    self.assertEqual(held["runtime"]["release_id"], incumbent)
+                    retry = self.dispatch(lane, "Run", background=True)
+                    self.addCleanup(lambda p=retry: p.poll() is None and p.kill())
+                    if before_fence:
+                        self.wait_file(lane.root / "wrapper-ready", retry)
+                    else:
+                        stdout, stderr = retry.communicate(timeout=15)
+                        self.assertNotEqual(retry.returncode, 0)
+                        self.assertFalse((lane.root / "child-process.json").exists())
+                    Path(str(gate) + ".release").touch()
+                    stdout, stderr = process.communicate(timeout=20)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    outcome = json.loads(stdout)
+                    self.assertEqual(outcome["completed"], not before_fence, outcome)
+                    active = json.loads((lane.root / "state.json").read_text())["active_release"]
+                    self.assertEqual(active, incumbent if before_fence else candidate)
+                    if before_fence:
+                        self.assertEqual((lane.root / "Control-Release.ps1").read_bytes(), controller_before)
+                        (lane.root / "child-exit").touch()
+                        stdout, stderr = retry.communicate(timeout=20)
+                        self.assertEqual(retry.returncode, 0, stdout + stderr)
+                    self.assertEqual(self.holds(lane)[0], held)
 
     def test_t1_stop_outcome_table(self) -> None:
         for report in (None, {"complete": False}, {"refused": 1}, {"launch_id": "f" * 32},
@@ -3286,7 +3406,7 @@ function Get-ShutdownHolds {
         self.test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(historical=True)
 
     def test_t9_held_rollback_restores_real_incumbent_then_cleanup_only(self, historical=False) -> None:
-        for legacy in ((True,) if historical else (False, True)):
+        for legacy in ((False,) if historical else (False, True)):
             with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as directory:
                 source = (committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Control-Release.ps1")
                           if historical else None)
@@ -3316,6 +3436,8 @@ function Get-ShutdownHolds {
                 old_source = (committed_bytes("0628db0b0997c8bda4ac37c8e84da95986890014",
                                              "packaging/windows/Control-Release.ps1")
                               if legacy else (WINDOWS / "Control-Release.ps1").read_bytes())
+                if historical:
+                    old_source = committed_bytes(HELD_STOP_PREDECESSOR, "packaging/windows/Control-Release.ps1")
                 old_source = old_source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
                 old_source = old_source.replace(b"switch ($Action) {",
                                                 DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
@@ -3352,8 +3474,8 @@ function Get-ShutdownHolds {
                     before_start = json.loads((lane.root / "start-slot.json").read_text())
                     self.assertEqual(before_start["release_id"], candidate)
                     self.assertEqual(before_start["launch_id"], "1" * 32)
-                    (lane.root / "child-exit").touch()
-                    self.dispatch(lane, "Stop")
+                    self.assertIn("not installed", result["failure"])
+                    self.assertFalse((lane.root / "child-process.json").exists())
                     continue
                 self.assertIsNone(json.loads((lane.root / "start-slot.json").read_text()))
                 self.assertEqual(json.loads(journal.read_text())["status"], "held_cleanup", result)
