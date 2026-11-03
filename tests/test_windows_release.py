@@ -2462,7 +2462,7 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 DISPATCH_BOUNDARIES = r"""
 $WarningPreference='SilentlyContinue'
 function Assert-SelectedGpuIdentity {
-    if($Action -ceq 'Start'){
+    if($Action -cin @('Start','Restart','Rollback')){
         $slot=Join-Path $StateRoot 'runtime.json'
         $before=if(Test-Path $slot){[IO.File]::ReadAllText($slot)}else{'null'}
         [IO.File]::WriteAllText((Join-Path $StateRoot 'start-slot.json'),$before)
