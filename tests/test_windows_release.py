@@ -2496,6 +2496,10 @@ function Get-Process([int]$Id,[string]$ErrorAction) {
             # Windows creation time is stable across callers; Linux .NET derives it from
             # separate boot-clock observations. Keep that Windows OS boundary deterministic.
             $process|Add-Member NoteProperty StartTime ([DateTime]::new([long]$identity.ticks,[DateTimeKind]::Utc)) -Force
+            $exitCode=Join-Path $StateRoot 'child-exit-code'
+            if(Test-Path $exitCode){
+                $process|Add-Member NoteProperty ExitCode ([int][IO.File]::ReadAllText($exitCode)) -Force
+            }
         }
     }
     return $process
@@ -2530,6 +2534,7 @@ function Get-ScheduledTaskInfo {
 }
 function Request-ManagedStop {
     if(Test-Path (Join-Path $StateRoot 'signal-fails')){return 'failed: fixture event denial'}
+    if(Test-Path (Join-Path $StateRoot 'stop-waits')){return 'signalled'}
     [IO.File]::WriteAllText((Join-Path $StateRoot 'child-exit'),'stop')
     return 'signalled'
 }
@@ -2645,6 +2650,8 @@ if($null -ne $runtime.shutdown_report){
         complete=$true;saved=1;skipped=0;refused=0
     }|ConvertTo-Json))
 }
+$code=Join-Path $Root 'child-exit-code'
+if(Test-Path $code){exit [int][IO.File]::ReadAllText($code)}
 """, encoding="utf-8")
     return lane
 
@@ -3018,6 +3025,48 @@ $result|ConvertTo-Json -Compress
             report = json.loads((lane.release / "logs" / "shutdown.json").read_text())
             self.assertTrue(report["complete"])
 
+    def test_t1_causal_timeout_nonzero_and_termination_survive_complete_reports(self) -> None:
+        for outcome in ("graceful_wait_expired", "graceful_nonzero_exit", "terminated"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                state = json.loads((lane.root / "state.json").read_text())
+                state["releases"][lane.instance]["graceful_stop_timeout_seconds"] = 1
+                (lane.root / "state.json").write_text(json.dumps(state))
+                started = self.dispatch(lane, "Start")
+                self.assertEqual(started.returncode, 0, started.stderr)
+                if outcome == "graceful_wait_expired":
+                    (lane.root / "stop-waits").touch()
+                elif outcome == "graceful_nonzero_exit":
+                    (lane.root / "child-exit-code").write_text("1")
+                else:
+                    runtime = json.loads((lane.root / "runtime.json").read_text())
+                    runtime["stop_event"] = "invalid-event"
+                    (lane.root / "runtime.json").write_text(json.dumps(runtime))
+                result = self.dispatch(lane, "Stop", "-AllowHeld")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                held = self.holds(lane)[0]
+                self.assertEqual(held["stop_receipt"]["outcome"], outcome)
+                self.assertTrue(json.loads((lane.release / "logs" / "shutdown.json").read_text())["complete"])
+                self.assertFalse((lane.root / "runtime.json").exists())
+
+    def test_t1_malformed_and_path_mismatched_reports_are_not_evidence(self) -> None:
+        for mismatch in (False, True):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                runtime = self.seed(lane, report={})
+                report = lane.release / "logs" / "shutdown.json"
+                if mismatch:
+                    foreign = lane.root / "foreign-shutdown.json"
+                    shutil.copyfile(report, foreign)
+                    runtime["shutdown_report"] = str(foreign)
+                    (lane.root / "runtime.json").write_text(json.dumps(runtime))
+                else:
+                    report.write_text("{")
+                result = self.dispatch(lane, "Stop")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.holds(lane)[0]["stop_receipt"]["outcome"], "graceful_unreported")
+                self.assertFalse((lane.root / "runtime.json").exists())
+
     def test_t3_restart_accepts_held_but_failed_start_keeps_its_original_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lane = dispatcher_fixture(Path(directory))
@@ -3353,6 +3402,18 @@ function Get-ShutdownHolds {
         for changed_key in (False, True):
             with self.subTest(changed_key=changed_key), tempfile.TemporaryDirectory() as directory:
                 lane = dispatcher_fixture(Path(directory))
+                dispatcher_owner(lane)
+                owner_state = lane.root / "gpu-owner-state"
+                owner_state.mkdir()
+                (owner_state / "owner.json").write_text('{"paused":true}')
+                (owner_state / "lease.json").write_text('{"prior_paused":false}')
+                owner = json.loads((lane.root / "state.json").read_text())["gpu_owner"]
+                lease_path = lane.root / "gpu-owner-lease.json"
+                lease_path.write_text(json.dumps({
+                    "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                    "release_id": lane.instance, "controller_sha256": owner["controller_sha256"],
+                    "prior_paused": False, "phase": "released",
+                }))
                 runtime = self.seed(lane, report={"refused": 1})
                 runtime.update(pid=987654, start_time_utc_ticks=4, gpu_uuid_verified=True)
                 if changed_key:
@@ -3362,9 +3423,13 @@ function Get-ShutdownHolds {
                 self.assertNotEqual(result.returncode, 0)
                 if changed_key:
                     self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), runtime)
+                    self.assertTrue(lease_path.exists())
                 else:
                     self.assertEqual(self.holds(lane)[0]["runtime"], runtime)
                     self.assertFalse((lane.root / "runtime.json").exists())
+                    self.assertFalse(lease_path.exists())
+                    self.assertFalse((owner_state / "lease.json").exists())
+                    self.assertFalse(json.loads((owner_state / "owner.json").read_text())["paused"])
 
     def test_t5_held_predecessor_negative_control_uses_mutable_record_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
