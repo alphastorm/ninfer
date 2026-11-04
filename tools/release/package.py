@@ -6,6 +6,9 @@ Linux (container lane) releases carry the binaries, LICENSE, and build identity.
 release specification and exact server configuration, an inner checksum manifest, and a
 matching source archive; the lane names come from the caller so one packager serves every
 native lane.
+
+Binary archive members are checked against their recorded digests and sizes before any
+release outputs are published. Changed payloads are refused without changing archive metadata.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import NoReturn
+from typing import BinaryIO, NoReturn
 import uuid
 
 
@@ -92,19 +95,23 @@ def run(
         ) from error
 
 
-def hash_path(path: Path) -> tuple[str, str, int]:
+def hash_stream(stream: BinaryIO) -> tuple[str, str, int]:
     sha256 = hashlib.sha256()
     sha1 = hashlib.sha1(usedforsecurity=False)
     size = 0
+    for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+        size += len(block)
+        sha256.update(block)
+        sha1.update(block)
+    return sha256.hexdigest(), sha1.hexdigest(), size
+
+
+def hash_path(path: Path) -> tuple[str, str, int]:
     try:
         with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
-                size += len(block)
-                sha256.update(block)
-                sha1.update(block)
+            return hash_stream(stream)
     except OSError as error:
         raise ReleaseError(f"failed to read release input {path.name}") from error
-    return sha256.hexdigest(), sha1.hexdigest(), size
 
 
 def hash_bytes(value: bytes) -> tuple[str, str, int]:
@@ -397,6 +404,20 @@ def write_archive(
                     add_tar_directory(archive, f"{root}/{directory}", epoch)
                 for item in sorted(files, key=lambda value: value.archive_name):
                     add_tar_file(archive, item, epoch)
+
+    expected_files = {item.archive_name: item for item in files}
+    with tarfile.open(path, mode="r|gz") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            item = expected_files[member.name]
+            stream = archive.extractfile(member)
+            assert stream is not None
+            with stream:
+                actual = hash_stream(stream)
+            if actual != (item.sha256, item.sha1, item.size):
+                fail(f"archive member differs from recorded digest: {item.archive_name}")
+
 
 def write_source_archive(path: Path, source: Path, release_sha: str, root: str, epoch: int) -> None:
     raw_tar = path.with_name(path.name + ".raw.tar")
