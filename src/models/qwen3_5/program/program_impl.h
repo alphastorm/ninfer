@@ -3,6 +3,7 @@
 #include "models/common/context/migration.h"
 #include "models/common/moe/resources.h"
 #include "models/qwen3_5/program/internal.h"
+#include "models/qwen3_5/program/speculative/extent_cap.h"
 
 #include "core/arena.h"
 #include "core/buffer.h"
@@ -65,6 +66,8 @@ struct RequestBasePlanImpl {
     runtime::RequestPlanSummary summary;
     qwen::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
+    DFlashOptions dflash;
+    std::string dflash_request_sha256;
     std::shared_ptr<const qwen::VisionControlPlan> vision_control_plan;
     std::vector<CaptureGroup> capture_groups;
     std::shared_ptr<const PreparedCaptureBacking> capture_backing;
@@ -85,6 +88,7 @@ struct PendingCandidate {
     std::uint32_t produced        = 0;
     std::uint32_t drafted         = 0;
     std::uint32_t accepted_drafts = 0;
+    DFlashRoundRecord dflash_round;
 };
 enum class Lifecycle : std::uint8_t {
     Empty,
@@ -197,6 +201,8 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    speculative::ExtentCap dflash_governor;
+    std::uint32_t dflash_round_ordinal = 0;
     std::shared_ptr<const RequestBasePlanImpl> base;
     std::optional<UnitDemand> permit;
     std::optional<RecoveryPermit> recovery;

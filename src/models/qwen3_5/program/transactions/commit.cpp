@@ -188,6 +188,8 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             throw std::logic_error("forced-token sequence frontier is invalid");
         }
         validate_licensed_tokens(row_major_tokens.subspan(row * row_stride, row_stride));
+        if (const auto& trace = requests[lane].speculative_stats.dflash_trace)
+            speculative::require_trace_room(*trace, 0, row_stride);
         if (prefix_execution_splits[row] &&
             (*prefix_execution_splits[row] == 0 || *prefix_execution_splits[row] > row_stride)) {
             throw std::logic_error("forced-token execution split is outside its row");
@@ -343,6 +345,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             trim_sequence_kv(sequence, sequence.continuation.metadata.text_kv_valid,
                              backend_kv_valid(sequence));
             settle_unit(lane);
+            if (auto& trace = request.speculative_stats.dflash_trace)
+                trace->output_token_ids.insert(trace->output_token_ids.end(),
+                                                forced.begin(), forced.end());
             request.timings.decode_seconds +=
                 std::chrono::duration<double>(context::Clock::now() - started).count();
         }
@@ -366,6 +371,8 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Post, failed_timing);
     std::array<SequenceHandle, kMaximumConcurrency> members{};
     const auto input_rows       = ContractAccess::rows(pending);
+    const auto input_tokens     = pending.tokens();
+    const auto input_stride     = pending.row_stride();
     const std::size_t row_count = input_rows.size();
     for (std::size_t row = 0; row < row_count; ++row) { members[row] = input_rows[row]; }
     std::array<bool, kMaximumConcurrency> constraint_failed{};
@@ -377,8 +384,10 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
 
     std::array<std::uint32_t, kMaximumConcurrency> lanes{};
     std::array<GenerationTimings, kMaximumConcurrency> timings{};
-    std::array<SpeculativeStats, kMaximumConcurrency> speculative{};
+    std::array<SpeculativeStats, kMaximumConcurrency> speculative_stats{};
     std::array<PendingKind, kMaximumConcurrency> pending_kinds{};
+    std::array<DFlashRoundRecord, kMaximumConcurrency> round_records{};
+    std::array<std::array<TokenId, kDFlashDecodeMaximumWidth>, kMaximumConcurrency> trace_tokens;
     const auto release_members = [&]() noexcept {
         std::array<std::uint32_t, kMaximumConcurrency> failed_lanes{};
         std::size_t failed_count = 0;
@@ -425,6 +434,17 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             terminal[row]                = decision.terminal ? 1U : 0U;
             discarded[row]               = (decision.cancelled || decision.failed) ? 1U : 0U;
             prefix_execution_splits[row] = decision.prefix_execution_split_after;
+            round_records[row] = candidate.dflash_round;
+            round_records[row].committed = decision.accepted_tokens;
+            round_records[row].terminal = decision.terminal;
+            round_records[row].discarded = discarded[row] != 0;
+            if (const auto& trace = requests[lane].speculative_stats.dflash_trace) {
+                speculative::require_trace_room(
+                    *trace, candidate.kind == PendingKind::Speculative ? 1 : 0,
+                    decision.accepted_tokens);
+                std::copy_n(input_tokens.data() + row * input_stride, decision.accepted_tokens,
+                            trace_tokens[row].begin());
+            }
         }
         for (std::size_t row = 0; row < row_count; ++row) {
             const std::uint32_t lane = lanes[row];
@@ -435,7 +455,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             }
             if (discarded[row]) {
                 timings[row]     = request.timings;
-                speculative[row] = std::move(request.speculative_stats);
+                speculative_stats[row] = std::move(request.speculative_stats);
             }
         }
 
@@ -454,6 +474,30 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
         for (std::size_t row = 0; row < row_count; ++row) {
             if (!discarded[row]) { settle_unit(lanes[row]); }
         }
+        // No acceptance history is published by speculative egress or failed settlement.
+        // Resume moves this RequestControl; replay does not enter this decode-commit seam.
+        for (std::size_t row = 0; row < row_count; ++row) {
+            auto& request = requests[lanes[row]];
+            const auto& record = round_records[row];
+            if (!discarded[row] && speculative_backend == SpeculativeBackend::DFlash2 &&
+                pending_kinds[row] == PendingKind::Speculative) {
+                request.dflash_governor.commit({
+                    .extent = record.extent, .accepted = record.accepted,
+                    .licensed = record.licensed, .committed = record.committed,
+                    .clipped = record.budget_clipped || record.capacity_clipped,
+                    .terminal = record.terminal, .discarded = record.discarded});
+                ++request.dflash_round_ordinal;
+            }
+            auto& stats = discarded[row] ? speculative_stats[row] : request.speculative_stats;
+            if (auto& trace = stats.dflash_trace) {
+                const std::span<const TokenId> tokens(trace_tokens[row].data(), accepted[row]);
+                if (pending_kinds[row] == PendingKind::Speculative)
+                    speculative::append_trace(*trace, record, tokens);
+                else
+                    trace->output_token_ids.insert(trace->output_token_ids.end(),
+                                                   tokens.begin(), tokens.end());
+            }
+        }
         CommitResult out;
         out.row_count = row_count;
         for (std::size_t row = 0; row < row_count; ++row) {
@@ -464,7 +508,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                                        ? runtime::CommitDisposition::FailedReleased
                                        : runtime::CommitDisposition::CancelledReleased,
                     .timings     = timings[row],
-                    .speculative = std::move(speculative[row]),
+                    .speculative = std::move(speculative_stats[row]),
                 };
             } else if (decisions[row].terminal) {
                 out.rows[row].disposition = runtime::CommitDisposition::Finishable;

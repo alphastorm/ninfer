@@ -3,6 +3,7 @@
 #include "models/qwen3_5/program/execution_context.h"
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
+#include "models/qwen3_5/program/speculative/dflash_ingress.h"
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "ninfer/ops/sequence.h"
@@ -584,6 +585,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
     const std::uint32_t width           = draft_window + 1U;
     std::uint32_t maximum_frontier      = 0;
     std::uint32_t maximum_target_tokens = 1;
+    std::array<speculative::ExtentPlan, kMaximumConcurrency> extent_plans{};
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency ||
@@ -619,6 +621,11 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         const std::uint32_t extent =
             std::min({draft_window, max_by_budget,
                       capacity - sequence.continuation.metadata.execution_frontier - 1U});
+        extent_plans[row] = speculative::plan_extent(
+            request.dflash_governor, draft_window, budgets[row].generated_tokens_remaining,
+            capacity, sequence.continuation.metadata.execution_frontier);
+        // Keep the N16 envelope even in eager mixed batches. Only live columns change;
+        // an armed neighbor must not change an unarmed row's kernel/graph selection.
         maximum_frontier =
             std::max(maximum_frontier, sequence.continuation.metadata.execution_frontier);
         maximum_target_tokens = std::max(
@@ -640,9 +647,11 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         DecodeGraphExecutable* finish                = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
+        std::uint32_t graph_class = 0;
         if (use_cuda_graph) {
             const auto batch = static_cast<std::uint32_t>(lanes.size());
             auto& profile    = speculative_forward_graphs.select(batch, maximum_frontier);
+            graph_class = profile.topology_class;
             auto& topology   = speculative_forward_graphs.install(profile);
             text_forward     = topology.text.get();
             if (!text_forward) forward = &topology.executable;
@@ -660,25 +669,14 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
             SequenceState& sequence           = active_sequence(lanes[row]);
             const RequestControl& request     = requests[lanes[row]];
             const std::uint32_t frontier      = sequence.continuation.metadata.execution_frontier;
-            const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
-                                                    ? budgets[row].generated_tokens_remaining - 1U
-                                                    : 0U;
-            const std::uint32_t extent =
-                std::min({draft_window, max_by_budget, capacity - frontier - 1U});
+            const std::uint32_t extent = extent_plans[row].extent;
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 context::checked_i32(frontier, "DFlash batch frontier");
             dflash_host_ingress->context_frontiers[row] = context::checked_i32(
                 sequence.continuation.metadata.dflash_context_frontier, "DFlash context frontier");
-            dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
-            dflash_host_ingress->proposal_extents[row]       = static_cast<std::int32_t>(extent);
-            dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
-            for (std::uint32_t column = 0; column < width; ++column) {
-                const std::uint32_t position = frontier + std::min(column, extent);
-                dflash_host_ingress->target_rope_positions[row * width + column] =
-                    context::checked_i32(position, "DFlash target RoPE position") +
-                    sequence.continuation.metadata.rope_delta;
-            }
+            speculative::write_extent_ingress(*dflash_host_ingress, row, draft_window, frontier,
+                                               sequence.continuation.metadata.rope_delta, extent);
             dflash_host_ingress->text_kv_table_rows[row] =
                 text_kv_histories->bound_row(sequence.kv->text.handle());
             dflash_host_ingress->dflash_kv_table_rows[row] =
@@ -784,6 +782,26 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                 .produced        = static_cast<std::uint32_t>(count_i),
                 .drafted         = extent,
                 .accepted_drafts = static_cast<std::uint32_t>(accepted_i),
+                .dflash_round = {
+                    .ordinal = request.dflash_round_ordinal,
+                    .frontier = base_E,
+                    .physical_k = draft_window,
+                    .extent = extent,
+                    .previous_append = base_E - static_cast<std::uint32_t>(
+                        dflash_host_ingress->context_frontiers[row]),
+                    .batch = static_cast<std::uint32_t>(lanes.size()),
+                    .row = static_cast<std::uint32_t>(row),
+                    .lane = lanes[row],
+                    .graph_class = graph_class,
+                    .graph_envelope = target_envelope.max_visible_keys,
+                    .accepted = static_cast<std::uint32_t>(accepted_i),
+                    .licensed = static_cast<std::uint32_t>(count_i),
+                    .budget_clipped = extent_plans[row].budget_clipped,
+                    .capacity_clipped = extent_plans[row].capacity_clipped,
+                    .armed = request.dflash_governor.armed(),
+                    .capped = request.dflash_governor.limit(draft_window) < draft_window,
+                    .graph_replay = use_cuda_graph,
+                },
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;

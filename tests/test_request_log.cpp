@@ -586,6 +586,18 @@ int main() {
                                                    .applied               = true};
 
     const Json done = Json::parse(format_request_done_json("serve-test", 3000, context, outcome));
+    failures += check(!done.at("speculative").contains("dflash_trace"),
+                      "trace-off request log changed its existing fields");
+    auto traced = outcome;
+    traced.metrics.dflash_trace = std::make_shared<ninfer::DFlashTrace>();
+    traced.metrics.dflash_trace->request_sha256 = std::string(64, 'a');
+    traced.metrics.dflash_trace->prompt_token_ids = {1, 2};
+    traced.metrics.dflash_trace->output_token_ids = {3};
+    const auto traced_done = Json::parse(format_request_done_json("serve-test", 3001, context, traced));
+    failures += check(traced_done.at("speculative").at("dflash_trace").at("schema_version") == 1 &&
+                          traced_done.at("speculative").at("dflash_trace").at("output_token_ids") ==
+                              Json::array({3}),
+                      "opt-in ordered evidence was not serialized through request log");
     failures += check(done.at("request").at("request_id") == 7 &&
                           done.at("request").at("http_request_id") == "req_wire_923" &&
                           done.at("request").at("response_id") == "chatcmpl_wire_471",

@@ -32,6 +32,27 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    const auto governor = parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec",
+                                 "dflash2", "--draft-tokens", "7", "--dflash-governor",
+                                 "adaptive", "--dflash-rounds", "8", "--dflash-threshold",
+                                 "20", "--dflash-cap", "1", "--dflash-trace", "rounds.json",
+                                 "--dflash-request-sha256", std::string(64, 'a')});
+    failures += check(governor.dflash.mode == ninfer::DFlashMode::Adaptive &&
+                          governor.dflash.rounds == 8 && governor.dflash.threshold == 20 &&
+                          governor.dflash.cap == 1 && governor.dflash.trace,
+                      "request governor/trace options were not preserved");
+    for (const auto* backend : {"mtp", "dflash"}) {
+        failures += check(rejects([&] {
+            (void)parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec", backend,
+                         "--draft-tokens", "3", "--dflash-governor", "force"});
+        }), "governor must reject ineligible backend");
+    }
+    for (const auto* flag : {"--dflash-rounds", "--dflash-cap"}) {
+        failures += check(rejects([&] {
+            (void)parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+                         "--draft-tokens", "7", "--dflash-governor", "adaptive", flag, "0"});
+        }), "governor must reject invalid grid bounds");
+    }
     failures += check(!parse({"ninfer", "model.ninfer", "--prompt", "hello"}).fp32_head_logits,
                       "FP32 head logits must default off");
     failures += check(

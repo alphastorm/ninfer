@@ -32,6 +32,9 @@ struct Options {
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
+    DFlashOptions dflash;
+    std::filesystem::path dflash_trace_path;
+    std::string dflash_request_sha256;
     bool enable_vision  = false;
     bool use_cuda_graph = true;
     bool fp32_head_logits = false;

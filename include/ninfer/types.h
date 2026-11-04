@@ -83,6 +83,17 @@ struct SpeculativeOptions {
     ProposalHead proposal_head = ProposalHead::Full;
 };
 
+enum class DFlashMode : std::uint8_t { Off, Adaptive, ForcedCap, Calibrate };
+
+// Per-request measurement policy; never enables itself from an Engine/profile setting.
+struct DFlashOptions {
+    DFlashMode mode = DFlashMode::Off;
+    std::uint32_t rounds = 16;
+    std::uint32_t threshold = 44;
+    std::uint32_t cap = 3;
+    bool trace = false;
+};
+
 enum class StartupPhase : std::uint8_t {
     EngineStartup,
     CudaInitialize,
@@ -262,6 +273,9 @@ struct ThinkingControlOptions {
 
 struct ExecutionOptions {
     SamplingOverrides sampling;
+    DFlashOptions dflash;
+    // Canonical measurement-request SHA-256, required only for opt-in trace.
+    std::string dflash_request_sha256;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
@@ -871,6 +885,23 @@ struct GenerationFirstOutputTiming {
     ContextTransferStats context_transfers;
 };
 
+struct DFlashRoundRecord {
+    std::uint32_t ordinal = 0, frontier = 0, physical_k = 0, extent = 0;
+    std::uint32_t previous_append = 0, batch = 0, row = 0, lane = 0;
+    std::uint32_t graph_class = 0, graph_envelope = 0;
+    std::uint32_t accepted = 0, licensed = 0, committed = 0, output_offset = 0;
+    bool budget_clipped = false, capacity_clipped = false;
+    bool terminal = false, discarded = false, armed = false, capped = false, graph_replay = false;
+};
+
+struct DFlashTrace {
+    DFlashOptions options;
+    std::string request_sha256;
+    std::vector<TokenId> prompt_token_ids;
+    std::vector<TokenId> output_token_ids;
+    std::vector<DFlashRoundRecord> rounds;
+};
+
 struct SpeculativeStats {
     SpeculativeBackend backend    = SpeculativeBackend::None;
     bool enabled                  = false;
@@ -881,6 +912,8 @@ struct SpeculativeStats {
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> attempted_per_position;
     std::vector<std::uint64_t> accepted_per_position;
+    // Shared only with the result/observation carrier; the live request is the sole writer.
+    std::shared_ptr<DFlashTrace> dflash_trace;
 
     // Native verification facts, recorded once at the commit decision even if publication
     // truncates or discards the output. Position storage is fixed at request installation.

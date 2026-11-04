@@ -50,6 +50,26 @@ For segmented projection, run the original 2560-input suite and the migrated two
 the default checks all five. QSA tail, prepare, indexer and sparse-GQA partial-initialization cases
 also check their permitted read footprints under Compute Sanitizer initcheck.
 
+## DFlash2 BUILD T host contracts
+
+`ninfer_qwen3_5_dflash_governor_test` and `ninfer_dflash_replay_test` are GPU-free,
+registered with `ninfer_test_host_lanes(... bounded native windows)`. They cover the
+integer R/H ring, sticky per-request arming, Long/cap prediction, saturation, CAL,
+commit-only learning, clipping, partial/terminal/discard exclusion, request reset/resume,
+B1/B8 whole-ingress byte identity and fixed proposal width, and bounded trace serialization.
+The replay contract consumes C++-serialized fixtures with an independent Python state machine.
+CLI/serve option tests cover backend/K eligibility, the frozen grid, diagnostic force mode,
+trace opt-in, and request-local translation; the request-log test checks trace-off omission
+and opt-in schema-1 evidence. No workflow test lists change.
+`ninfer_cli_help_test` is native-host-only: it compiles the real CLI/trace writer alongside
+the serve closure and executes only `--help`, without initializing CUDA or loading a model.
+
+`python tools/dflash_replay.py requests.jsonl` validates trace evidence and reports ordered
+decisions, informative-Long low-A base/run/lag1..8 counts. A standalone CLI trace JSON also
+works. This consumer checks the recorded trajectory, not unobserved counterfactual frontiers,
+CUDA numerical identity, instrumentation overhead or speed. Native runtime acceptance requires
+separate sm_89 and sm_86 Release binaries, unchanged lane profiles and GPU qualification.
+
 ## Opt-in FP32 head logits
 
 `ninfer_qwen3_5_head_logits_test` is GPU-free and checks BF16 defaults, scalar/ordinary/MTP/

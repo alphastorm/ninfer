@@ -5,6 +5,7 @@
 #include "core/startup.h"
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/request.h"
+#include "product/speculative_options.h"
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/checkpoint_identity.h"
 #include "runtime/engine/engine_core.h"
@@ -45,6 +46,8 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
     resolved.execution.thinking                = options.execution.thinking;
+    resolved.execution.dflash                  = options.execution.dflash;
+    resolved.execution.dflash_request_sha256   = std::move(options.execution.dflash_request_sha256);
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
     resolved.constraint                        = options.constraint;
@@ -347,6 +350,9 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::logic_error("submit requires a Generation Engine");
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
+    product::validate_dflash_options(options.execution.dflash, impl_->options.speculative);
+    if (options.execution.dflash.trace)
+        product::validate_dflash_trace_sha(options.execution.dflash_request_sha256);
     if (observation.live_timings) { observation.phase_timings = true; }
     if (consumer_mode != OutputConsumerMode::Streaming &&
         (observation.live_timings || observation.prompt_progress)) {

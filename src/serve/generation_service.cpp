@@ -416,6 +416,10 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     ninfer::RequestOptions request_options  = to_request_options(
         request, options_, semantics, cache_participation == CacheParticipation::ReadWrite);
+    if (deadline_policy == DeadlinePolicy::UnboundedStartup) {
+        request_options.execution.dflash = {};
+        request_options.execution.dflash_request_sha256.clear();
+    }
     prepared.thinking_budget     = request_options.execution.thinking.budget;
     prepared.reasoning_effort    = semantics.reasoning_effort;
     prepared.preserve_thinking   = semantics.preserve_thinking;
@@ -595,6 +599,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
         std::move(result.speculative.attempted_per_position);
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
+    outcome.metrics.dflash_trace = std::move(result.speculative.dflash_trace);
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;

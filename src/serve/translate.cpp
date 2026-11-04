@@ -322,6 +322,9 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     options.tool_choice                       = request.tool_choice;
     options.execution.requested_output_tokens = static_cast<std::uint32_t>(request.max_tokens);
     options.execution.allow_prefix_reuse      = allow_prefix_reuse;
+    options.execution.dflash                  = server.dflash;
+    if (server.dflash.trace)
+        options.execution.dflash_request_sha256 = request.client_request_id.value_or("");
     if (semantics.enable_thinking != false) {
         options.execution.thinking.budget =
             request.thinking_budget ? request.thinking_budget : server.default_thinking_budget;

@@ -347,6 +347,19 @@ void ProgramImpl::install_binding(BindOperation& tx) {
         request.lifecycle                                   = Lifecycle::Prefilling;
         request.publish_continuation                        = tx.base->summary.publish_continuation;
         install_sampling(state, request, tx.base->sampling);
+        request.dflash_governor = speculative::ExtentCap(tx.base->dflash);
+        request.dflash_round_ordinal = 0;
+        if (tx.base->dflash.trace) {
+            auto trace = std::make_shared<DFlashTrace>();
+            trace->options = tx.base->dflash;
+            trace->request_sha256 = tx.base->dflash_request_sha256;
+            trace->prompt_token_ids = tx.base->prompt->token_ids;
+            speculative::require_trace_room(*trace, 0, 0);
+            trace->rounds.reserve(speculative::kTraceRoundLimit);
+            trace->output_token_ids.reserve(
+                speculative::kTraceTokenLimit - trace->prompt_token_ids.size());
+            request.speculative_stats.dflash_trace = std::move(trace);
+        }
     }
     request.permit   = tx.first_unit;
     request.recovery = tx.recovery;
