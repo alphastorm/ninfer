@@ -1,11 +1,12 @@
 #pragma once
 
 #include "core/buffer.h"
+#include "core/free_extents.h"
 
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <utility>
-#include <vector>
 
 namespace ninfer {
 
@@ -68,7 +69,9 @@ public:
 
     [[nodiscard]] std::size_t capacity_bytes() const noexcept { return capacity_bytes_; }
 
-    [[nodiscard]] std::size_t minimum_allocation_bytes() const noexcept { return minimum_bytes_; }
+    [[nodiscard]] std::size_t minimum_allocation_bytes() const noexcept {
+        return free_.minimum_bytes();
+    }
 
     [[nodiscard]] std::size_t occupied_bytes() const noexcept { return occupied_bytes_; }
 
@@ -87,6 +90,12 @@ public:
     [[nodiscard]] std::size_t allocation_count() const noexcept { return allocation_count_; }
 
     [[nodiscard]] bool can_allocate(std::size_t bytes) const noexcept;
+    // Simulate the actual ordered first-fit, halving-group reservations without allocating
+    // backing. Returned ranges are coalesced before placement.
+    [[nodiscard]] bool can_place(std::span<const HostAllocationRun> runs,
+                                std::span<const HostRange> freed = {}) const;
+    [[nodiscard]] std::uint64_t placeable_count(std::size_t bytes) const noexcept;
+    [[nodiscard]] HostRange range_of(const std::byte* data, std::size_t bytes) const;
     [[nodiscard]] std::optional<HostContextAllocation> allocate(std::size_t bytes) noexcept;
     [[nodiscard]] std::pair<HostContextAllocation, HostContextAllocation>
     split(HostContextAllocation&& allocation, std::size_t byte_offset);
@@ -94,24 +103,15 @@ public:
 private:
     friend class HostContextAllocation;
 
-    struct FreeExtent {
-        std::size_t offset = 0;
-        std::size_t bytes  = 0;
-    };
-
-    [[nodiscard]] std::size_t allocation_bytes(std::size_t bytes) const noexcept;
-    [[nodiscard]] std::optional<std::size_t> find_free_extent(std::size_t bytes) const noexcept;
-    void insert_free_extent(FreeExtent extent) noexcept;
     void release(std::size_t offset, std::size_t bytes, bool reserved) noexcept;
 
     std::optional<PinnedHostBuffer> backing_;
     std::size_t capacity_bytes_      = 0;
-    std::size_t minimum_bytes_       = 0;
     std::size_t occupied_bytes_      = 0;
     std::size_t reserved_bytes_      = 0;
     std::size_t peak_occupied_bytes_ = 0;
     std::size_t allocation_count_    = 0;
-    std::vector<FreeExtent> free_extents_;
+    FreeExtents free_;
 };
 
 } // namespace ninfer

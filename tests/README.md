@@ -80,6 +80,9 @@ from this Op test.
 
 `ninfer_recovery_loss_test` exercises the pure checkpoint scoring used by Qwen3.5's native
 reclaim adapter, without CUDA, weights or an Engine. It is selected by every host CI lane.
+`ninfer_free_extents_test` checks first-fit and grouped placement without backing memory.
+`ninfer_host_context_arena_test` uses the real arena and pinned-buffer owner with only the CUDA
+allocation/free boundary interposed; fragmentation, returned ranges and rollback run on CPU CI.
 
 Select a Python environment with the dependencies for the tests first. The maintained environment
 uses Python 3.11; CMake finds Python 3 without restricting its minor version.
