@@ -87,6 +87,9 @@ allocation/free boundary interposed; fragmentation, returned ranges and rollback
 failed-preservation source retention, explicit byte shortages and durable-generation release guards.
 The native transaction fixture also checks released-set placement against physical Host accounting;
 that GPU fixture is not part of host-only qualification.
+`ninfer_scheduler_test` ports upstream pressure handoff, continuous contention and bounded recovery
+allowance cases, retaining the fork's C2 cancellation/compaction case. The real scripted EngineCore
+fixture checks younger-owner progress and fresh-request deadline expiry while admitted work is paused.
 
 Select a Python environment with the dependencies for the tests first. The maintained environment
 uses Python 3.11; CMake finds Python 3 without restricting its minor version.

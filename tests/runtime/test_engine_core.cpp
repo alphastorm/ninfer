@@ -186,6 +186,8 @@ public:
         bool pause_started    = false;
         bool paused           = false;
         bool export_blocked   = false;
+        bool victim_finished  = false;
+        bool pressure_finished_before_victim = false;
     };
 
     template <class Update>
@@ -202,6 +204,11 @@ public:
         std::unique_lock lock(mutex_);
         require(changed_.wait_for(lock, kEventTimeout, [&] { return predicate(state_); }),
                 std::string("worker did not reach ") + milestone);
+    }
+
+    [[nodiscard]] State snapshot() {
+        std::lock_guard lock(mutex_);
+        return state_;
     }
 
     // Stalled prefills make no progress until released.
@@ -226,17 +233,20 @@ enum class Script : std::uint8_t {
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
+    VictimResume,    // Stall; can pause and restore, for younger-owner handoff.
     ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
     return script == Script::Stall || script == Script::DecodeFailure ||
            script == Script::Pressure || script == Script::VictimHold ||
-           script == Script::VictimPause || script == Script::ExportPressure;
+           script == Script::VictimPause || script == Script::VictimResume ||
+           script == Script::ExportPressure;
 }
 
 [[nodiscard]] bool victim(Script script) noexcept {
-    return script == Script::VictimHold || script == Script::VictimPause;
+    return script == Script::VictimHold || script == Script::VictimPause ||
+           script == Script::VictimResume;
 }
 
 using Resources = rt::ContextResources<1>;
@@ -643,13 +653,24 @@ public:
                         [](const Lane& lane) { return lane.active && victim(lane.script); })) {
             return {.shortage = {.kv_page_groups = {1}}};
         }
+        live(units.front().sequence).permit = true;
         return {.reserved = true};
+    }
+
+    void release_units(std::span<const Sequence> sequences) noexcept {
+        for (const auto sequence : sequences) {
+            if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
+                lanes_[sequence.lane].epoch == sequence.epoch) {
+                lanes_[sequence.lane].permit = false;
+            }
+        }
     }
 
     [[nodiscard]] PrefillProgress advance_prefill(Sequence sequence,
                                                   rt::ExecutionTiming* = nullptr,
                                                   rt::TokenMaskProvider* = nullptr) {
         const auto& lane = live(sequence);
+        require(lane.permit, "prefill consumed a released unit permit");
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
         progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
@@ -669,6 +690,7 @@ public:
                                       rt::ExecutionTiming* = nullptr,
                                       rt::TokenMaskProvider* = nullptr) {
         for (const auto sequence : sequences) {
+            require(live(sequence).permit, "decode consumed a released unit permit");
             if (live(sequence).script == Script::DecodeFailure) {
                 throw std::logic_error("injected decode failure");
             }
@@ -693,7 +715,7 @@ public:
         result.row_count = pending.row_count();
         for (std::size_t row = 0; row < pending.row_count(); ++row) {
             const auto sequence = pending.sequence(row);
-            (void)live(sequence);
+            live(sequence).permit = false;
             const auto& decision = decisions[row];
             using Disposition    = rt::CommitDisposition;
             result.rows[row].disposition = decision.failed      ? Disposition::FailedReleased
@@ -711,6 +733,15 @@ public:
 
     [[nodiscard]] FinishResult finish(Sequence sequence) noexcept {
         FinishResult result;
+        if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
+            lanes_[sequence.lane].epoch == sequence.epoch) {
+            const auto script = lanes_[sequence.lane].script;
+            events_.record([&](Events::State& state) {
+                if (script == Script::Pressure)
+                    state.pressure_finished_before_victim = !state.victim_finished;
+                if (victim(script)) state.victim_finished = true;
+            });
+        }
         if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
             lanes_[sequence.lane].epoch == sequence.epoch && lanes_[sequence.lane].publish) {
             result.checkpoint = publish_checkpoint(lanes_[sequence.lane].prompt_tokens);
@@ -1009,6 +1040,7 @@ private:
         std::uint64_t epoch         = 0;
         std::uint32_t prompt_tokens = 0;
         bool publish                = false;
+        bool permit                 = false;
     };
 
     struct Operation {
@@ -1050,6 +1082,10 @@ private:
         for (const auto point : points) { --records_[point.index].pins; }
         --staged_exports_;
         gate_->changed();
+    }
+
+    [[nodiscard]] Lane& live(Sequence sequence) {
+        return const_cast<Lane&>(std::as_const(*this).live(sequence));
     }
 
     [[nodiscard]] const Lane& live(Sequence sequence) const {
@@ -1552,6 +1588,36 @@ void paused_cancellation() {
     require_finished(harness.await(pressure), FinishReason::OutputLimit, "pause requester");
 }
 
+void younger_pressure_owner_progresses_before_older_finishes() {
+    Harness harness(2);
+    auto older = harness.submit(Script::VictimResume, 1);
+    auto younger = harness.submit(Script::Pressure, 1);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "younger pressure handoff");
+    harness.release_stalls();
+    require_finished(harness.await(younger), FinishReason::OutputLimit, "younger pressure owner");
+    require_finished(harness.await(older), FinishReason::OutputLimit, "restored older request");
+    require(harness.events().snapshot().pressure_finished_before_victim,
+            "younger admitted request waited for the older request's completion");
+    require_membership(harness.observed_stats(), {}, "pressure handoff cleanup");
+}
+
+void fresh_arrival_waits_behind_paused_admitted_work() {
+    Harness harness(2);
+    auto owner = harness.submit(Script::Pressure, 1);
+    auto paused = harness.submit(Script::VictimPause, 1);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "paused admitted request");
+    auto fresh = harness.submit(Script::Complete, 1, false, Clock::now() + 100ms);
+    const auto outcome = harness.await(fresh);
+    require_request_error(outcome, RequestErrorKind::QueueTimeout, "deferred fresh arrival");
+    require_membership(outcome.stats, {.running = 1, .paused = 1}, "deferred fresh arrival");
+    require_finished(harness.await(paused, true), FinishReason::Cancelled, "paused cleanup");
+    harness.release_stalls();
+    require_finished(harness.await(owner), FinishReason::OutputLimit, "pressure cleanup");
+    require_membership(harness.observed_stats(), {}, "fresh admission cleanup");
+}
+
 void control_rejection() {
     Harness harness(1);
     auto request = harness.submit(Script::ControlRejected, 4, true);
@@ -1942,6 +2008,10 @@ int main() {
         Case{"materializing_failure", materializing_failure},
         Case{"pausing_cancellation", pausing_cancellation},
         Case{"paused_cancellation", paused_cancellation},
+        Case{"younger_pressure_owner_progresses_before_older_finishes",
+             younger_pressure_owner_progresses_before_older_finishes},
+        Case{"fresh_arrival_waits_behind_paused_admitted_work",
+             fresh_arrival_waits_behind_paused_admitted_work},
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},

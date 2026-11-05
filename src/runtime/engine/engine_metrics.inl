@@ -236,6 +236,10 @@ void EngineCore<Instance>::record_context_work(
         accumulate(total);
         cumulative_stats_.actual_context_transfer_seconds += transfer.elapsed_ns * 1.0e-9;
         if (owner) {
+            if (materializing_ && materializing_->resumed &&
+                progress.kind == decltype(progress.kind)::Bind) {
+                scheduler_.recovery_work(owner->id, transfer.elapsed_ns);
+            }
             if (!owner->first_output_timing) {
                 auto& observed =
                     owner->context_transfers.at(transfer.resource.index()).at(direction);
