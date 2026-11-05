@@ -69,13 +69,7 @@ bool ProgramImpl::prepare_backup(context::MigrationBatch& migration, CheckpointS
                 logical.push_back(page);
             }
         }
-        if (!logical.empty()) {
-            auto destination =
-                host_kv_extents ? host_kv_extents->prepare(pages, logical) : std::nullopt;
-            if (!destination) return false;
-            migration.add_backup(pool, pages, std::move(logical), std::move(*destination), true);
-        }
-        return true;
+        return reserve_host_backups(migration, pool, pages, logical, true);
     };
     if (!collect(*text_kv_histories, *text_kv_pages, record.history().text, kTextKvPool))
         return false;

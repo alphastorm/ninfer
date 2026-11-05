@@ -38,9 +38,13 @@ std::int32_t StateImageStore::ReadLease::device_slot() const {
 ConstMemorySpan StateImageStore::ReadLease::host_view() const {
     if (!store_ || store_->content_epoch(image_) != epoch_)
         throw std::logic_error("StateImage reader has no current content");
-    const auto& image = store_->require(image_);
-    if (!image.host_slot) throw std::logic_error("StateImage reader has no Host replica");
-    return image.host_slot->span().subspan(0, store_->device_->image_bytes());
+    return store_->host_view(image_);
+}
+
+ConstMemorySpan StateImageStore::host_view(Handle handle) const {
+    const auto& image = require(handle);
+    if (!image.host_slot) throw std::logic_error("StateImage has no Host replica");
+    return image.host_slot->span().subspan(0, device_->image_bytes());
 }
 
 StateImageStore::ReadLease StateImageStore::read(Handle handle) {

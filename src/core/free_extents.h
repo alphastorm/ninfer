@@ -105,6 +105,7 @@ public:
     // halving the group until one fits, down to a single allocation. All or nothing.
     [[nodiscard]] std::optional<std::vector<Extent>> take_run(HostAllocationRun run) {
         std::vector<Extent> taken;
+        if (run.count == 0) { return taken; }
         FreeExtents trial = *this;
         if (!trial.take_run_in_place(run, &taken)) { return std::nullopt; }
         *this = std::move(trial);

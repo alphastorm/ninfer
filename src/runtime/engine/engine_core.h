@@ -3,6 +3,7 @@
 // Small fixed-capacity request execution for every backend.
 
 #include "core/device.h"
+#include "core/host_placement.h"
 #include "core/gpu_keep_warm.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
@@ -1414,13 +1415,13 @@ private:
                     CaptureDecision{*request->sequence, capture->frontier,
                                     resources_.begin_reclaim(*instance_.program, admission)});
             }
-            const auto usage = instance_.program->physical_usage();
-            if (capture->host_bytes && capture->host_bytes <= usage.capacity.host_bytes) {
-                if (capture->host_bytes > usage.capacity.host_bytes - usage.occupied.host_bytes) {
+            if (capture->host_run.count) {
+                const std::span<const HostAllocationRun> runs(&capture->host_run, 1);
+                if (!instance_.program->host_can_place(runs)) {
                     (void)instance_.program->release_redundant_host({}, request->sequence);
                 }
                 if (const auto victims = resources_.host_victims(
-                        *instance_.program, capture->host_bytes, std::nullopt, {}, {}, admission,
+                        *instance_.program, runs, std::nullopt, {}, {}, admission,
                         &decision->reclaim)) {
                     if (!resources_.commit_host_victims(
                             *instance_.program, *victims, decision->reclaim)) { return false; }
@@ -1754,10 +1755,8 @@ private:
         if (instance_.program->has_context_operation()) { return false; }
         auto request       = slots_[lane];
         bool save_snapshot = false;
-        if (const auto bytes = instance_.program->pause_host_bytes(*request->sequence)) {
-            const auto usage = instance_.program->physical_usage();
-            if (*bytes <= usage.capacity.host_bytes &&
-                *bytes > usage.capacity.host_bytes - usage.occupied.host_bytes) {
+        if (const auto runs = instance_.program->pause_host_runs(*request->sequence)) {
+            if (!instance_.program->host_can_place(*runs)) {
                 (void)instance_.program->release_redundant_host({}, request->sequence);
             }
             std::vector<Checkpoint> later;
@@ -1768,7 +1767,7 @@ private:
                 }
             }
             if (const auto victims =
-                    resources_.host_victims(*instance_.program, *bytes, std::nullopt, later)) {
+                    resources_.host_victims(*instance_.program, *runs, std::nullopt, later)) {
                 // Preflight the complete mixed catalog/snapshot plan before dropping anything.
                 if (!resources_.approve_release(*victims)) { return false; }
                 for (const auto& other : paused_) {
@@ -1778,8 +1777,7 @@ private:
                         !checkpoint_request_settled(*other)) { return false; }
                 }
                 for (const auto handle : *victims) {
-                    const auto usage = instance_.program->physical_usage();
-                    if (usage.capacity.host_bytes - usage.occupied.host_bytes >= *bytes) { break; }
+                    if (instance_.program->host_can_place(*runs)) { break; }
                     if (resources_.erase_approved(*instance_.program, handle)) { continue; }
                     const auto owner =
                         std::find_if(paused_.begin(), paused_.end(), [&](const auto& other) {

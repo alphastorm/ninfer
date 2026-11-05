@@ -465,7 +465,7 @@ std::optional<ContextDemotion> quote_demotion(const ProgramImpl& program,
             plan->state     = StateDemotion{state, program.state_store->content_epoch(state), host,
                                         owners.sources};
             candidate.released.state_slots = 1;
-            candidate.host_bytes = host ? 0 : program.state_images->storage().image_bytes();
+            candidate.host_run = {program.state_images->storage().image_bytes(), host ? 0U : 1U};
             break;
         }
         if (!plan->state) { return std::nullopt; }
@@ -482,6 +482,7 @@ std::optional<ContextDemotion> quote_demotion(const ProgramImpl& program,
         const auto stride   = resource == runtime::ContextTransferResource{kTextKvPool}
                                   ? program.text_host_kv_page_stride
                                   : program.backend_host_kv_page_stride;
+        candidate.host_run.bytes = stride;
         for (const auto& object : objects) {
             const auto page = object.handle;
             if (pages.active_history_references(page) || pages.source_pins(page) ||
@@ -491,7 +492,7 @@ std::optional<ContextDemotion> quote_demotion(const ProgramImpl& program,
             const auto host = pages.host_replica_current(page);
             plan->pages.push_back({page, object.position, pages.content_epoch(page),
                                    pages.committed_columns(page), host, owners.sources});
-            if (!host) { candidate.host_bytes += stride; }
+            if (!host) { ++candidate.host_run.count; }
             if (plan->pages.size() == needed) { break; }
         }
         if (plan->pages.empty()) { return std::nullopt; }
@@ -700,18 +701,20 @@ struct DemotionBatch {
         const auto stride    = resource == runtime::ContextTransferResource{kTextKvPool}
                                    ? program.text_host_kv_page_stride
                                    : program.backend_host_kv_page_stride;
-        const auto usage     = program.physical_usage();
-        const auto available = usage.capacity.host_bytes - usage.occupied.host_bytes;
+        const auto placeable = program.host_context_arena
+                                   ? program.host_context_arena->placeable_count(stride) : 0;
         auto plan            = std::make_shared<DemotionPlan>();
         plan->owner          = &program;
         plan->resource       = resource;
         plan->excluded       = components.front()->excluded;
         ContextDemotion result;
+        result.host_run.bytes = stride;
         for (const auto* page : ordered) {
-            const auto bytes = page->host_covers_prefix ? 0 : stride;
-            if (plan->pages.size() == needed || bytes > available - result.host_bytes) { break; }
+            const bool allocates = !page->host_covers_prefix;
+            if (plan->pages.size() == needed ||
+                (allocates && result.host_run.count >= placeable)) { break; }
             plan->pages.push_back(*page);
-            result.host_bytes += bytes;
+            result.host_run.count += allocates;
             plan->allowed.insert(plan->allowed.end(), page->references.begin(),
                                  page->references.end());
         }
@@ -733,6 +736,35 @@ struct DemotionBatch {
         return result;
     }
 };
+
+bool ProgramImpl::reserve_host_backups(context::MigrationBatch& migration, runtime::KvPoolId pool,
+    context::LogicalKVPageStore& pages, std::span<const context::LogicalKVPageHandle> missing,
+    bool drop_device) {
+    if (!missing.empty() && !host_kv_extents) { return false; }
+    std::size_t offset = 0;
+    while (offset < missing.size()) {
+        auto count = missing.size() - offset;
+        std::optional<context::HostKVExtentReservation> destination;
+        while (count) {
+            auto reservation =
+                host_kv_extents->prepare(pages, std::span(missing).subspan(offset, count));
+            if (reservation) {
+                destination.emplace(std::move(*reservation));
+                break;
+            }
+            count /= 2;
+        }
+        // All destinations and source leases belong to this local transaction until
+        // every component is ready. A failed reservation unwinds without dropping pages.
+        if (!destination) { return false; }
+        migration.add_backup(pool, pages,
+                             std::vector<context::LogicalKVPageHandle>(
+                                 missing.begin() + offset, missing.begin() + offset + count),
+                             std::move(*destination), drop_device);
+        offset += count;
+    }
+    return true;
+}
 
 bool ProgramImpl::start_demote(const ContextDemotion& quote) {
     if (!quote.impl || quote.impl->owner != this || context_operation_) { return false; }
@@ -766,8 +798,8 @@ bool ProgramImpl::start_demote(const ContextDemotion& quote) {
             state_store->host_resident(expected.handle) != expected.host_resident ||
             !state_store->can_release_after_checkpoint_references(
                 expected.handle, state_store->checkpoint_references(expected.handle)) ||
-            quote.host_bytes !=
-                (expected.host_resident ? 0 : state_images->storage().image_bytes())) {
+            quote.host_run != HostAllocationRun{state_images->storage().image_bytes(),
+                                                expected.host_resident ? 0U : 1U}) {
             return false;
         }
     } else {
@@ -799,7 +831,7 @@ bool ProgramImpl::start_demote(const ContextDemotion& quote) {
                                                                    : record.backend_frontier())});
         }
         const auto stride      = main ? text_host_kv_page_stride : backend_host_kv_page_stride;
-        std::size_t host_bytes = 0;
+        HostAllocationRun host_run{stride, 0};
         std::vector<std::uint32_t> descriptors;
         descriptors.reserve(plan.pages.size());
         for (const auto& page : plan.pages) {
@@ -824,11 +856,11 @@ bool ProgramImpl::start_demote(const ContextDemotion& quote) {
             }
             if (matched != page.references.size()) { return false; }
             descriptors.push_back(pages->descriptor_index(page.handle));
-            if (!page.host_covers_prefix) { host_bytes += stride; }
+            if (!page.host_covers_prefix) { ++host_run.count; }
         }
         std::sort(descriptors.begin(), descriptors.end());
         if (std::adjacent_find(descriptors.begin(), descriptors.end()) != descriptors.end() ||
-            host_bytes != quote.host_bytes) {
+            host_run != quote.host_run) {
             return false;
         }
     }
@@ -860,29 +892,8 @@ bool ProgramImpl::start_demote(const ContextDemotion& quote) {
         } else {
             for (const auto end : plan.page_group_ends) { append_group(end); }
         }
-        if (!missing.empty() && !host_kv_extents) { return false; }
-        std::size_t offset = 0;
-        while (offset < missing.size()) {
-            auto count = missing.size() - offset;
-            std::optional<context::HostKVExtentReservation> destination;
-            while (count) {
-                auto reservation =
-                    host_kv_extents->prepare(pages, std::span(missing).subspan(offset, count));
-                if (reservation) {
-                    destination.emplace(std::move(*reservation));
-                    break;
-                }
-                count /= 2;
-            }
-            // All destinations and source leases belong to this local transaction until
-            // every component is ready. A failed reservation unwinds without dropping pages.
-            if (!destination) { return false; }
-            migration.add_backup(*plan.resource.pool, pages,
-                                 std::vector<context::LogicalKVPageHandle>(
-                                     missing.begin() + offset, missing.begin() + offset + count),
-                                 std::move(*destination), true);
-            offset += count;
-        }
+        if (!reserve_host_backups(migration, *plan.resource.pool, pages, missing, true))
+            return false;
         // Complete Host replicas already preserve these contents. Once the entire batch is
         // reserved, release their Device copies synchronously, as for a single demotion.
         for (const auto& page : plan.pages) {

@@ -83,6 +83,10 @@ reclaim adapter, without CUDA, weights or an Engine. It is selected by every hos
 `ninfer_free_extents_test` checks first-fit and grouped placement without backing memory.
 `ninfer_host_context_arena_test` uses the real arena and pinned-buffer owner with only the CUDA
 allocation/free boundary interposed; fragmentation, returned ranges and rollback run on CPU CI.
+`ninfer_resource_manager_test` includes fragmented Host placement, sufficient-action selection,
+failed-preservation source retention, explicit byte shortages and durable-generation release guards.
+The native transaction fixture also checks released-set placement against physical Host accounting;
+that GPU fixture is not part of host-only qualification.
 
 Select a Python environment with the dependencies for the tests first. The maintained environment
 uses Python 3.11; CMake finds Python 3 without restricting its minor version.

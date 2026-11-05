@@ -150,13 +150,14 @@ ContextDemotion ProgramImpl::describe_demotion(std::shared_ptr<const Demotion> p
     out.released.state_slots = plan->images.size();
     for (const auto image : plan->images)
         if (!resources.state_store->host_resident(image))
-            out.host_bytes += resources.states->storage().image_bytes();
+            out.host_run.bytes += resources.states->storage().image_bytes();
     for (std::uint16_t pool = 0; pool < resources.pool_count(); ++pool) {
         out.released.kv_page_groups[pool] = plan->pages[pool].size();
         for (const auto page : plan->pages[pool])
             if (!resources.pool(pool).pages.host_replica_current(page))
-                out.host_bytes += pools[pool].host_page_stride;
+                out.host_run.bytes += pools[pool].host_page_stride;
     }
+    out.host_run.count = out.host_run.bytes ? 1U : 0U;
     out.impl = std::move(plan);
     return out;
 }
@@ -214,6 +215,14 @@ ContextResources Program::checkpoint_footprint(std::span<const CheckpointHandle>
 
 std::size_t Program::host_bytes_released(std::span<const CheckpointHandle> h) const {
     return impl_->host_released(h);
+}
+
+bool Program::host_can_place(std::span<const HostAllocationRun> runs,
+                              std::span<const CheckpointHandle> released) const {
+    // Byte-equivalent adapter: exact released-range placement is not implemented for Qwen4Exp.
+    const auto usage = physical_usage();
+    return total_bytes(runs) <= usage.capacity.host_bytes - usage.occupied.host_bytes +
+                                  host_bytes_released(released);
 }
 
 std::uint64_t Program::checkpoint_recovery_loss(std::span<const CheckpointHandle> removed,
@@ -357,7 +366,7 @@ std::optional<ContextDemotion> ContextDemotionBatch::finish() const {
 bool Program::start_demote(const ContextDemotion& quote) {
     auto& p = *impl_;
     if (p.operation || p.pending_transaction || !quote.impl || quote.impl->owner != &p ||
-        !p.resources.host_context || quote.host_bytes > p.resources.host_context->free_bytes())
+        !p.resources.host_context || total_bytes(std::span(&quote.host_run, 1)) > p.resources.host_context->free_bytes())
         return false;
     p.operation = std::make_unique<detail::ContextOperation>(p.resources,
                                                              detail::DemoteOperation{quote.impl});

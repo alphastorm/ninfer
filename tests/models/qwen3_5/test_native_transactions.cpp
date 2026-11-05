@@ -33,6 +33,11 @@ void require(bool condition, std::string_view message) {
     if (!condition) { throw std::runtime_error(std::string(message)); }
 }
 
+template <class Quote>
+std::size_t host_bytes(const Quote& quote) {
+    return total_bytes(std::span(&quote.host_run, 1));
+}
+
 bool transferred(const q35::ContextProgress& progress, runtime::ContextTransferDirection direction,
                  std::optional<runtime::ContextTransferResource> resource = std::nullopt) {
     return std::any_of(progress.transfers.begin(), progress.transfers.end(),
@@ -682,7 +687,7 @@ public:
             require(!candidates.empty(), "shared history has no Host demotion candidate");
             while (!candidates.empty()) {
                 const auto& quote = candidates.front();
-                require(quote.host_bytes > 0 && program_.start_demote(quote),
+                require(host_bytes(quote) > 0 && program_.start_demote(quote),
                         "shared history could not transfer its selected KV pages to Host");
                 require(settle().published, "shared history Host transfer did not complete");
                 candidates = program_.plan_reclaim(history, {}, shortage).demotions;
@@ -776,7 +781,7 @@ public:
             require(prepared && !prepared->reserved &&
                         prepared->frontier == marked.frontiers.front() &&
                         prepared->shortage == q35::ContextResources{.state_slots = 1} &&
-                        prepared->host_bytes > 0,
+                        host_bytes(*prepared) > 0,
                     "failed capture preparation lost its semantic boundary or physical shortage");
             expect_usage(full, "failed capture preparation retained a physical reservation");
         }
@@ -900,7 +905,7 @@ public:
                     usage.kv_page_groups[resource.pool->index];
             const auto candidates = program_.plan_reclaim(allowed, {}, shortage).demotions;
             const auto* quote     = demotion_with_sources(candidates, allowed);
-            require(quote && quote->host_bytes != 0 && program_.start_demote(*quote),
+            require(quote && host_bytes(*quote) != 0 && program_.start_demote(*quote),
                     "source could not demote its selected resources for restore");
             const auto demoted = settle();
             require(
@@ -1054,7 +1059,7 @@ public:
                              [](const auto& p) { return p.released.state_slots == 1; });
             require(found != plans.demotions.end() && program_.start_demote(*found),
                     "Host retirement fixture could not offload its State image");
-            const auto bytes = found->host_bytes;
+            const auto bytes = host_bytes(*found);
             require(settle().published, "Host retirement State transfer failed");
             return bytes;
         };
@@ -1335,19 +1340,19 @@ public:
         const auto* first_quote  = demotion_with_sources(candidates, first_owner);
         const auto* second_quote = demotion_with_sources(candidates, second_owner);
         require(first_quote && first_quote->released.kv_page_groups[0] == 1 && second_quote &&
-                    second_quote->released.kv_page_groups[0] == 2 && first_quote->host_bytes > 0 &&
+                    second_quote->released.kv_page_groups[0] == 2 && host_bytes(*first_quote) > 0 &&
                     program_.start_demote(*first_quote),
                 "independent physical owners did not offer independently executable demotions");
         require(settle().published &&
                     program_.physical_usage().occupied.kv_page_groups[0] + 1 ==
                         before.kv_page_groups[0] &&
-                    program_.physical_usage().occupied.host_bytes == first_quote->host_bytes,
+                    program_.physical_usage().occupied.host_bytes == host_bytes(*first_quote),
                 "demotion changed resources outside its selected physical owner");
-        require(second_quote->host_bytes > 0 && program_.start_demote(*second_quote),
+        require(host_bytes(*second_quote) > 0 && program_.start_demote(*second_quote),
                 "demoting one independent owner invalidated the other physical action");
         require(settle().published && program_.physical_usage().occupied.kv_page_groups[0] == 0 &&
                     program_.physical_usage().occupied.host_bytes ==
-                        first_quote->host_bytes + second_quote->host_bytes,
+                        host_bytes(*first_quote) + host_bytes(*second_quote),
                 "independent demotions did not account for their separate Host allocations");
         require(program_.release_checkpoint(first) && program_.release_checkpoint(second),
                 "independent demotions retained a completed checkpoint reference");
@@ -1479,7 +1484,7 @@ public:
                     program_.physical_usage().occupied.kv_page_groups[0] + 2 ==
                         baseline.occupied.kv_page_groups[0] &&
                     program_.physical_usage().occupied.host_bytes ==
-                        baseline.occupied.host_bytes + clipped->host_bytes &&
+                        baseline.occupied.host_bytes + host_bytes(*clipped) &&
                     program_.checkpoint_matches(first, first_base) &&
                     program_.checkpoint_matches(second, second_base),
                 "one batch did not publish exactly two Main pages while preserving both histories");
@@ -1508,10 +1513,10 @@ public:
             program_.plan_reclaim(source_set, {}, {.kv_page_groups = {1}}).demotions;
         const auto* state_quote = demotion_with_sources(state_candidates, source_set);
         const auto* main_quote  = demotion_with_sources(main_candidates, source_set);
-        require(state_quote && state_quote->host_bytes > 0 && main_quote &&
-                    main_quote->host_bytes > 0 && main_quote->released.kv_page_groups[0] == 1,
+        require(state_quote && host_bytes(*state_quote) > 0 && main_quote &&
+                    host_bytes(*main_quote) > 0 && main_quote->released.kv_page_groups[0] == 1,
                 "device-only checkpoint did not report its selected Host allocation demand");
-        const auto main_bytes = main_quote->host_bytes;
+        const auto main_bytes = host_bytes(*main_quote);
         require(program_.start_demote(*main_quote),
                 "shared-prefix fact fixture could not demote its selected Main page");
         require(settle().published, "shared-prefix fact fixture lost its demotion");
@@ -1551,6 +1556,15 @@ public:
                     program_.host_bytes_released(family) == main_bytes &&
                     program_.host_bytes_released(repeated) == main_bytes,
                 "fixed-set Host accounting double-counted shared or duplicate references");
+        {
+            const auto capacity = program_.physical_usage().capacity.host_bytes;
+            const std::array<HostAllocationRun, 1> whole{{{capacity, 1}}};
+            const std::array<HostAllocationRun, 1> beyond{{{capacity + 1, 1}}};
+            require(!program_.host_can_place(whole) && program_.host_can_place(whole, family) &&
+                        program_.host_can_place(whole, repeated) &&
+                        !program_.host_can_place(beyond, family),
+                    "fixed-set placement disagrees with fixed-set Host accounting");
+        }
         const auto main_releases = program_.plan_releases(family, {}, {.kv_page_groups = {1}});
         const auto expected_main = program_.physical_usage().occupied.kv_page_groups[0] -
                                    empty_.occupied.kv_page_groups[0];
@@ -1574,8 +1588,8 @@ public:
         const auto* private_tail = demotion_with_sources(family_candidates, descendant_set);
         require(program_.plan_reclaim(source_set, {}, {.kv_page_groups = {1}}).demotions.empty() &&
                     shared_page && shared_page->released.kv_page_groups[0] == 1 &&
-                    shared_page->host_bytes == 0 && private_tail &&
-                    private_tail->released.kv_page_groups[0] == 1 && private_tail->host_bytes > 0,
+                    host_bytes(*shared_page) == 0 && private_tail &&
+                    private_tail->released.kv_page_groups[0] == 1 && host_bytes(*private_tail) > 0,
                 "shared Main page was reclaimable without every retained alias in allowed");
         const std::array tail_only{*private_tail};
         const auto family_batch =
@@ -1600,7 +1614,7 @@ public:
                             [&](const auto& quote) {
                                 return quote.sources ==
                                            std::vector<q35::CheckpointHandle>{descendant} &&
-                                       quote.host_bytes > 0;
+                                       host_bytes(quote) > 0;
                             }),
                 "demotion exposed an excluded Device/Host prefix through its descendant alias");
         const auto baseline = program_.physical_usage();
@@ -1625,7 +1639,7 @@ public:
             demotion_batch(mixed_plan, overlapping_holders, {.kv_page_groups = {2}}).finish();
         require(mixed_batch && mixed_batch->released.kv_page_groups[0] == 2 &&
                     mixed_batch->sources.size() == family.size() &&
-                    mixed_batch->host_bytes == private_tail->host_bytes &&
+                    host_bytes(*mixed_batch) == host_bytes(*private_tail) &&
                     program_.start_demote(*mixed_batch),
                 "overlapping holders prevented batching distinct shared and private pages");
         const auto mixed_cancelled = settle(true);
@@ -1699,7 +1713,7 @@ public:
         require(partial_progress.published &&
                     after_partial.occupied.kv_page_groups[0] + 1 ==
                         before_partial.occupied.kv_page_groups[0] &&
-                    after_partial.occupied.host_bytes == partial_quote->host_bytes &&
+                    after_partial.occupied.host_bytes == host_bytes(*partial_quote) &&
                     program_.checkpoint_matches(partial_source, larger),
                 "partial demotion moved excess KV or invalidated its complete recovery point");
         const auto partial_candidate = program_.inspect_source(larger, partial_source);
@@ -1721,7 +1735,9 @@ public:
         auto pause_base     = request(2 * kChunk);
         const auto to_pause = bind(pause_base);
         prefill_prefix(to_pause, kChunk);
-        const auto pause_bytes = program_.pause_host_bytes(to_pause);
+        const auto pause_runs = program_.pause_host_runs(to_pause);
+        const auto pause_bytes = pause_runs ? std::optional(total_bytes(*pause_runs))
+                                            : std::optional<std::size_t>{};
         require(pause_bytes && *pause_bytes > 0 && program_.start_pause(to_pause, true),
                 "snapshot fact fixture could not reserve its Host demand");
         auto paused = settle();

@@ -172,6 +172,8 @@ public:
     // Fresh unpublished Host-only image. Destination owns rollback until snapshot adoption.
     [[nodiscard]] std::optional<Handle> reserve_host_destination() noexcept;
     [[nodiscard]] MemorySpan writable_host_view(Handle);
+    // Non-owning view for synchronous placement planning; callers retain the image owner.
+    [[nodiscard]] ConstMemorySpan host_view(Handle) const;
     void complete_host_initialization(Handle);
 
     // The caller has initialized every required field, ordered on its execution stream.

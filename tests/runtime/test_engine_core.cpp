@@ -433,7 +433,7 @@ struct CapturePreparation {
     std::uint32_t frontier = 0;
     bool reserved          = false;
     Resources shortage;
-    std::size_t host_bytes = 0;
+    ninfer::HostAllocationRun host_run;
 };
 
 enum class ContextKind : std::uint8_t { Bind, Capture, Demote, Pause };
@@ -482,7 +482,7 @@ struct Metadata {
 
 struct Demotion {
     Checkpoint handle;
-    std::size_t host_bytes = 0;
+    ninfer::HostAllocationRun host_run;
     std::vector<Checkpoint> sources;
     Resources released;
 };
@@ -747,7 +747,14 @@ public:
         return usage;
     }
 
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(Sequence) const {
+    [[nodiscard]] bool host_can_place(std::span<const ninfer::HostAllocationRun> runs,
+                                       std::span<const Checkpoint> released = {}) const {
+        const auto usage = physical_usage();
+        return ninfer::total_bytes(runs) <= usage.capacity.host_bytes - usage.occupied.host_bytes +
+                                              host_bytes_released(released);
+    }
+
+    [[nodiscard]] std::optional<std::vector<ninfer::HostAllocationRun>> pause_host_runs(Sequence) const {
         return std::nullopt;
     }
 
