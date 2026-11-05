@@ -1031,6 +1031,9 @@ but Serve throughput is always a persistent record. Redirected stderr contains n
 sequences. Pretty values use readable units and rounded rates; use the independent request JSONL for
 complete fields and full precision. Operational records never contain prompts, generated text,
 request bodies, credentials, or arbitrary client error messages.
+Internal failures include their single-line diagnostic detail. An Engine worker failure also
+writes its first cause and pre-cleanup request membership to stderr before failing requests;
+ordinary shutdown does not emit that failure diagnostic.
 If a tool marker is returned to text because its structure or tool identity cannot be represented,
 Serve emits one warning with only the failure classification, never the generated markup.
 

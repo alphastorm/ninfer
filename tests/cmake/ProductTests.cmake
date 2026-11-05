@@ -141,6 +141,15 @@ ninfer_add_test(ninfer_request_log_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log.cpp"
   LIBRARIES ninfer_serve)
 
+ninfer_add_test(ninfer_operational_failure_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_operational_failure.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/operational_log.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/request_events.cpp"
+  LIBRARIES ninfer_product_logging)
+# The Engine-capacity logger has a separate translation unit. This real renderer/event
+# closure must link without Engine/CUDA or linker-specific removal of unresolved functions.
+
 ninfer_add_test(ninfer_metrics_test
   HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_metrics.cpp"

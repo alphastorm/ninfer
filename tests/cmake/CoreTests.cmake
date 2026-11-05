@@ -182,7 +182,27 @@ ninfer_add_test(ninfer_kv_cache_test
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_host_context_arena_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_host_context_arena.cpp"
+  LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_host_context_arena_test)
+if(WIN32)
+  set_tests_properties(ninfer_host_context_arena_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
+  foreach(symbol IN ITEMS cudaMallocHost cudaFreeHost cudaGetErrorString)
+    target_link_options(ninfer_host_context_arena_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
+
+ninfer_add_test(ninfer_free_extents_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_free_extents.cpp"
+  LIBRARIES ninfer_core)
+
+ninfer_add_test(ninfer_recovery_loss_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_recovery_loss.cpp"
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_state_store_test
@@ -198,7 +218,6 @@ set_tests_properties(
   ninfer_decode_graph_test
   ninfer_arena_test
   ninfer_kv_cache_test
-  ninfer_host_context_arena_test
   ninfer_state_store_test
   PROPERTIES SKIP_RETURN_CODE 77)
 

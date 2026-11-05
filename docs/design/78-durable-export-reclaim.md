@@ -474,9 +474,10 @@ catch an invariant failure and report success. Preallocate bounded bookkeeping
 before destructive work; retain proof pins through result handoff; destroy native
 leases on the worker on every exit. After handoff, the service retains proof pins
 through the full store save as required in §3.3. Any actual catalog/occupancy
-mutation must notify `scheduler_.capacity_released()` and admission even if a
+mutation must wake admission even if a
 subsequent step refuses or throws, but must **not** advance observed checkpoint
-progress. Use the save-completion path's non-observed notification (E6), or an
+progress. Paused pressure owners now retry restoration each cycle; there is no separate
+scheduler capacity-event latch. Use the save-completion path's non-observed notification (E6), or an
 equivalent admission signal; do not call the observed `request_admission_check`
 for save-owned reclaim/cleanup notifications. No-op tiers emit no capacity or
 admission notification: count a change only after redundant cleanup releases

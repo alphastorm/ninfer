@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -29,6 +30,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 // DeviceContext only binds the Engine worker here. A GPU-less host still links the CUDA runtime;
 // these entry points present one device without submitting any CUDA work. Names are expanded
@@ -97,6 +104,45 @@ void require(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
 }
 
+class StderrCapture {
+public:
+    StderrCapture() : file_(std::tmpfile()) {
+        require(file_ != nullptr, "could not create stderr capture");
+        std::fflush(stderr);
+#if defined(_WIN32)
+        original_ = _dup(_fileno(stderr));
+        const auto result = _dup2(_fileno(file_), _fileno(stderr));
+#else
+        original_ = dup(fileno(stderr));
+        const auto result = dup2(fileno(file_), fileno(stderr));
+#endif
+        require(original_ >= 0 && result >= 0, "could not redirect stderr");
+    }
+    ~StderrCapture() {
+        std::fflush(stderr);
+#if defined(_WIN32)
+        _dup2(original_, _fileno(stderr));
+        _close(original_);
+#else
+        dup2(original_, fileno(stderr));
+        close(original_);
+#endif
+        std::fclose(file_);
+    }
+    std::string text() {
+        std::fflush(stderr);
+        std::rewind(file_);
+        std::string result;
+        std::array<char, 1024> bytes;
+        while (const auto count = std::fread(bytes.data(), 1, bytes.size(), file_))
+            result.append(bytes.data(), count);
+        return result;
+    }
+private:
+    std::FILE* file_;
+    int original_ = -1;
+};
+
 // An observed change arms the gate: the observed request's planning state is released immediately
 // before it becomes terminal, or a checkpoint operation changes native state. The next statistics
 // publication then waits until the observer has read statistics. A result delivered before
@@ -140,6 +186,8 @@ public:
         bool pause_started    = false;
         bool paused           = false;
         bool export_blocked   = false;
+        bool victim_finished  = false;
+        bool pressure_finished_before_victim = false;
     };
 
     template <class Update>
@@ -156,6 +204,11 @@ public:
         std::unique_lock lock(mutex_);
         require(changed_.wait_for(lock, kEventTimeout, [&] { return predicate(state_); }),
                 std::string("worker did not reach ") + milestone);
+    }
+
+    [[nodiscard]] State snapshot() {
+        std::lock_guard lock(mutex_);
+        return state_;
     }
 
     // Stalled prefills make no progress until released.
@@ -180,17 +233,20 @@ enum class Script : std::uint8_t {
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
+    VictimResume,    // Stall; can pause and restore, for younger-owner handoff.
     ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
     return script == Script::Stall || script == Script::DecodeFailure ||
            script == Script::Pressure || script == Script::VictimHold ||
-           script == Script::VictimPause || script == Script::ExportPressure;
+           script == Script::VictimPause || script == Script::VictimResume ||
+           script == Script::ExportPressure;
 }
 
 [[nodiscard]] bool victim(Script script) noexcept {
-    return script == Script::VictimHold || script == Script::VictimPause;
+    return script == Script::VictimHold || script == Script::VictimPause ||
+           script == Script::VictimResume;
 }
 
 using Resources = rt::ContextResources<1>;
@@ -387,7 +443,7 @@ struct CapturePreparation {
     std::uint32_t frontier = 0;
     bool reserved          = false;
     Resources shortage;
-    std::size_t host_bytes = 0;
+    ninfer::HostAllocationRun host_run;
 };
 
 enum class ContextKind : std::uint8_t { Bind, Capture, Demote, Pause };
@@ -436,7 +492,7 @@ struct Metadata {
 
 struct Demotion {
     Checkpoint handle;
-    std::size_t host_bytes = 0;
+    ninfer::HostAllocationRun host_run;
     std::vector<Checkpoint> sources;
     Resources released;
 };
@@ -597,13 +653,24 @@ public:
                         [](const Lane& lane) { return lane.active && victim(lane.script); })) {
             return {.shortage = {.kv_page_groups = {1}}};
         }
+        live(units.front().sequence).permit = true;
         return {.reserved = true};
+    }
+
+    void release_units(std::span<const Sequence> sequences) noexcept {
+        for (const auto sequence : sequences) {
+            if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
+                lanes_[sequence.lane].epoch == sequence.epoch) {
+                lanes_[sequence.lane].permit = false;
+            }
+        }
     }
 
     [[nodiscard]] PrefillProgress advance_prefill(Sequence sequence,
                                                   rt::ExecutionTiming* = nullptr,
                                                   rt::TokenMaskProvider* = nullptr) {
         const auto& lane = live(sequence);
+        require(lane.permit, "prefill consumed a released unit permit");
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
         progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
@@ -623,6 +690,7 @@ public:
                                       rt::ExecutionTiming* = nullptr,
                                       rt::TokenMaskProvider* = nullptr) {
         for (const auto sequence : sequences) {
+            require(live(sequence).permit, "decode consumed a released unit permit");
             if (live(sequence).script == Script::DecodeFailure) {
                 throw std::logic_error("injected decode failure");
             }
@@ -647,7 +715,7 @@ public:
         result.row_count = pending.row_count();
         for (std::size_t row = 0; row < pending.row_count(); ++row) {
             const auto sequence = pending.sequence(row);
-            (void)live(sequence);
+            live(sequence).permit = false;
             const auto& decision = decisions[row];
             using Disposition    = rt::CommitDisposition;
             result.rows[row].disposition = decision.failed      ? Disposition::FailedReleased
@@ -665,6 +733,15 @@ public:
 
     [[nodiscard]] FinishResult finish(Sequence sequence) noexcept {
         FinishResult result;
+        if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
+            lanes_[sequence.lane].epoch == sequence.epoch) {
+            const auto script = lanes_[sequence.lane].script;
+            events_.record([&](Events::State& state) {
+                if (script == Script::Pressure)
+                    state.pressure_finished_before_victim = !state.victim_finished;
+                if (victim(script)) state.victim_finished = true;
+            });
+        }
         if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
             lanes_[sequence.lane].epoch == sequence.epoch && lanes_[sequence.lane].publish) {
             result.checkpoint = publish_checkpoint(lanes_[sequence.lane].prompt_tokens);
@@ -701,7 +778,14 @@ public:
         return usage;
     }
 
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(Sequence) const {
+    [[nodiscard]] bool host_can_place(std::span<const ninfer::HostAllocationRun> runs,
+                                       std::span<const Checkpoint> released = {}) const {
+        const auto usage = physical_usage();
+        return ninfer::total_bytes(runs) <= usage.capacity.host_bytes - usage.occupied.host_bytes +
+                                              host_bytes_released(released);
+    }
+
+    [[nodiscard]] std::optional<std::vector<ninfer::HostAllocationRun>> pause_host_runs(Sequence) const {
         return std::nullopt;
     }
 
@@ -956,6 +1040,7 @@ private:
         std::uint64_t epoch         = 0;
         std::uint32_t prompt_tokens = 0;
         bool publish                = false;
+        bool permit                 = false;
     };
 
     struct Operation {
@@ -997,6 +1082,10 @@ private:
         for (const auto point : points) { --records_[point.index].pins; }
         --staged_exports_;
         gate_->changed();
+    }
+
+    [[nodiscard]] Lane& live(Sequence sequence) {
+        return const_cast<Lane&>(std::as_const(*this).live(sequence));
     }
 
     [[nodiscard]] const Lane& live(Sequence sequence) const {
@@ -1282,12 +1371,13 @@ public:
     }
 
     // Waits as an HTTP handler would, then reads runtime statistics before anything else runs.
-    [[nodiscard]] Outcome await(Submission& submission, bool cancel = false) {
+    [[nodiscard]] Outcome await(Submission& submission, bool cancel = false,
+                                Clock::time_point cancel_at = {}) {
         Outcome outcome;
         try {
-            outcome.result = submission.wait(
-                nullptr, cancel ? ninfer::CancellationView([] { return true; })
-                                : ninfer::CancellationView{});
+            outcome.result = submission.wait(nullptr, ninfer::CancellationView([&] {
+                return cancel || (cancel_at != Clock::time_point{} && Clock::now() >= cancel_at);
+            }));
         } catch (...) { outcome.error = std::current_exception(); }
         outcome.stats = core_->runtime_stats();
         gate_->consumer_read();
@@ -1499,6 +1589,36 @@ void paused_cancellation() {
     require_finished(harness.await(pressure), FinishReason::OutputLimit, "pause requester");
 }
 
+void younger_pressure_owner_progresses_before_older_finishes() {
+    Harness harness(2);
+    auto older = harness.submit(Script::VictimResume, 1);
+    auto younger = harness.submit(Script::Pressure, 1);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "younger pressure handoff");
+    harness.release_stalls();
+    require_finished(harness.await(younger), FinishReason::OutputLimit, "younger pressure owner");
+    require_finished(harness.await(older), FinishReason::OutputLimit, "restored older request");
+    require(harness.events().snapshot().pressure_finished_before_victim,
+            "younger admitted request waited for the older request's completion");
+    require_membership(harness.observed_stats(), {}, "pressure handoff cleanup");
+}
+
+void fresh_arrival_waits_behind_paused_admitted_work() {
+    Harness harness(2);
+    auto owner = harness.submit(Script::Pressure, 1);
+    auto paused = harness.submit(Script::VictimPause, 1);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "paused admitted request");
+    auto fresh = harness.submit(Script::Complete, 1, false, Clock::now() + 100ms);
+    const auto outcome = harness.await(fresh);
+    require_request_error(outcome, RequestErrorKind::QueueTimeout, "deferred fresh arrival");
+    require_membership(outcome.stats, {.running = 1, .paused = 1}, "deferred fresh arrival");
+    require_finished(harness.await(paused, true), FinishReason::Cancelled, "paused cleanup");
+    harness.release_stalls();
+    require_finished(harness.await(owner), FinishReason::OutputLimit, "pressure cleanup");
+    require_membership(harness.observed_stats(), {}, "fresh admission cleanup");
+}
+
 void control_rejection() {
     Harness harness(1);
     auto request = harness.submit(Script::ControlRejected, 4, true);
@@ -1518,6 +1638,7 @@ void constraint_dead_end() {
 }
 
 void engine_failure() {
+    StderrCapture capture;
     Harness harness(1);
     auto request = harness.submit(Script::DecodeFailure, 4, true);
     auto waiting = harness.submit(Script::Complete, 1);
@@ -1530,7 +1651,22 @@ void engine_failure() {
             "engine failure delivered another error");
     require_membership(outcome.stats, {}, "engine failure");
     require(!harness.core().is_available(), "internal decode failure left the Engine available");
-    (void)require_error<std::logic_error>(harness.await(waiting), "engine failure queue");
+    require(std::string(require_error<std::logic_error>(
+                harness.await(waiting), "engine failure queue").what()) == "injected decode failure",
+            "waiting request lost the original worker failure");
+    const auto diagnostic = capture.text();
+    require(diagnostic.find("NInfer worker failed: injected decode failure") != std::string::npos &&
+                diagnostic.find("request=1 lane=0") != std::string::npos &&
+                diagnostic.find("NInfer worker failed:", diagnostic.find("NInfer worker failed:") + 1) ==
+                    std::string::npos,
+            "first worker failure was not logged once with pre-cleanup membership");
+}
+
+void normal_shutdown_is_quiet() {
+    StderrCapture capture;
+    { Harness harness(1); }
+    require(capture.text().find("NInfer worker failed:") == std::string::npos,
+            "ordinary shutdown was reported as a worker failure");
 }
 
 void isolated_admission_refusal() {
@@ -1552,7 +1688,9 @@ void isolated_restore_refusal() {
     harness.events().await([](const Events::State& state) { return state.paused; },
                            "the published pause");
     harness.release_stalls();
-    const auto outcome = harness.await(request);
+    // An impossible restore must settle even while the fresh-admission wake-up remains set.
+    // Cancellation only bounds a regression; it cannot satisfy the required Unavailable result.
+    const auto outcome = harness.await(request, false, Clock::now() + kEventTimeout);
     require_request_error(outcome, RequestErrorKind::Unavailable, "isolated restore miss");
     require_membership(outcome.stats, {}, "isolated restore miss");
     require(harness.core().is_available(), "isolated restore miss failed the Engine");
@@ -1560,6 +1698,28 @@ void isolated_restore_refusal() {
     auto next = harness.submit(Script::Complete, 1);
     require_finished(harness.await(next), FinishReason::OutputLimit,
                      "request after an isolated restore miss");
+}
+
+void isolated_restore_refusal_preserves_deferred_admission() {
+    Harness harness(2);
+    auto pressure = harness.submit(Script::Pressure, 1);
+    auto paused = harness.submit(Script::VictimPause, 1, true);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "the published pause before fresh arrival");
+    auto fresh = harness.submit(Script::Complete, 1);
+    harness.release_stalls();
+    const auto deadline = Clock::now() + kEventTimeout;
+    const auto refused = harness.await(paused, false, deadline);
+    require_request_error(refused, RequestErrorKind::Unavailable, "isolated paused owner");
+    require_finished(harness.await(pressure, false, deadline), FinishReason::OutputLimit,
+                     "completed pressure owner");
+    require_finished(harness.await(fresh, false, deadline), FinishReason::OutputLimit,
+                     "fresh arrival after isolated restore refusal");
+    require_membership(harness.observed_stats(), {}, "isolated restore with deferred admission");
+    require(harness.events().snapshot().bound == 3 &&
+                harness.observed_stats().generated_tokens == 2,
+            "isolated refusal lost or duplicated deferred fresh work");
+    require(harness.core().is_available(), "isolated restore refusal failed the Engine");
 }
 
 void isolated_state_slot_refusal() {
@@ -1873,11 +2033,18 @@ int main() {
         Case{"materializing_failure", materializing_failure},
         Case{"pausing_cancellation", pausing_cancellation},
         Case{"paused_cancellation", paused_cancellation},
+        Case{"younger_pressure_owner_progresses_before_older_finishes",
+             younger_pressure_owner_progresses_before_older_finishes},
+        Case{"fresh_arrival_waits_behind_paused_admitted_work",
+             fresh_arrival_waits_behind_paused_admitted_work},
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
+        Case{"normal_shutdown_is_quiet", normal_shutdown_is_quiet},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
+        Case{"isolated_restore_refusal_preserves_deferred_admission",
+             isolated_restore_refusal_preserves_deferred_admission},
         Case{"isolated_state_slot_refusal", isolated_state_slot_refusal},
         Case{"durable_import_commit", durable_import_commit},
         Case{"durable_import_abort", durable_import_abort},

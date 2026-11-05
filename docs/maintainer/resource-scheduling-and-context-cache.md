@@ -105,6 +105,14 @@ KV 的分项占用用于观测，不能再次相加成额外配额。传输目�
 直接用于传输。Device 和 Host 的完整 image 使用同一内部布局；复制的对齐间隙计入真实传输
 字节数。Host extent 的分裂、最后引用释放和合并由 allocator 管理。
 
+Qwen3.5 的可选写入按实际分配形状规划：`HostAllocationRun` 描述每次分配大小和数量，
+State → Text KV → backend KV 的顺序与 Native 预约一致；KV 连续组放不下时逐次减半。
+`FreeExtents` 使用 arena 相同的 first-fit、对齐和合并规则，不能仅凭空闲字节判定可放置。
+固定受害集合的字节回收量与可归还地址范围来自同一枚举；共享引用、重复句柄和 reader pin
+不产生虚假空间。优先选择能完成放置的合法动作，并删除最终集合中不再必要的动作。
+显式 Host byte shortage、durable export/import 的容量与代际释放保护保持 byte 语义；
+Qwen4Exp 目前只提供 byte-equivalent adapter，不声称解决其碎片化放置。
+
 必要请求输入、token 账本、prepared media、Responses 存储和 Frontend 媒体缓存各有自己的
 生命周期与现有数量、长度或媒体预算约束。Host context 容量不覆盖这些内存，也不限制进程总 RAM。
 物理容量同时约束 Native 元数据规模；空逻辑记录和索引分支及时删除。
@@ -115,9 +123,10 @@ Program 根据实际绑定状态计算 Prefill、Replay、Decode/Verify、Contro
 覆盖，包含 speculative 峰值与后端需要。State 与缺失副本另外取得；写入冲突所需的尾页 COW 计入绑定或 unit 许可。
 一次 unit 的多个 typed pool 申请共同成功，失败归还本次部分预留并返回具体缺口。
 
-Engine 按恢复优先、原票号优先取得 resident 单元许可，形成可运行子集；一行暂时不足不会阻止
-其他已许可行执行。Fresh admission 使用余量，不能花掉现存许可。普通 unit 结算释放未用预留，
-后续增长继续按需申请。算子内部不选择缓存受害者。
+无压力时 Engine 保持恢复优先、原票号优先的 resident 单元许可顺序。压力下 progress owner
+优先取得许可；owner 尚未恢复或等待合法容量时，其他 resident 不继续增长抢占它的空间。
+已经取得许可的安全行仍可执行。Fresh admission 只在没有压力 owner、paused 或受保护恢复时
+使用余量。普通 unit 结算释放未用预留，后续增长继续按需申请；算子内部不选择缓存受害者。
 
 同步回收已经改变容量时，当场重试当前许可；需要等待传输完成时才交回调度周期。
 
@@ -341,8 +350,12 @@ Runtime 将候选的恢复损失与保留资格用于各项准入检查和排序
 2. 普通动作比较“边际恢复 token 损失 / 对本次缺口有用的释放量”，同分按保留顺序。
 3. 复用动作按最近真实需求时间，优先处理较旧内容。
 
-删除损失依据动作后的真实 surviving fallback 计算。嵌套 E、输入点与 Shared 不重复累加同一
-历史的覆盖；同时删除的别名不能充当彼此 fallback。Device→Host 降级在排序前固定所需 Host
+Qwen3.5 删除损失依据动作后的真实 surviving fallback 计算。每条最大被删除分支取其所有
+被删除祖先的最大恢复退化，再将独立分支相加；共享祖先参与每条后继分支的最大值。
+例如删除公共 100 及两个 200 分支、各保留 150 时损失为 200，而不是 150。
+相同语义的别名只计一次，幸存别名仍可恢复该点；结果不依赖槽位或输入顺序。
+嵌套 E、输入点与 Shared 不重复累加同一历史的覆盖；同时删除的别名不能充当彼此
+fallback。Device→Host 降级在排序前固定所需 Host
 受害者，完整动作的净损失包含这些删除。只有无需删除完整恢复内容时才是零损失，不能仅因
 Device 来源得到保全就优先。提交前复核同一受害集合，变化后重新报价。
 
@@ -355,7 +368,9 @@ Device 页已全部被前面选中的迁移覆盖，它不再增加本次容量�
 Native 的完整物理页身份，而非检查点名称或名义页数。其他删除动作，以及需要 Host 受害者的
 迁移，结束这批。Runtime 检查每组及完整批次的权限，Native 按实际缺口和 Host 余量裁切严格前缀。
 全部目的与源 lease 预约成功后才提交，已有完整 Host 副本的 Device 页在提交时释放，其余页在
-复制完成后释放。原始候选列表保留，批量预约失败时仍可依次尝试单个迁移和删除备选。
+复制完成后释放。原始候选列表保留，批量预约失败时仍可依次尝试单个迁移和独立备选。
+实际尝试的单个保全迁移失败且未删除 Host 受害者时，本轮不能再删除它的来源；可继续
+执行其他独立动作。未被提供、放不下或被权限保护否决的迁移不获得这种额外保护。
 
 ### 7.3 必要执行与可选写入
 
@@ -392,47 +407,54 @@ Host 先释放安全的重复副本，再对有限物理动作作完整预检：
 
 ### 8.1 普通周期
 
-每个周期先处理传输、终态与取消，在真实容量事件上尝试最老 paused 请求的完整恢复。然后按
-恢复优先、原票号优先逐行申请 resident 单元许可，保留可运行子集，再用余量尝试 fresh admission。
+每个周期先处理 pending deadline、传输、终态与取消，再在安全边界推进压力服务轮次。paused
+请求属于已准入成员；它成为 owner 后每周期尝试完整恢复，不依赖一次性的容量事件信号。
+然后逐行申请 resident 单元许可，保留可运行子集；没有压力或恢复工作时才尝试 fresh admission。
 执行已许可的紧凑 Control/Decode 集合和一个 Prefill/Replay chunk；Control 提交的行下一周期
 重新取得 Decode 许可。Graph 使用实际成员数与执行 profile。
 
 Fresh 队列保留 FIFO 票号，每个受阻请求最多被 C 个更年轻请求成功越过。每次扫描检查队首及最多
 C 个后续候选，失败检查不消耗额度，未完成扫描按票号继续。没有空 lane 时仍可保留选中的恢复来源。
 队列变化、实际容量释放、搬运完成与引用撤销触发扫描，同一事件下已失败的请求不重复报价，普通 decode
-不重新开启扫描。Paused 请求的等待只约束它自身，空闲 lane 和容量可服务能够进入的 fresh。
+不重新开启扫描。压力期间新请求留在 pending 队列，即使有空闲 lane 也不能越过已准入的 paused
+请求；原 pending deadline 不变，超时仍以 `QueueTimeout` / HTTP 503 结束。
 
 ### 8.2 压力与完整恢复
 
 ```text
 单元缺口 → 可选预留与普通缓存回收 → 必要时撤销等待保护与暂停快照
-         → 为最老必要工作收回较年轻 resident，或暂停自身无法前进的年轻行
+         → 受阻请求成为 progress owner，暂停最年轻的其他合法 resident
 ```
 
 Materializing、已终结和持完整恢复许可的请求不作为抢占对象。暂停发生在 Native 稳定提交边界，
 不打断 kernel。已许可的其他请求继续执行，不要求整批全部可放入才运行。
 
-Paused 队列按原票号尝试恢复。存在更老 resident 时，暂停请求只尝试空闲和可选缓存空间；不能
-仅为试探恢复而反复暂停年轻 borrower。更老 resident 离开后，最老 paused 可以收回年轻请求占用的
-lane 和容量。Fresh admission 不主动抢占 resident。
+压力服务顺序与请求票号分离：年轻请求也能成为 owner，抢占更老的 resident。只有 owner 可以
+通过回收或抢占改变容量归属；其他受阻成员只记录争用。owner 得到至少 1 秒真实新进展执行时间；
+其恢复耗时可将 allowance 提高到最多 4 秒。等待、Replay 和未完成首个新单元不消耗服务轮次。
+安全边界达到 allowance 后交给下一个已准入成员；没有 paused 和新争用时结束压力。终态从服务
+队列移除；交接归还未消费的普通 unit 预留，但 Native 的完整恢复保护保持。Fresh 不主动抢占。
 
 同时最多一个请求持有完整恢复许可。它优先重建旧历史并完成首个真实新单元，其他可运行单元
-继续执行；恢复期跳过可选 capture。Native 持有跨 chunk 的真实容量，Runtime 以
+继续执行；Native 的恢复期仍跳过不可合法捕获的位置。压力下 Engine 仅跳过非 owner 的可选
+capture，owner 的 shared-prefix capture 保留且仍受 OptionalWrite 权限限制。Native 持有跨 chunk 的真实容量，Runtime 以
 `recovery_pending` 判断保护结束。到达旧 frontier、完成 MTP bridge 或单纯回读 Snapshot 都不算
 新进展；新 prefill、生成/control 提交或终态才结束保护。
 
 Prefill chunk 的边界为已经驻留的请求提供轮转机会。全部 lane 被占用时，新请求仍要等到某个
-resident 结束、取消或因资源压力暂停；缩短 chunk 本身不会使它提前进入。因此，短请求排队可能
+resident 结束、取消且压力排空；仅因资源压力暂停不会准入新的 borrower。因此，短请求排队可能
 跨过长请求的多个 chunk，分析这类时延要分别检查 lane 准入和每个执行单元的耗时。
 
 Engine 在轮首、准入后的执行选择前、Control/Decode 后各有界推进上下文事务。已完成的绑定
 及时进入原有许可与语义 capture 流程；Control/Decode 执行后只刷新尚未执行的 Prefill/Replay
 许可，每轮仍为一个 compact decode batch 和一个 prefill turn。未完成的异步事件不自旋等待。
 
-完成、取消、永久缩减、较年轻请求暂停释放资源等事件提供恢复机会。失败的恢复局部等待下一事件；
-刚暂停的请求不因自身释放立刻恢复。没有真实执行或传输能够释放资源时，最老请求须通过回收与
+完成、取消、永久缩减和 export lease 退休都可提供恢复空间；paused owner 每周期重新观察这些
+变化。恢复失败不触发 fresh admission。没有真实执行或传输能够释放资源时，owner 须通过回收与
 合法许可推进，容量合同不满足则报错：resident 请求取不到合法单元使 Engine 失败；没有任何执行、
 paused 状态或在途 export 能释放容量的孤立 fresh 或恢复请求，只以 `Unavailable` 拒绝该请求。
+Fresh admission 的待处理唤醒在压力期间保留，不是恢复容量仍会变化的证据；它不能阻止孤立
+paused owner 的终态拒绝。恢复不消费该唤醒，压力结束后仍由 fresh scan 处理，避免遗漏排队请求。
 
 ### 8.3 Snapshot 与 Replay
 
@@ -449,7 +471,7 @@ Snapshot 保存先完成必要后端规范化，只复制释放 Device 所缺的
 保存一个受害者递归抢占另一个请求。
 
 暂停快照可以撤销。撤销释放整份执行快照的引用并转入 Replay；此前输入恢复点和锚点仍按自身
-完整性与缓存规则存活。已有快照暂时放不下时等待真实容量事件，不仅为减少恢复体积主动丢掉快照。
+完整性与缓存规则存活。已有快照暂时放不下时由 owner 重试恢复，不仅为减少恢复体积主动丢掉快照。
 
 Replay 不重新发布旧输出、不重复扣预算、不再次采样历史 token。Penalty counts 按已提交输出和
 实际计数的 forced control 恢复；RNG 沿用逻辑位置、seed 和 purpose。Replay 跨 chunk 推进，

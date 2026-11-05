@@ -32,6 +32,7 @@ add_library(ninfer_serve STATIC
   session_checkpoint_service.cpp
   request_events.cpp
   operational_log.cpp
+  operational_capacity.cpp
   request_log.cpp
   metrics.cpp
   http_server.cpp

@@ -1,4 +1,5 @@
 ninfer_add_test(ninfer_scheduler_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
   LIBRARIES ninfer_runtime_support)
 

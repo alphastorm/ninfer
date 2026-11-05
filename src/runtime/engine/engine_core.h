@@ -3,6 +3,7 @@
 // Small fixed-capacity request execution for every backend.
 
 #include "core/device.h"
+#include "core/host_placement.h"
 #include "core/gpu_keep_warm.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
@@ -780,6 +781,7 @@ private:
     }
 
     void release_planning_state(const std::shared_ptr<Request>& request) noexcept {
+        scheduler_.finished(request->id);
         if (admission_decision_ && admission_decision_->request == request) {
             admission_decision_.reset();
         }
@@ -970,7 +972,6 @@ private:
         capture_decisions_[lane].reset();
         slots_[lane].reset();
         request_admission_check();
-        scheduler_.capacity_released();
     }
 
     [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations() const noexcept {
@@ -1383,6 +1384,11 @@ private:
         request->capture_pending    = true;
         request->post_capture_state = next;
         if (instance_.program->has_context_operation()) { return; }
+        if (const auto owner = scheduler_.progress_owner(); owner && *owner != request->id) {
+            instance_.program->skip_capture(*request->sequence);
+            request->capture_pending = false;
+            return;
+        }
         bool started = instance_.program->start_capture(*request->sequence);
         if (!started) {
             instance_.program->skip_capture(*request->sequence);
@@ -1399,6 +1405,11 @@ private:
             (void)resources_.recycle_input(*instance_.program, request->continuation_owner);
         }
         while (const auto capture = instance_.program->prepare_capture(*request->sequence)) {
+            if (const auto owner = scheduler_.progress_owner(); owner && *owner != request->id) {
+                instance_.program->skip_capture(*request->sequence);
+                decision.reset();
+                continue;
+            }
             if (capture->reserved) {
                 decision.reset();
                 return true;
@@ -1414,17 +1425,17 @@ private:
                     CaptureDecision{*request->sequence, capture->frontier,
                                     resources_.begin_reclaim(*instance_.program, admission)});
             }
-            const auto usage = instance_.program->physical_usage();
-            if (capture->host_bytes && capture->host_bytes <= usage.capacity.host_bytes) {
-                if (capture->host_bytes > usage.capacity.host_bytes - usage.occupied.host_bytes) {
+            if (capture->host_run.count) {
+                const std::span<const HostAllocationRun> runs(&capture->host_run, 1);
+                if (!instance_.program->host_can_place(runs)) {
                     (void)instance_.program->release_redundant_host({}, request->sequence);
                 }
                 if (const auto victims = resources_.host_victims(
-                        *instance_.program, capture->host_bytes, std::nullopt, {}, {}, admission,
+                        *instance_.program, runs, std::nullopt, {}, {}, admission,
                         &decision->reclaim)) {
                     if (!resources_.commit_host_victims(
                             *instance_.program, *victims, decision->reclaim)) { return false; }
-                    if (!victims->empty()) { scheduler_.capacity_released(); }
+                    if (!victims->empty()) { request_admission_check(); }
                     if (const auto retry = instance_.program->prepare_capture(*request->sequence);
                         retry && retry->reserved) {
                         decision.reset();
@@ -1504,6 +1515,18 @@ private:
         progress.pending.reset();
     }
 
+    static std::uint64_t progress_mark(const Request& request) noexcept {
+        return static_cast<std::uint64_t>(request.computed_prompt_tokens) +
+               request.committed_decode_tokens;
+    }
+
+    void charge_service(const std::shared_ptr<Request>& request, std::uint64_t before,
+                        Clock::time_point started) noexcept {
+        if (progress_mark(*request) > before) {
+            scheduler_.served(request->id, elapsed_ns(started, Clock::now()));
+        }
+    }
+
     void run_prefill_step(std::uint32_t lane,
                           const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
         nvtx::ScopedRange prefill_range(nvtx::Name::Prefill, nvtx::Category::Prefill);
@@ -1520,6 +1543,8 @@ private:
         masks.outputs[0] = &request->output;
         auto* provider   = request->output.constrained() ? &masks : nullptr;
         ProgramCallScope program_call(*this);
+        const auto before = progress_mark(*request);
+        const auto started = Clock::now();
         auto progress = instance_.program->advance_prefill(*request->sequence,
                                                            &program_call.failed_timing(), provider);
         program_call.finish(progress.timing);
@@ -1527,6 +1552,7 @@ private:
             record_execution_work(request->prefill_work, progress.timing);
         }
         resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
+        charge_service(request, before, started);
         publish_runtime_stats();
     }
 
@@ -1555,12 +1581,6 @@ private:
                std::all_of(slots_.begin(), slots_.end(), [](const auto& p) { return !p; });
     }
 
-    [[nodiscard]] bool has_older_resident(std::uint64_t ticket) const noexcept {
-        return std::any_of(slots_.begin(), slots_.end(), [ticket](const auto& request) {
-            return request && request->id < ticket;
-        });
-    }
-
     void record_context_work(const typename ModelContract::ContextProgress& progress,
                              const std::shared_ptr<Request>& owner);
 
@@ -1584,7 +1604,6 @@ private:
             const auto request  = control.request;
             if (!progress.published) {
                 materializing_.reset();
-                scheduler_.capacity_released();
                 request_admission_check();
                 retire_detached_cancelled(request);
                 return true;
@@ -1658,7 +1677,6 @@ private:
                     request->lane.reset();
                     request->sequence.reset();
                     context_owner_.reset();
-                    scheduler_.capacity_released();
                     request_admission_check();
                     retire_detached_cancelled(request);
                     boundary = begin_host_phase();
@@ -1673,9 +1691,6 @@ private:
                 paused_.push_back(request);
                 std::sort(paused_.begin(), paused_.end(),
                           [](const auto& a, const auto& b) { return a->id < b->id; });
-                // Yielding a borrower may unblock an older suspended request. The newly
-                // paused request itself waits for a later event, avoiding immediate churn.
-                if (paused_.front() != request) { scheduler_.capacity_released(); }
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
                 slots_[lane].reset();
                 request->lane.reset();
@@ -1696,15 +1711,13 @@ private:
             }
             context_owner_.reset();
         }
-        if (progress.kind == decltype(progress.kind)::Demote) { scheduler_.capacity_released(); }
         request_admission_check();
         return true;
     }
 
     bool reclaim(ContextResources shortage, bool allow_pause,
                  std::span<const Checkpoint> excluded               = {},
-                 typename ResourceManagement::ReclaimCursor* cursor = nullptr,
-                 std::optional<std::uint64_t> priority_ticket       = std::nullopt) {
+                 typename ResourceManagement::ReclaimCursor* cursor = nullptr) {
         if (!shortage.state_slots && !shortage.first_kv_deficit() && !shortage.host_bytes) {
             return false;
         }
@@ -1717,7 +1730,6 @@ private:
                    : resources_.reclaim(*instance_.program, shortage, excluded);
         if (progress != ReclaimProgress::Blocked) {
             if (progress == ReclaimProgress::Changed) {
-                scheduler_.capacity_released();
                 request_admission_check();
             }
             return true;
@@ -1741,23 +1753,26 @@ private:
                 return true;
             }
         }
-        return allow_pause && pause_reclaim_victim(priority_ticket);
+        return allow_pause && pause_reclaim_victim();
     }
 
-    bool pause_reclaim_victim(std::optional<std::uint64_t> priority_ticket) {
-        const auto victim = scheduler_.youngest_victim(slots_, max_concurrency_, priority_ticket);
-        if (!victim) { return false; }
-        return pause_resident(*victim);
+    bool pause_reclaim_victim() {
+        std::array<std::uint32_t, kMaximumConcurrency> skipped{};
+        std::size_t count = 0;
+        while (const auto victim = scheduler_.preemption_victim(
+                   slots_, max_concurrency_, std::span(skipped).first(count))) {
+            if (pause_resident(*victim)) { return true; }
+            skipped[count++] = *victim;
+        }
+        return false;
     }
 
     bool pause_resident(std::uint32_t lane) {
         if (instance_.program->has_context_operation()) { return false; }
         auto request       = slots_[lane];
         bool save_snapshot = false;
-        if (const auto bytes = instance_.program->pause_host_bytes(*request->sequence)) {
-            const auto usage = instance_.program->physical_usage();
-            if (*bytes <= usage.capacity.host_bytes &&
-                *bytes > usage.capacity.host_bytes - usage.occupied.host_bytes) {
+        if (const auto runs = instance_.program->pause_host_runs(*request->sequence)) {
+            if (!instance_.program->host_can_place(*runs)) {
                 (void)instance_.program->release_redundant_host({}, request->sequence);
             }
             std::vector<Checkpoint> later;
@@ -1768,7 +1783,7 @@ private:
                 }
             }
             if (const auto victims =
-                    resources_.host_victims(*instance_.program, *bytes, std::nullopt, later)) {
+                    resources_.host_victims(*instance_.program, *runs, std::nullopt, later)) {
                 // Preflight the complete mixed catalog/snapshot plan before dropping anything.
                 if (!resources_.approve_release(*victims)) { return false; }
                 for (const auto& other : paused_) {
@@ -1778,8 +1793,7 @@ private:
                         !checkpoint_request_settled(*other)) { return false; }
                 }
                 for (const auto handle : *victims) {
-                    const auto usage = instance_.program->physical_usage();
-                    if (usage.capacity.host_bytes - usage.occupied.host_bytes >= *bytes) { break; }
+                    if (instance_.program->host_can_place(*runs)) { break; }
                     if (resources_.erase_approved(*instance_.program, handle)) { continue; }
                     const auto owner =
                         std::find_if(paused_.begin(), paused_.end(), [&](const auto& other) {
@@ -1812,7 +1826,6 @@ private:
         observe_scheduling(request, GenerationSchedulingTransition::PauseStarted, pause_started);
         context_owner_ = request;
         capture_decisions_[lane].reset();
-        scheduler_.preempted();
         return true;
     }
 
@@ -1837,26 +1850,23 @@ private:
 
     bool try_admit_one(bool restoring) {
         if (instance_.program->has_context_operation()) { return false; }
+        const auto owner = scheduler_.progress_owner();
+        const auto suspended = std::find_if(paused_.begin(), paused_.end(), [&](const auto& r) {
+            return owner == r->id;
+        });
+        if (restoring && suspended == paused_.end()) { return false; }
         const auto lane = free_lane();
-        if (!lane && restoring) {
-            if (!paused_.empty() && !has_older_resident(paused_.front()->id)) {
-                if (const auto victim =
-                        scheduler_.youngest_victim(slots_, max_concurrency_, paused_.front()->id)) {
-                    return pause_resident(*victim);
-                }
-            }
-            return false;
-        }
+        if (!lane && restoring) { return pause_reclaim_victim(); }
         if (admission_decision_ &&
             (admission_decision_->restoring != restoring ||
-             (restoring && (paused_.empty() || paused_.front() != admission_decision_->request)))) {
+             (restoring && *suspended != admission_decision_->request))) {
             admission_decision_.reset();
         }
         std::vector<std::shared_ptr<Request>> candidates;
         if (admission_decision_) {
             candidates.push_back(admission_decision_->request);
         } else if (restoring) {
-            if (!paused_.empty()) { candidates.push_back(paused_.front()); }
+            candidates.push_back(*suspended);
         } else {
             std::lock_guard lock(queue_mutex_);
             candidates = scheduler_.fresh_candidates(pending_, max_concurrency_);
@@ -1988,9 +1998,7 @@ private:
                     const auto excluded         = protected_source
                                                       ? std::span<const Checkpoint>(&*protected_source, 1)
                                                       : std::span<const Checkpoint>{};
-                    if (reclaim(shortage, restoring && !has_older_resident(request->id), excluded,
-                                &decision.reclaim,
-                                restoring ? std::optional(request->id) : std::nullopt)) {
+                    if (reclaim(shortage, restoring, excluded, &decision.reclaim)) {
                         if (instance_.program->has_context_operation()) { return true; }
                         continue;
                     }
@@ -2071,12 +2079,16 @@ private:
             admission_decision_.reset();
             if (deferred) {
                 if (restoring) {
-                    scheduler_.restoration_blocked();
                     return false;
                 }
                 continue;
             }
-            if (admission_check_pending_.load(std::memory_order_acquire)) { return true; }
+            // This wake-up belongs to the fresh scan, which is deferred under pressure.
+            // A paused owner is retried every cycle; an unconsumed fresh wake-up must not
+            // prevent an impossible isolated restore from reaching terminal refusal.
+            if (!restoring && admission_check_pending_.load(std::memory_order_acquire)) {
+                return true;
+            }
             if (resident_empty()) {
                 if (!shortage.state_slots && !shortage.first_kv_deficit() && !shortage.host_bytes) {
                     throw std::logic_error("isolated request has no valid binding source");
@@ -2085,7 +2097,6 @@ private:
                 return true;
             }
             if (restoring) {
-                scheduler_.restoration_blocked();
                 return false;
             }
         }
@@ -2108,7 +2119,6 @@ private:
         if (restoring) {
             std::erase(paused_, request);
             request->suspended.reset();
-            scheduler_.capacity_released();
         } else {
             std::lock_guard lock(queue_mutex_);
             std::erase(pending_, request);
@@ -2152,7 +2162,6 @@ private:
             if (!released) {
                 observe_scheduling(request, GenerationSchedulingTransition::RecoveryComplete);
             }
-            scheduler_.capacity_released();
             request_admission_check();
         }
     }
@@ -2161,48 +2170,54 @@ private:
 
     void reserve_resident_units(ReservationScope scope = ReservationScope::Round) {
         runnable_units_.fill(false);
-        std::optional<std::uint32_t> recovering;
-        std::optional<std::uint32_t> oldest;
+        const auto owner = scheduler_.progress_owner();
+        std::optional<std::uint32_t> priority, recovering;
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             const auto& request = slots_[lane];
             if (!request || !request->sequence || request->is_model_finished()) { continue; }
-            if (!oldest || request->id < slots_[*oldest]->id) { oldest = lane; }
+            if (owner == request->id) { priority = lane; }
             if (request->recovery_pending) {
                 if (recovering) { throw std::logic_error("multiple protected recoveries"); }
                 recovering = lane;
             }
         }
-        const auto prefill = recovering && (slots_[*recovering]->is_prefilling() ||
-                                            slots_[*recovering]->is_replaying())
-                                 ? recovering
+        // Keep no-pressure recovery ordering; under pressure only the owner may acquire
+        // capacity by reclamation or preemption. A suspended/binding owner comes first.
+        const auto preferred = priority ? priority : recovering;
+        const auto prefill = preferred && (slots_[*preferred]->is_prefilling() ||
+                                           slots_[*preferred]->is_replaying())
+                                 ? preferred
                                  : scheduler_.next_prefill(slots_, max_concurrency_);
+        bool stop = owner && !priority;
         std::vector<std::uint32_t> candidates;
-        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            const auto& request = slots_[lane];
-            if (!request || request->capture_pending || !request->sequence ||
-                request->cancelled.load(std::memory_order_acquire) ||
-                instance_.program->context_blocks(*request->sequence)) {
-                continue;
+        if (!stop) {
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                const auto& request = slots_[lane];
+                if (!request || request->capture_pending || !request->sequence ||
+                    request->cancelled.load(std::memory_order_acquire) ||
+                    instance_.program->context_blocks(*request->sequence)) { continue; }
+                if (prefill == lane || (scope == ReservationScope::Round &&
+                    (request->is_control_ready() || request->is_decode_ready()))) {
+                    candidates.push_back(lane);
+                }
             }
-            if (prefill == lane || (scope == ReservationScope::Round &&
-                                    (request->is_control_ready() || request->is_decode_ready()))) {
-                candidates.push_back(lane);
-            }
+            if (priority && std::find(candidates.begin(), candidates.end(), *priority) ==
+                                candidates.end()) { stop = true; }
+            std::sort(candidates.begin(), candidates.end(), [&](auto a, auto b) {
+                if (a == b) { return false; }
+                if (preferred == a || preferred == b) { return preferred == a; }
+                return slots_[a]->id < slots_[b]->id;
+            });
         }
-        std::sort(candidates.begin(), candidates.end(), [&](auto a, auto b) {
-            if (a == b) { return false; }
-            if (recovering == a || recovering == b) { return recovering == a; }
-            return slots_[a]->id < slots_[b]->id;
-        });
-        std::optional<std::uint32_t> blocked;
         for (const auto lane : candidates) {
+            if (stop) { break; }
             const auto request = slots_[lane];
-            // Reclaiming for an earlier row may already have paused this candidate.
             if (!request || !request->sequence || request->capture_pending ||
                 request->cancelled.load(std::memory_order_acquire) ||
                 instance_.program->context_blocks(*request->sequence) ||
                 !(request->is_control_ready() || request->is_decode_ready() ||
                   request->is_prefilling() || request->is_replaying())) {
+                stop = priority == lane;
                 continue;
             }
             const ExecutionUnit unit{
@@ -2225,41 +2240,42 @@ private:
                     runnable_units_[lane] = true;
                     break;
                 }
-                if (instance_.program->has_context_operation()) { break; }
+                if (instance_.program->has_context_operation()) {
+                    stop = priority == lane;
+                    break;
+                }
+                if (const auto live = scheduler_.progress_owner(); live && *live != request->id) {
+                    scheduler_.require_progress(request->id);
+                    break;
+                }
                 if (!cursor) { cursor.emplace(resources_.begin_reclaim(*instance_.program)); }
                 if (reclaim(result.shortage, false, {}, &*cursor)) {
                     if (!instance_.program->has_context_operation()) { continue; }
+                    stop = priority == lane;
                     break;
                 }
-                // A save can still complete. Off-worker export leases pin Native cache
-                // resources even without a pending pressure callback. Their retirement
-                // releases capacity; neither case is Native impossibility or permission
-                // to consume another destructive plan.
-                if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) { break; }
-                if (recovering == lane) {
+                // Durable saves and off-worker export leases may still release capacity.
+                // Their wait is neither Native impossibility nor another destructive grant.
+                if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) {
+                    stop = priority == lane;
+                    break;
+                }
+                if (request->recovery_pending) {
                     throw std::logic_error("protected recovery exceeded its Native reservation");
                 }
-                if (!recovering && oldest == lane) {
-                    // Only the oldest required unit can displace younger residents. Other
-                    // failed rows wait or yield their own lane; they cannot block ready rows.
-                    // The same shortage has already exhausted cache and paused snapshots.
-                    if (pause_reclaim_victim(request->id)) { break; }
-                    throw std::logic_error("oldest resident cannot obtain its legal unit");
+                scheduler_.require_progress(request->id);
+                if (pause_reclaim_victim()) {
+                    stop = true;
+                    break;
                 }
-                if (oldest != lane && (!blocked || request->id > slots_[*blocked]->id)) {
-                    blocked = lane;
-                }
-                break;
+                throw std::logic_error("progress owner cannot obtain its legal unit");
             }
-        }
-        if (blocked && !instance_.program->has_context_operation()) {
-            (void)pause_resident(*blocked);
         }
         if (prefill && runnable_units_[*prefill] && !prepare_semantic_capture(slots_[*prefill])) {
             runnable_units_[*prefill] = false;
         }
-        // A pause may have selected an already licensed younger row. Its permit belongs
-        // to Native cleanup, and it must not enter this cycle's compact execution batch.
+        // Always filter rows that a preceding reclaim paused, even after an owner stopped
+        // grants. Their Native cleanup owns the old permit, not this compact execution batch.
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (!slots_[lane] || slots_[lane]->model_state == EngineRequestState::Pausing ||
                 (slots_[lane]->sequence &&
@@ -2280,11 +2296,21 @@ private:
             masks.outputs[row] = &slots_[membership.lane_span()[row]]->output;
             constrained |= masks.outputs[row]->constrained();
         }
+        std::array<std::shared_ptr<Request>, kMaximumConcurrency> served_requests;
+        std::array<std::uint64_t, kMaximumConcurrency> before{};
+        for (std::size_t row = 0; row < membership.size; ++row) {
+            served_requests[row] = slots_[membership.lanes[row]];
+            before[row] = progress_mark(*served_requests[row]);
+        }
+        const auto started = Clock::now();
         auto pending = instance_.program->decode(
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing(),
             constrained ? &masks : nullptr);
         program_call.finish(pending.execution_timing());
         commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start);
+        for (std::size_t row = 0; row < membership.size; ++row) {
+            charge_service(served_requests[row], before[row], started);
+        }
         publish_runtime_stats();
     }
 
@@ -2298,6 +2324,9 @@ private:
             throw std::logic_error("thinking control membership is invalid");
         }
 
+        std::array<std::shared_ptr<Request>, kMaximumConcurrency> served_requests;
+        std::array<std::uint64_t, kMaximumConcurrency> before{};
+        const auto started = Clock::now();
         std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
         std::array<std::optional<std::uint32_t>, kMaximumConcurrency> prefix_execution_splits{};
         bool generated_staged         = false;
@@ -2318,6 +2347,8 @@ private:
             if (request == nullptr) {
                 throw std::logic_error("thinking control membership lost its request");
             }
+            served_requests[row] = request;
+            before[row] = progress_mark(*request);
             generated_sizes[row] = request->generated.size();
         }
         generated_staged = true;
@@ -2409,7 +2440,48 @@ private:
             update_recovery(request);
             request->model_state = EngineRequestState::DecodeReady;
         }
+        for (std::size_t row = 0; row < membership.size; ++row) {
+            charge_service(served_requests[row], before[row], started);
+        }
         publish_runtime_stats();
+    }
+
+    void log_worker_failure(std::exception_ptr error) const noexcept {
+        // Preserve the first cause and membership before cleanup. No queue lock or logger is
+        // needed, and a diagnostic failure must never replace the original exception.
+        const auto report = [&](const char* reason) {
+            std::fprintf(stderr,
+                         "NInfer worker failed: %s | paused=%zu context=%d materializing=%llu "
+                         "context_owner=%llu admission=%llu:%s exports=%zu progress_owner=%llu\n",
+                         reason, paused_.size(), instance_.program->has_context_operation(),
+                         static_cast<unsigned long long>(
+                             materializing_ ? materializing_->request->id : 0),
+                         static_cast<unsigned long long>(context_owner_ ? context_owner_->id : 0),
+                         static_cast<unsigned long long>(
+                             admission_decision_ ? admission_decision_->request->id : 0),
+                         admission_decision_ && admission_decision_->restoring ? "restore" : "fresh",
+                         static_cast<std::size_t>(checkpoint_exports_in_flight_),
+                         static_cast<unsigned long long>(scheduler_.progress_owner().value_or(0)));
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                const auto& request = slots_[lane];
+                if (request)
+                    std::fprintf(stderr,
+                                 "  request=%llu lane=%u state=%u recovery=%d capture=%d cancelled=%d\n",
+                                 static_cast<unsigned long long>(request->id), lane,
+                                 static_cast<unsigned>(request->model_state),
+                                 request->recovery_pending, request->capture_pending,
+                                 request->cancelled.load(std::memory_order_acquire));
+            }
+        };
+        try {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& cause) {
+                report(cause.what());
+            } catch (...) {
+                report("non-standard exception");
+            }
+        } catch (...) {}
     }
 
     // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
@@ -2532,28 +2604,37 @@ private:
                     }
                     request->suspended.reset();
                     it = paused_.erase(it);
-                    scheduler_.capacity_released();
+                    request_admission_check();
                     retire_detached_cancelled(request);
                 }
                 const bool recovering =
                     std::any_of(slots_.begin(), slots_.end(),
                                 [](const auto& r) { return r && r->recovery_pending; }) ||
                     (materializing_ && materializing_->resumed);
-                if (paused_.empty() && !context_owner_ && !recovering) {
-                    scheduler_.paused_queue_empty();
+                if (!paused_.empty() && !scheduler_.progress_owner()) {
+                    scheduler_.require_progress(paused_.front()->id);
                 }
-                if (!recovering && !checkpoints_.pending() &&
-                    ((admission_decision_ && admission_decision_->restoring) ||
-                     scheduler_.should_restore(!paused_.empty(), resident_empty()))) {
+                if (!instance_.program->has_context_operation() &&
+                    scheduler_.advance_service(!paused_.empty(), recovering)) {
+                    std::array<SequenceHandle, kMaximumConcurrency> sequences{};
+                    std::size_t count = 0;
+                    for (const auto& request : slots_) {
+                        if (request && request->sequence) { sequences[count++] = *request->sequence; }
+                    }
+                    instance_.program->release_units(std::span(sequences).first(count));
+                    admission_decision_.reset();
+                    request_admission_check();
+                }
+                if (!recovering && !checkpoints_.pending() && scheduler_.progress_owner()) {
                     (void)try_admit_one(true);
                     executed |= progress_context_operation(boundary);
                 }
                 reserve_resident_units();
                 bool refresh_resident_units = false;
-                // A failed restore leaves spare resources available to fresh requests.
-                // An in-flight restoration/reclaim keeps its own candidate until settled.
-                if (!checkpoints_.pending() &&
-                    (!admission_decision_ || !admission_decision_->restoring)) {
+                // Already-admitted pressure turns precede fresh arrivals; their original
+                // queue deadline still expires at the start of every cycle.
+                if (!checkpoints_.pending() && !scheduler_.progress_owner() && paused_.empty() &&
+                    !recovering && (!admission_decision_ || !admission_decision_->restoring)) {
                     if (!admission_decision_ && consume_admission_check()) {
                         ++admission_generation_;
                         scheduler_.begin_admission_scan();
@@ -2641,9 +2722,11 @@ private:
                     set_host_work_class(HostWorkClass::Prefill);
                     if (request->is_replaying()) {
                         ProgramCallScope call(*this);
+                        const auto replay_started = Clock::now();
                         auto progress = instance_.program->advance_replay(*request->sequence,
                                                                           &call.failed_timing());
                         call.finish(progress.timing);
+                        scheduler_.recovery_work(request->id, elapsed_ns(replay_started, Clock::now()));
                         if (!request->first_output_timing) {
                             record_execution_work(request->replay_work, progress.timing);
                         }
@@ -2669,6 +2752,7 @@ private:
                 publish_runtime_stats();
             } catch (...) {
                 auto error = std::current_exception();
+                log_worker_failure(error);
                 fail_all_locked(error);
                 continue;
             }
