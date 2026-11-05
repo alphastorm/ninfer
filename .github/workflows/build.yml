@@ -36,6 +36,46 @@ jobs:
       - name: Exercise release driver boundaries
         run: python -m unittest discover -s tests -p test_qualification_drivers.py -v
 
+  windows-release:
+    name: GPU-free Windows release contracts (Ubuntu / pwsh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Upgrade fixtures load the immutable predecessor's lifecycle scripts.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an executable PowerShell runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v pwsh
+          pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; $PSVersionTable.PSVersion.ToString()'
+      - name: Run every Windows release contract without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests", pattern="test_windows_release.py")
+          # #109 named 85 cases; the current module has 108. Discovery includes new
+          # cases automatically; a deliberate removal must also review this floor.
+          minimum = 108
+          discovered = suite.countTestCases()
+          if discovered < minimum:
+              raise SystemExit(f"Windows release contracts shrank: {discovered} < {minimum}")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print(
+              f"Windows release contracts: discovered={discovered}, "
+              f"executed={result.testsRun}, skipped={len(result.skipped)}, minimum={minimum}",
+              flush=True,
+          )
+          if not result.wasSuccessful() or result.skipped or result.testsRun != discovered:
+              raise SystemExit("Every discovered Windows release contract must execute and pass")
+          PY
+
   linux:
     name: Linux CUDA 13 / host tests / bounded sm_120a compile
     runs-on: ubuntu-24.04
@@ -149,9 +189,6 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
           python3 -m unittest discover -s tests -p 'test_workflow_runner_pins.py'
           /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
-      - name: Run portable Windows lifecycle release contracts
-        shell: bash
-        run: python3 -m unittest discover -s tests -p 'test_windows_release.py' -v
       - name: Cache statistics
         if: always()
         run: ccache --show-stats
