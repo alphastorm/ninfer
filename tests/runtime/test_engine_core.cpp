@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -29,6 +30,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 // DeviceContext only binds the Engine worker here. A GPU-less host still links the CUDA runtime;
 // these entry points present one device without submitting any CUDA work. Names are expanded
@@ -96,6 +103,45 @@ constexpr auto kEventTimeout    = 10s;
 void require(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
 }
+
+class StderrCapture {
+public:
+    StderrCapture() : file_(std::tmpfile()) {
+        require(file_ != nullptr, "could not create stderr capture");
+        std::fflush(stderr);
+#if defined(_WIN32)
+        original_ = _dup(_fileno(stderr));
+        const auto result = _dup2(_fileno(file_), _fileno(stderr));
+#else
+        original_ = dup(fileno(stderr));
+        const auto result = dup2(fileno(file_), fileno(stderr));
+#endif
+        require(original_ >= 0 && result >= 0, "could not redirect stderr");
+    }
+    ~StderrCapture() {
+        std::fflush(stderr);
+#if defined(_WIN32)
+        _dup2(original_, _fileno(stderr));
+        _close(original_);
+#else
+        dup2(original_, fileno(stderr));
+        close(original_);
+#endif
+        std::fclose(file_);
+    }
+    std::string text() {
+        std::fflush(stderr);
+        std::rewind(file_);
+        std::string result;
+        std::array<char, 1024> bytes;
+        while (const auto count = std::fread(bytes.data(), 1, bytes.size(), file_))
+            result.append(bytes.data(), count);
+        return result;
+    }
+private:
+    std::FILE* file_;
+    int original_ = -1;
+};
 
 // An observed change arms the gate: the observed request's planning state is released immediately
 // before it becomes terminal, or a checkpoint operation changes native state. The next statistics
@@ -1518,6 +1564,7 @@ void constraint_dead_end() {
 }
 
 void engine_failure() {
+    StderrCapture capture;
     Harness harness(1);
     auto request = harness.submit(Script::DecodeFailure, 4, true);
     auto waiting = harness.submit(Script::Complete, 1);
@@ -1530,7 +1577,22 @@ void engine_failure() {
             "engine failure delivered another error");
     require_membership(outcome.stats, {}, "engine failure");
     require(!harness.core().is_available(), "internal decode failure left the Engine available");
-    (void)require_error<std::logic_error>(harness.await(waiting), "engine failure queue");
+    require(std::string(require_error<std::logic_error>(
+                harness.await(waiting), "engine failure queue").what()) == "injected decode failure",
+            "waiting request lost the original worker failure");
+    const auto diagnostic = capture.text();
+    require(diagnostic.find("NInfer worker failed: injected decode failure") != std::string::npos &&
+                diagnostic.find("request=1 lane=0") != std::string::npos &&
+                diagnostic.find("NInfer worker failed:", diagnostic.find("NInfer worker failed:") + 1) ==
+                    std::string::npos,
+            "first worker failure was not logged once with pre-cleanup membership");
+}
+
+void normal_shutdown_is_quiet() {
+    StderrCapture capture;
+    { Harness harness(1); }
+    require(capture.text().find("NInfer worker failed:") == std::string::npos,
+            "ordinary shutdown was reported as a worker failure");
 }
 
 void isolated_admission_refusal() {
@@ -1876,6 +1938,7 @@ int main() {
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
+        Case{"normal_shutdown_is_quiet", normal_shutdown_is_quiet},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
         Case{"isolated_state_slot_refusal", isolated_state_slot_refusal},

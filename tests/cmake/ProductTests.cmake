@@ -141,6 +141,12 @@ ninfer_add_test(ninfer_request_log_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log.cpp"
   LIBRARIES ninfer_serve)
 
+ninfer_add_test(ninfer_operational_failure_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_operational_failure.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/operational_log.cpp"
+  LIBRARIES ninfer_product_logging)
+
 ninfer_add_test(ninfer_metrics_test
   HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_metrics.cpp"

@@ -2412,6 +2412,43 @@ private:
         publish_runtime_stats();
     }
 
+    void log_worker_failure(std::exception_ptr error) const noexcept {
+        // Preserve the first cause and membership before cleanup. No queue lock or logger is
+        // needed, and a diagnostic failure must never replace the original exception.
+        const auto report = [&](const char* reason) {
+            std::fprintf(stderr,
+                         "NInfer worker failed: %s | paused=%zu context=%d materializing=%llu "
+                         "context_owner=%llu admission=%llu:%s exports=%zu\n",
+                         reason, paused_.size(), instance_.program->has_context_operation(),
+                         static_cast<unsigned long long>(
+                             materializing_ ? materializing_->request->id : 0),
+                         static_cast<unsigned long long>(context_owner_ ? context_owner_->id : 0),
+                         static_cast<unsigned long long>(
+                             admission_decision_ ? admission_decision_->request->id : 0),
+                         admission_decision_ && admission_decision_->restoring ? "restore" : "fresh",
+                         static_cast<std::size_t>(checkpoint_exports_in_flight_));
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                const auto& request = slots_[lane];
+                if (request)
+                    std::fprintf(stderr,
+                                 "  request=%llu lane=%u state=%u recovery=%d capture=%d cancelled=%d\n",
+                                 static_cast<unsigned long long>(request->id), lane,
+                                 static_cast<unsigned>(request->model_state),
+                                 request->recovery_pending, request->capture_pending,
+                                 request->cancelled.load(std::memory_order_acquire));
+            }
+        };
+        try {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& cause) {
+                report(cause.what());
+            } catch (...) {
+                report("non-standard exception");
+            }
+        } catch (...) {}
+    }
+
     // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
     // Program introspection can observe a partially cleared physical state. Every request leaves
     // live membership before statistics are published, and only then are responses observable.
@@ -2669,6 +2706,7 @@ private:
                 publish_runtime_stats();
             } catch (...) {
                 auto error = std::current_exception();
+                log_worker_failure(error);
                 fail_all_locked(error);
                 continue;
             }

@@ -867,7 +867,7 @@ int main() {
         make_internal_request_failure(RequestFailurePhase::Generation, "sentinel-internal-detail"));
     failures +=
         check(internal_failure.severity == OperationalSeverity::Error &&
-                  internal_failure.message.find("sentinel-internal-detail") == std::string::npos,
+                  internal_failure.message.find("sentinel-internal-detail") != std::string::npos,
               "operational internal failure severity or data policy mismatch");
     const OperationalRecord disconnected = render_request_failure(
         context, make_client_disconnected_failure(RequestFailurePhase::Transport));

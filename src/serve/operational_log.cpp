@@ -176,6 +176,10 @@ void append_failure_fields(std::ostringstream& out, const RequestFailure& failur
     } else {
         append_clause(out, classification_name(failure.classification));
     }
+    if (failure.classification == RequestFailureClass::Internal &&
+        !failure.machine_message.empty()) {
+        append_clause(out, product::format_pretty_text(failure.machine_message));
+    }
 }
 
 } // namespace
