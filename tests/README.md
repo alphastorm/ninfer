@@ -78,6 +78,9 @@ from this Op test.
 
 ## Build and run
 
+`ninfer_recovery_loss_test` exercises the pure checkpoint scoring used by Qwen3.5's native
+reclaim adapter, without CUDA, weights or an Engine. It is selected by every host CI lane.
+
 Select a Python environment with the dependencies for the tests first. The maintained environment
 uses Python 3.11; CMake finds Python 3 without restricting its minor version.
 `Python3_EXECUTABLE` selects the interpreter used by interop and frontend tests explicitly.

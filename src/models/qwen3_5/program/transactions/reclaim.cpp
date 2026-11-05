@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/program_impl.h"
 
 #include "core/device.h"
+#include "models/common/context/recovery_loss.h"
 #include "models/common/context/work.h"
 
 #include <algorithm>
@@ -421,51 +422,9 @@ struct ReleasePlan {
 template <typename Prefix>
 std::uint64_t recovery_loss(const ProgramImpl& program, std::span<const CheckpointHandle> removed,
                             std::span<const CheckpointHandle> surviving, Prefix&& prefix) {
-    std::vector<CheckpointHandle> ordered;
-    for (const auto handle : removed) {
-        if (program.valid_checkpoint(handle) &&
-            std::find(ordered.begin(), ordered.end(), handle) == ordered.end()) {
-            ordered.push_back(handle);
-        }
-    }
-    std::sort(ordered.begin(), ordered.end(), [&](auto left, auto right) {
-        const auto l = program.checkpoint(left).frontier(),
-                   r = program.checkpoint(right).frontier();
-        return l != r ? l > r : left.index < right.index;
-    });
-
-    struct LineageLoss {
-        CheckpointHandle deepest;
-        std::uint32_t tokens;
-    };
-
-    std::vector<LineageLoss> lineages;
-    for (const auto handle : ordered) {
-        const auto& record     = program.checkpoint(handle);
-        std::uint32_t fallback = 0;
-        for (const auto retained : surviving) {
-            if (!program.valid_checkpoint(retained) ||
-                std::find(ordered.begin(), ordered.end(), retained) != ordered.end()) {
-                continue;
-            }
-            const auto& candidate = program.checkpoint(retained);
-            if (candidate.frontier() > fallback && prefix(retained, handle)) {
-                fallback = candidate.frontier();
-            }
-        }
-        const auto lost    = record.frontier() - fallback;
-        const auto lineage = std::find_if(lineages.begin(), lineages.end(), [&](const auto& item) {
-            return prefix(handle, item.deepest);
-        });
-        if (lineage == lineages.end()) {
-            lineages.push_back({handle, lost});
-        } else {
-            lineage->tokens = std::max(lineage->tokens, lost);
-        }
-    }
-    std::uint64_t result = 0;
-    for (const auto& lineage : lineages) { result += lineage.tokens; }
-    return result;
+    return context::branch_recovery_loss(
+        removed, surviving, [&](auto h) { return program.valid_checkpoint(h); },
+        [&](auto h) { return program.checkpoint(h).frontier(); }, std::forward<Prefix>(prefix));
 }
 
 std::uint64_t

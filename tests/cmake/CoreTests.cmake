@@ -185,6 +185,11 @@ ninfer_add_test(ninfer_host_context_arena_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_host_context_arena.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_recovery_loss_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_recovery_loss.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_state_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_state_store.cpp"
   LIBRARIES ninfer_core)
