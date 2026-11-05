@@ -1371,12 +1371,13 @@ public:
     }
 
     // Waits as an HTTP handler would, then reads runtime statistics before anything else runs.
-    [[nodiscard]] Outcome await(Submission& submission, bool cancel = false) {
+    [[nodiscard]] Outcome await(Submission& submission, bool cancel = false,
+                                Clock::time_point cancel_at = {}) {
         Outcome outcome;
         try {
-            outcome.result = submission.wait(
-                nullptr, cancel ? ninfer::CancellationView([] { return true; })
-                                : ninfer::CancellationView{});
+            outcome.result = submission.wait(nullptr, ninfer::CancellationView([&] {
+                return cancel || (cancel_at != Clock::time_point{} && Clock::now() >= cancel_at);
+            }));
         } catch (...) { outcome.error = std::current_exception(); }
         outcome.stats = core_->runtime_stats();
         gate_->consumer_read();
@@ -1687,7 +1688,9 @@ void isolated_restore_refusal() {
     harness.events().await([](const Events::State& state) { return state.paused; },
                            "the published pause");
     harness.release_stalls();
-    const auto outcome = harness.await(request);
+    // An impossible restore must settle even while the fresh-admission wake-up remains set.
+    // Cancellation only bounds a regression; it cannot satisfy the required Unavailable result.
+    const auto outcome = harness.await(request, false, Clock::now() + kEventTimeout);
     require_request_error(outcome, RequestErrorKind::Unavailable, "isolated restore miss");
     require_membership(outcome.stats, {}, "isolated restore miss");
     require(harness.core().is_available(), "isolated restore miss failed the Engine");
@@ -1695,6 +1698,28 @@ void isolated_restore_refusal() {
     auto next = harness.submit(Script::Complete, 1);
     require_finished(harness.await(next), FinishReason::OutputLimit,
                      "request after an isolated restore miss");
+}
+
+void isolated_restore_refusal_preserves_deferred_admission() {
+    Harness harness(2);
+    auto pressure = harness.submit(Script::Pressure, 1);
+    auto paused = harness.submit(Script::VictimPause, 1, true);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "the published pause before fresh arrival");
+    auto fresh = harness.submit(Script::Complete, 1);
+    harness.release_stalls();
+    const auto deadline = Clock::now() + kEventTimeout;
+    const auto refused = harness.await(paused, false, deadline);
+    require_request_error(refused, RequestErrorKind::Unavailable, "isolated paused owner");
+    require_finished(harness.await(pressure, false, deadline), FinishReason::OutputLimit,
+                     "completed pressure owner");
+    require_finished(harness.await(fresh, false, deadline), FinishReason::OutputLimit,
+                     "fresh arrival after isolated restore refusal");
+    require_membership(harness.observed_stats(), {}, "isolated restore with deferred admission");
+    require(harness.events().snapshot().bound == 3 &&
+                harness.observed_stats().generated_tokens == 2,
+            "isolated refusal lost or duplicated deferred fresh work");
+    require(harness.core().is_available(), "isolated restore refusal failed the Engine");
 }
 
 void isolated_state_slot_refusal() {
@@ -2018,6 +2043,8 @@ int main() {
         Case{"normal_shutdown_is_quiet", normal_shutdown_is_quiet},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
+        Case{"isolated_restore_refusal_preserves_deferred_admission",
+             isolated_restore_refusal_preserves_deferred_admission},
         Case{"isolated_state_slot_refusal", isolated_state_slot_refusal},
         Case{"durable_import_commit", durable_import_commit},
         Case{"durable_import_abort", durable_import_abort},

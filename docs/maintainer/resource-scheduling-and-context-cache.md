@@ -453,6 +453,8 @@ Engine 在轮首、准入后的执行选择前、Control/Decode 后各有界推�
 变化。恢复失败不触发 fresh admission。没有真实执行或传输能够释放资源时，owner 须通过回收与
 合法许可推进，容量合同不满足则报错：resident 请求取不到合法单元使 Engine 失败；没有任何执行、
 paused 状态或在途 export 能释放容量的孤立 fresh 或恢复请求，只以 `Unavailable` 拒绝该请求。
+Fresh admission 的待处理唤醒在压力期间保留，不是恢复容量仍会变化的证据；它不能阻止孤立
+paused owner 的终态拒绝。恢复不消费该唤醒，压力结束后仍由 fresh scan 处理，避免遗漏排队请求。
 
 ### 8.3 Snapshot 与 Replay
 

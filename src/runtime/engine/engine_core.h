@@ -2083,7 +2083,12 @@ private:
                 }
                 continue;
             }
-            if (admission_check_pending_.load(std::memory_order_acquire)) { return true; }
+            // This wake-up belongs to the fresh scan, which is deferred under pressure.
+            // A paused owner is retried every cycle; an unconsumed fresh wake-up must not
+            // prevent an impossible isolated restore from reaching terminal refusal.
+            if (!restoring && admission_check_pending_.load(std::memory_order_acquire)) {
+                return true;
+            }
             if (resident_empty()) {
                 if (!shortage.state_slots && !shortage.first_kv_deficit() && !shortage.host_bytes) {
                     throw std::logic_error("isolated request has no valid binding source");
