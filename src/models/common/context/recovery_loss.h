@@ -38,13 +38,16 @@ template <class Handle, class Valid, class Frontier, class Prefix>
                 fallback = frontier(retained);
         }
         const auto lost = frontier(handle) - fallback;
-        const auto lineage = std::find_if(lineages.begin(), lineages.end(), [&](const auto& item) {
-            return prefix(handle, item.deepest);
-        });
-        if (lineage == lineages.end())
+        // Deeper nodes precede their ancestors. A shared removed ancestor contributes to
+        // every maximal branch it prefixes, not merely the first matching branch.
+        bool ancestor = false;
+        for (auto& lineage : lineages) {
+            if (!prefix(handle, lineage.deepest)) continue;
+            lineage.tokens = std::max(lineage.tokens, lost);
+            ancestor = true;
+        }
+        if (!ancestor)
             lineages.push_back({handle, lost});
-        else
-            lineage->tokens = std::max(lineage->tokens, lost);
     }
     std::uint64_t result = 0;
     for (const auto& lineage : lineages) result += lineage.tokens;
