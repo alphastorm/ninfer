@@ -90,6 +90,8 @@ that GPU fixture is not part of host-only qualification.
 `ninfer_scheduler_test` ports upstream pressure handoff, continuous contention and bounded recovery
 allowance cases, retaining the fork's C2 cancellation/compaction case. The real scripted EngineCore
 fixture checks younger-owner progress and fresh-request deadline expiry while admitted work is paused.
+It also bounds isolated-restore refusal and verifies that its retained fresh-admission notification
+admits queued work exactly once after the impossible paused owner is retired.
 
 Select a Python environment with the dependencies for the tests first. The maintained environment
 uses Python 3.11; CMake finds Python 3 without restricting its minor version.
