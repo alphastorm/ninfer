@@ -146,6 +146,17 @@ ninfer_add_test(ninfer_operational_failure_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_operational_failure.cpp"
           "${PROJECT_SOURCE_DIR}/src/serve/operational_log.cpp"
   LIBRARIES ninfer_product_logging)
+# Exercise the real pure renderers without linking the unused Engine-capacity logger and
+# its full CUDA model closure. Keep their transitive pretty-format/logging dependencies.
+if(MSVC)
+  target_compile_options(ninfer_operational_failure_test PRIVATE /Gy /Gw)
+  target_link_options(ninfer_operational_failure_test PRIVATE /OPT:REF)
+elseif(APPLE)
+  target_link_options(ninfer_operational_failure_test PRIVATE LINKER:-dead_strip)
+else()
+  target_compile_options(ninfer_operational_failure_test PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(ninfer_operational_failure_test PRIVATE LINKER:--gc-sections)
+endif()
 
 ninfer_add_test(ninfer_metrics_test
   HOST_LANES bounded native
