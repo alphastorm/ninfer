@@ -16,7 +16,7 @@ template <class Handle, class Valid, class Frontier, class Prefix>
                                                 Valid&& valid, Frontier&& frontier,
                                                 Prefix&& prefix) {
     struct HandleHash {
-        std::size_t operator()(Handle handle) const noexcept { return handle.index; }
+        std::size_t operator()(const Handle& handle) const noexcept { return handle.index; }
     };
     std::unordered_set<Handle, HandleHash> removed_handles;
     removed_handles.reserve(removed.size());
@@ -30,7 +30,7 @@ template <class Handle, class Valid, class Frontier, class Prefix>
         if (valid(handle) && removed_handles.insert(handle).second)
             ordered.push_back({handle, frontier(handle)});
     }
-    std::sort(ordered.begin(), ordered.end(), [&](auto left, auto right) {
+    std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
         return left.frontier != right.frontier ? left.frontier > right.frontier
                                                : left.handle.index < right.handle.index;
     });
@@ -45,6 +45,7 @@ template <class Handle, class Valid, class Frontier, class Prefix>
         std::uint32_t tokens;
     };
     std::vector<LineageLoss> lineages;
+    lineages.reserve(ordered.size());
     for (const auto& point : ordered) {
         const auto handle = point.handle;
         std::uint32_t fallback = 0;
