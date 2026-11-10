@@ -1093,23 +1093,26 @@ public:
         constexpr std::uint32_t frontier = 65;
         auto base = request(frontier, true);
         const auto original = bind(base);
-        reserve(original, q35::ExecutionUnitKind::Prefill);
-        auto begin = program_.advance_prefill(original);
-        require(begin.complete && begin.pending, "catalog resume did not complete its input");
-        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-        const auto committed = program_.commit(std::move(*begin.pending), accepted);
-        require(committed.capture_ready[0], "catalog resume did not offer its input point");
-        const auto point = capture(original, frontier, runtime::CheckpointRole::InputReplay);
+        finish_prefill(original, frontier, false);
         auto* native = const_cast<q35::detail::ProgramImpl*>(
             static_cast<const q35::detail::ProgramImpl*>(
                 q35::detail::ContractAccess::owner(original)));
-        const auto original_lane = q35::detail::ContractAccess::lane(original).value;
-        const auto saved_metadata = native->sequences[original_lane].continuation.metadata;
-        require(program_.start_pause(original, false), "catalog resume could not pause");
+        require(program_.start_pause(original, true), "catalog resume could not pause");
         auto paused = settle();
-        require(paused.paused && !paused.paused->has_snapshot() &&
+        require(paused.paused && paused.paused->snapshot_handle() &&
                     paused.paused->frontier() == frontier,
-                "catalog resume did not retain its committed frontier without a snapshot");
+                "catalog resume did not preserve its full committed frontier");
+        const auto snapshot = *paused.paused->snapshot_handle();
+        const auto saved_metadata = native->checkpoint(snapshot).continuation().metadata;
+        // A normal MTP input capture intentionally retains backend F-1, so it is not a
+        // replay-free Active source. Retain a distinct real catalog record for the full
+        // paused snapshot, then revoke the request's own snapshot reference.
+        const auto retained = native->checkpoints.reserve();
+        require(retained.has_value(), "catalog resume could not retain its full source");
+        native->checkpoints.publish(*retained, native->checkpoint(snapshot));
+        const auto point = *retained;
+        require(program_.revoke_snapshot(*paused.paused) && !paused.paused->has_snapshot(),
+                "catalog resume still depended on its own snapshot");
         const auto source = program_.inspect_source(base, point);
         require(source && source->reused_tokens == frontier,
                 "catalog resume did not select its exact committed frontier");
