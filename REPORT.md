@@ -1,3 +1,11 @@
+# P20 copy-drafting rebase
+
+The 7a-only default-off experiment is retained as a draft, **not** a P20 release
+candidate. B1's modeled pooled gain is below the revival bar. Rebase accounting,
+CPU proof, zero-copy evidence correction, RepoPrompt reconciliation and the
+explicitly deferred GPU golden are recorded in
+[the P20 decision](docs/performance/ngram-draft/p20-rebase.md).
+
 # Engine export capacity progress
 
 - Branch `rebase/engine-export-progress`, based on exact `6b2163a7ffbd5be09d84570ed3aea8bf749188b9`. Counterfactual commit `9e501b0e3ba05a57d46ee1045a34d1ae2446cec8` adds the host regression and a behavior-preserving extraction of the existing admission predicate; it is **not** unmodified-base evidence.

@@ -50,6 +50,9 @@ Request-log `speculative.ngram_rounds`, `ngram_drafted_tokens` and
 `ngram_accepted_tokens` count copy verification work, as subsets of the existing
 speculative totals; stop-truncated or cancelled output can publish fewer tokens.
 `accepted_per_position` continues to describe neural proposals only.
+The [P20 rebase decision](performance/ngram-draft/p20-rebase.md) retains this
+default-off experiment but declines release-candidate revival; its GPU output
+golden is deferred, not implied by historical S1 receipts.
 
 When `--model-id` is omitted, the server advertises and accepts the artifact's `metadata.name`,
 falling back to its architecture name when no name is stored. An explicit `--model-id` is a public

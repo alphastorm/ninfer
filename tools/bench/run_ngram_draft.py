@@ -221,7 +221,8 @@ def run(args):
 
     # Bounded publication grace, not a repeat of any inference request.
     time.sleep(2)
-    bind_log(args.request_log, rows, started, require_copy_counters=not args.reference)
+    bind_log(args.request_log, rows, started,
+             require_copy_counters=not args.reference and args.copy_window != 0)
     receipt = {"schema_version": 1, "experiment": "S1", "arm": args.arm,
                "reference": args.reference,
                "copy_window": args.copy_window, "source_commit": args.source_commit,

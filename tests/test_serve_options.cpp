@@ -291,6 +291,15 @@ int main() {
                       "speculative decoding is not disabled by default");
     failures += check(defaults.speculative.ngram_draft_tokens == 0,
                       "n-gram copying is not disabled by default");
+    const auto explicit_copy_off =
+        parse({"ninfer-serve", "model.ninfer", "--ngram-draft-tokens", "0"});
+    failures += check(explicit_copy_off.speculative.backend == defaults.speculative.backend &&
+                          explicit_copy_off.speculative.draft_tokens ==
+                              defaults.speculative.draft_tokens &&
+                          explicit_copy_off.speculative.proposal_head ==
+                              defaults.speculative.proposal_head &&
+                          explicit_copy_off.speculative.ngram_draft_tokens == 0,
+                      "explicit copy-off changed the non-speculative defaults");
     failures += check(defaults.response_store_max_records == kDefaultResponseStoreRecords &&
                           defaults.response_store_max_bytes == kDefaultResponseStoreBytes,
                       "Responses store defaults mismatch");
@@ -367,6 +376,19 @@ int main() {
                               options.speculative.draft_tokens == k &&
                               options.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                           "serve options did not preserve DFlash2 configuration");
+    }
+    for (const auto* backend : {"mtp", "dflash", "dflash2"}) {
+        const auto omitted = parse({"ninfer-serve", "model.ninfer", "--spec", backend,
+                                    "--draft-tokens", "3", "--lm-head-draft"});
+        const auto zero = parse({"ninfer-serve", "model.ninfer", "--spec", backend,
+                                 "--draft-tokens", "3", "--lm-head-draft",
+                                 "--ngram-draft-tokens", "0"});
+        failures += check(zero.speculative.backend == omitted.speculative.backend &&
+                              zero.speculative.draft_tokens == omitted.speculative.draft_tokens &&
+                              zero.speculative.proposal_head == omitted.speculative.proposal_head &&
+                              zero.speculative.ngram_draft_tokens == 0 &&
+                              omitted.speculative.ngram_draft_tokens == 0,
+                          "omitted and explicit-zero copy options changed neural configuration");
     }
     for (const auto lanes : {"1", "2", "3"}) {
         const auto options = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",

@@ -664,6 +664,13 @@ int main() {
     }
     failures += check(disabled_speculative == enabled_without_copy_fields,
                       "disabled copy drafting changed the speculative log schema");
+    failures += check(
+        disabled_speculative ==
+            Json{{"backend", "mtp"}, {"draft_window", 3}, {"rounds", 300},
+                 {"drafted_tokens", 900}, {"accepted_tokens", 720}, {"fallback_steps", 2},
+                 {"attempted_per_position", Json::array({300, 300, 300})},
+                 {"accepted_per_position", Json::array({290, 240, 190})}},
+        "disabled copy drafting differs from the base speculative log golden");
     failures +=
         check(done.at("speculative").at("attempted_per_position") == Json::array({300, 300, 300}),
               "speculative attempted position counts missing");
