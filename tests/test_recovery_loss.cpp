@@ -168,21 +168,26 @@ void survivor_membership_scale() {
         for (std::uint32_t i = 0; i < count; ++i) removed.push_back({i});
         for (std::uint32_t i = 0; i < 8 * count; ++i) surviving.push_back({i});
         Handle::comparisons = 0;
+        std::uint64_t valid_calls = 0, frontier_calls = 0;
         const auto start = std::chrono::steady_clock::now();
         const auto score = ninfer::models::context::branch_recovery_loss<Handle>(
-            removed, surviving, [](auto) { return true; }, [](auto) { return 1U; },
+            removed, surviving, [&](auto) { ++valid_calls; return true; },
+            [&](auto) { ++frontier_calls; return 1U; },
             [](auto, auto) { return false; });
         const auto elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         const auto limit = 4ULL * count * (removed.size() + surviving.size());
         std::cout << "removed=" << count << " surviving=" << surviving.size()
                   << " score=" << score << " handle_comparisons=" << Handle::comparisons
-                  << " limit=" << limit << " seconds=" << elapsed << '\n';
+                  << " limit=" << limit << " valid_calls=" << valid_calls
+                  << " frontier_calls=" << frontier_calls << " seconds=" << elapsed << '\n';
         require(score == count, "scale fixture changed recovery loss");
         // Count equality operations, not elapsed time: the remaining prefix/lineage work is
         // quadratic, but membership must not add another scan of every removed checkpoint.
         require(Handle::comparisons <= limit,
                 "survivor membership still scans every removed handle");
+        require(valid_calls + frontier_calls <= 4ULL * (removed.size() + surviving.size()),
+                "survivor validity/frontier facts were not cached once");
     }
 }
 } // namespace

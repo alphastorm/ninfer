@@ -1089,6 +1089,70 @@ public:
         next_request();
     }
 
+    void catalog_frontier_resume() {
+        constexpr std::uint32_t frontier = 65;
+        auto base = request(frontier, true);
+        const auto original = bind(base);
+        reserve(original, q35::ExecutionUnitKind::Prefill);
+        auto begin = program_.advance_prefill(original);
+        require(begin.complete && begin.pending, "catalog resume did not complete its input");
+        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
+        const auto committed = program_.commit(std::move(*begin.pending), accepted);
+        require(committed.capture_ready[0], "catalog resume did not offer its input point");
+        const auto point = capture(original, frontier, runtime::CheckpointRole::InputReplay);
+        auto* native = const_cast<q35::detail::ProgramImpl*>(
+            static_cast<const q35::detail::ProgramImpl*>(
+                q35::detail::ContractAccess::owner(original)));
+        const auto original_lane = q35::detail::ContractAccess::lane(original).value;
+        const auto saved_metadata = native->sequences[original_lane].continuation.metadata;
+        require(program_.start_pause(original, false), "catalog resume could not pause");
+        auto paused = settle();
+        require(paused.paused && !paused.paused->has_snapshot() &&
+                    paused.paused->frontier() == frontier,
+                "catalog resume did not retain its committed frontier without a snapshot");
+        const auto source = program_.inspect_source(base, point);
+        require(source && source->reused_tokens == frontier,
+                "catalog resume did not select its exact committed frontier");
+
+        auto& metadata = const_cast<q35::ContinuationMetadata&>(
+            native->checkpoint(point).continuation().metadata);
+        const auto compatible_metadata = metadata;
+        metadata.tail_hidden_valid = !saved_metadata.tail_hidden_valid;
+        const auto before = program_.physical_usage();
+        const auto rejected = program_.start_binding(base, {1}, *source, &*paused.paused);
+        require(!rejected && !rejected.source_valid && !program_.has_context_operation(),
+                "incompatible exact-frontier source was not rejected before binding");
+        expect_usage(before, "rejected exact-frontier source changed resource ownership");
+        metadata = compatible_metadata;
+
+        require(static_cast<bool>(program_.start_binding(base, {1}, *source, &*paused.paused)),
+                "compatible exact-frontier source did not reserve its next real unit");
+        auto restored = settle();
+        paused.paused.reset();
+        require(restored.sequence && !restored.replaying &&
+                    program_.recovery_pending(*restored.sequence),
+                "exact catalog frontier entered replay or lost recovery protection");
+        const auto lane = q35::detail::ContractAccess::lane(*restored.sequence).value;
+        require(native->requests[lane].permit &&
+                    native->requests[lane].permit->kind == q35::ExecutionUnitKind::Decode &&
+                    native->sequences[lane].continuation.metadata.backend_kv_valid ==
+                        saved_metadata.backend_kv_valid,
+                "exact catalog resume changed its next unit or backend frontier");
+        reserve(*restored.sequence, q35::ExecutionUnitKind::Decode, 1);
+        const std::array<q35::SequenceHandle, 1> members{*restored.sequence};
+        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
+        auto pending = program_.decode(members, budgets);
+        const std::array<runtime::CommitDecision, 1> terminal{{{.accepted_tokens = 1, .terminal = true}}};
+        (void)program_.commit(std::move(pending), terminal);
+        require(!program_.recovery_pending(*restored.sequence),
+                "catalog resume kept recovery protection after a committed decode unit");
+        const auto finished = program_.finish(*restored.sequence);
+        require(finished.checkpoint && program_.release_checkpoint(*finished.checkpoint) &&
+                    program_.release_checkpoint(point),
+                "catalog resume retained a finished checkpoint");
+        expect_empty("catalog-frontier resume leaked resources");
+    }
+
     void retired_host_image_preserves_input() {
         auto base         = request(65, true);
         const auto active = bind(base);
@@ -2209,6 +2273,8 @@ int main(int argc, char** argv) {
                 fixture.prefix_replay_crosses_page();
             } else if (std::string_view(scenario) == "zero-frontier") {
                 fixture.pause_before_first_prefill_chunk();
+            } else if (std::string_view(scenario) == "catalog-frontier") {
+                fixture.catalog_frontier_resume();
             } else if (std::string_view(scenario) == "grammar-row-failure") {
                 fixture.grammar_row_failure();
                 fixture.grammar_row_failure(false);
@@ -2233,6 +2299,7 @@ int main(int argc, char** argv) {
             fixture.cancel_and_destroy_paused_prefill();
             fixture.replay_pause_and_resume();
             fixture.pause_before_first_prefill_chunk();
+            fixture.catalog_frontier_resume();
             fixture.independent_physical_demotions();
             fixture.demotion_holder_changes();
             fixture.batched_physical_demotions();
