@@ -269,6 +269,29 @@ void test_fresh_windows_follow_complete_pressure_cycles() {
     }
 }
 
+void test_unsuccessful_fresh_window_consumes_a_complete_rotation() {
+    Scheduler scheduler;
+    for (const auto id : {10U, 20U, 30U}) { admit(scheduler, request(id)); }
+    scheduler.require_progress(10);
+    scheduler.served(10, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, true) && scheduler.take_fresh_window(),
+            "the first useful pressure quantum did not open a fresh window");
+    // No candidate fits, or the Engine skips admission because no lane is free.
+    scheduler.end_fresh_window();
+
+    for (const auto owner : {20U, 30U, 10U}) {
+        require(scheduler.progress_owner() == owner,
+                "unsuccessful fresh admission changed the service order");
+        scheduler.served(owner, Scheduler::service_quantum_ns);
+        require(scheduler.advance_service(true, false, true),
+                "unsuccessful fresh admission prevented service rotation");
+        const bool window = scheduler.take_fresh_window();
+        require(window == (owner == 10U),
+                "unsuccessful fresh window reopened before a complete service rotation");
+        if (window) { scheduler.end_fresh_window(); }
+    }
+}
+
 void test_fresh_windows_reset_when_pressure_ends() {
     Scheduler scheduler;
     const auto a = request(10), b = request(20), c = request(30);
@@ -521,6 +544,7 @@ int main() {
     try {
         test_pressure_admission_requires_a_fresh_window();
         test_fresh_windows_follow_complete_pressure_cycles();
+        test_unsuccessful_fresh_window_consumes_a_complete_rotation();
         test_fresh_windows_reset_when_pressure_ends();
         test_younger_blocked_request_can_preempt_older_resident();
         test_c2_pressure_alternation();

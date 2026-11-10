@@ -190,6 +190,10 @@ public:
         bool paused           = false;
         bool pressure_progress = false;
         bool export_blocked   = false;
+        std::uint32_t pressure_saves = 0;
+        bool pressure_save_named = false;
+        std::vector<std::uint32_t> pause_lanes;
+        bool host_pause_saved = false;
         bool victim_finished  = false;
         bool pressure_finished_before_victim = false;
         bool decode_held = false;
@@ -859,7 +863,11 @@ public:
                                               host_bytes_released(released);
     }
 
-    [[nodiscard]] std::optional<std::vector<ninfer::HostAllocationRun>> pause_host_runs(Sequence) const {
+    [[nodiscard]] std::optional<std::vector<ninfer::HostAllocationRun>>
+    pause_host_runs(Sequence sequence) const {
+        if (pause_needs_host && live(sequence).script == Script::VictimResume) {
+            return std::vector<ninfer::HostAllocationRun>{{kCheckpointHostBytes, 1}};
+        }
         return std::nullopt;
     }
 
@@ -868,14 +876,19 @@ public:
         return std::exchange(redundant_bytes, 0);
     }
 
-    [[nodiscard]] bool start_pause(Sequence sequence, bool, rt::ExecutionTiming* = nullptr) {
+    [[nodiscard]] bool start_pause(Sequence sequence, bool save_snapshot,
+                                    rt::ExecutionTiming* = nullptr) {
         const auto& lane = live(sequence);
         require(!operation_, "pause overlaps a context operation");
         operation_ = Operation{.kind          = ContextKind::Pause,
                                .lane          = sequence.lane,
                                .script        = lane.script,
                                .prompt_tokens = lane.prompt_tokens};
-        events_.record([](Events::State& state) { state.pause_started = true; });
+        events_.record([&](Events::State& state) {
+            state.pause_started = true;
+            state.pause_lanes.push_back(sequence.lane);
+            state.host_pause_saved = save_snapshot;
+        });
         return true;
     }
 
@@ -1106,6 +1119,8 @@ public:
                                                         const rt::DurableLimits&) {
         return ExportLease(*this, points);
     }
+
+    bool pause_needs_host = false;
 
 private:
     struct Lane {
@@ -2038,6 +2053,80 @@ public:
     }
 };
 
+class DeferredPressureHandler final : public rt::PressureCheckpointHandler {
+public:
+    explicit DeferredPressureHandler(Events& events) : events_(events) {}
+
+    std::atomic<bool> settled{false};
+
+    void save_before_eviction(std::span<rt::PressureCheckpointVictim> victims) noexcept override {
+        if (settled.load()) {
+            for (auto& victim : victims) { victim.outcome = rt::PressureCheckpointOutcome::Settled; }
+        }
+        events_.record([&](Events::State& state) {
+            ++state.pressure_saves;
+            state.pressure_save_named = victims.size() == 1 &&
+                victims.front().session_sha256 == "victim" &&
+                victims.front().checkpoint_tag == "saved";
+        });
+    }
+
+private:
+    Events& events_;
+};
+
+void pending_pressure_save(bool have_older_resident) {
+    Harness h(have_older_resident ? 3U : 2U, true);
+    acknowledged_turn(h, "victim", "saved");
+    auto handler = std::make_shared<DeferredPressureHandler>(h.events());
+    h.core().set_pressure_checkpoint_handler(handler);
+    h.configure([](Program& p) {
+        p.host_capacity = kCheckpointHostBytes;
+        p.pause_needs_host = true;
+    });
+    auto owner = h.submit(Script::Pressure, 1);
+    std::optional<Submission> older;
+    if (have_older_resident) { older.emplace(h.submit(Script::Stall, 1)); }
+    auto youngest = h.submit(Script::VictimResume, 1);
+    h.events().await([](const Events::State& state) { return state.pressure_saves != 0; },
+                     "the Host victim's pending durable pressure save");
+    // Worker-command barriers let the failed pause return and another reservation retry run.
+    // At F the two-resident case instead returns the Engine's legal-unit logic_error here.
+    for (unsigned turn = 0; turn != 2; ++turn) {
+        h.configure([&](Program& p) {
+            const auto state = h.events().snapshot();
+            require(state.pressure_saves == 1 && state.pressure_save_named,
+                    "Pending save was retried without progress or selected the wrong Host victim");
+            require(state.pause_lanes.empty(),
+                    "Pending youngest victim save paused an older resident");
+            require(p.valid_checkpoint({1}), "Pending save released its Host checkpoint");
+        });
+    }
+    require(h.core().is_available(), "Pending pressure save failed the Engine");
+
+    handler->settled.store(true);
+    h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+    h.core().notify_checkpoint_progress();
+    h.events().await([](const Events::State& state) { return state.pause_started; },
+                     "the youngest victim's pause after its durable save settled");
+    const auto state = h.events().snapshot();
+    require(state.pause_lanes == std::vector<std::uint32_t>{have_older_resident ? 2U : 1U} &&
+                state.host_pause_saved && state.pressure_saves == 2,
+            "settled save did not resume the youngest victim's Host pause");
+    h.configure([](Program& p) {
+        require(!p.valid_checkpoint({1}), "settled Host victim was not released");
+    });
+    h.release_stalls();
+    require_finished(h.await(owner), FinishReason::OutputLimit, "pressure save owner");
+    if (older) { require_finished(h.await(*older), FinishReason::OutputLimit, "older resident"); }
+    require_finished(h.await(youngest), FinishReason::OutputLimit, "restored youngest victim");
+    require_membership(h.observed_stats(), {}, "pending pressure save cleanup");
+}
+
+void resident_waits_for_pending_pressure_save() { pending_pressure_save(false); }
+
+void pending_pressure_save_preserves_older_resident() { pending_pressure_save(true); }
+
 void export_proven_victim() {
     Harness h(1, true);
     acknowledged_turn(h, "victim", "a");
@@ -2246,6 +2335,9 @@ int main() {
         Case{"durable_import_abort", durable_import_abort},
         Case{"durable_export_release", durable_export_release},
         Case{"resident_waits_for_export", resident_waits_for_export},
+        Case{"resident_waits_for_pending_pressure_save", resident_waits_for_pending_pressure_save},
+        Case{"pending_pressure_save_preserves_older_resident",
+             pending_pressure_save_preserves_older_resident},
         Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
         Case{"export_proven_victim", export_proven_victim},
         Case{"export_proof_failures_and_intents", export_proof_failures_and_intents},
