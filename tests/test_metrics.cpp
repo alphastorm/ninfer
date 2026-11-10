@@ -32,6 +32,7 @@ int main() {
     metrics.configure("custom\"model\\name\nline", options, memory, baseline);
     RuntimeStats running = baseline;
     running.generated_tokens += 5;
+    running.numerical_failures = 1;
     running.speculative_draft_tokens += 6;
     running.speculative_accepted_tokens += 3;
     running.speculative_attempted_per_position = {4, 3, 2};
@@ -46,6 +47,8 @@ int main() {
     const auto live = metrics.render(running, true);
     check(live.find("ninfer_generation_tokens_total 5\n") != std::string::npos,
           "live generated count must exclude startup warmup");
+    check(live.find("ninfer_numerical_failures_total 1\n") != std::string::npos,
+          "request-local numerical failures must remain observable");
     check(live.find("ninfer_spec_decode_draft_tokens_total 6\n") != std::string::npos,
           "speculative work must be observable before request completion");
     check(live.find("# TYPE ninfer_spec_decode_position_tokens_total counter\n") !=

@@ -61,6 +61,11 @@ set_tests_properties(ninfer_serve_restore_runner_test PROPERTIES LABELS "host")
 ninfer_test_host_lanes(ninfer_serve_restore_runner_test ninfer_session_checkpoint_export_test bounded native)
 
 if(TARGET ninfer-serve)
+  add_test(NAME ninfer_serve_resilience_real_test
+    COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_resilience_real.py"
+            --server $<TARGET_FILE:ninfer-serve>)
+  set_tests_properties(ninfer_serve_resilience_real_test PROPERTIES
+    LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
   add_test(NAME ninfer_serve_restore_real_test
     COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_real.py"
             --server $<TARGET_FILE:ninfer-serve>)
@@ -131,6 +136,30 @@ ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_anthropic_schema.cpp"
   LIBRARIES ninfer_serve)
 
+# Parse real protocol requests and execute the shipped template without linking an Engine.
+add_executable(ninfer_serve_resilience_test
+  "${CMAKE_CURRENT_LIST_DIR}/../test_serve_resilience.cpp"
+  "${PROJECT_SOURCE_DIR}/src/models/common/qwen/frontend/chat_template.cpp"
+  "${PROJECT_SOURCE_DIR}/src/models/common/qwen/frontend/prompt_layout.cpp"
+  "${PROJECT_SOURCE_DIR}/src/models/common/qwen/frontend/media_cache.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/openai_chat_request.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/openai_common.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/anthropic_messages_request.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/anthropic_messages_response.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/request_validation.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/translate.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/generation_errors.cpp"
+  "${PROJECT_SOURCE_DIR}/src/serve/opaque_id.cpp")
+ninfer_test_includes(ninfer_serve_resilience_test)
+target_link_libraries(ninfer_serve_resilience_test PRIVATE
+  ninfer_jinja ninfer_grammar ninfer_runtime_support ninfer_serve_state Threads::Threads)
+if(WIN32)
+  target_link_libraries(ninfer_serve_resilience_test PRIVATE bcrypt)
+endif()
+add_test(NAME ninfer_serve_resilience_test
+  COMMAND ninfer_serve_resilience_test "${PROJECT_SOURCE_DIR}/tools/chat_templates/qwen3_8.jinja")
+ninfer_test_host_lanes(ninfer_serve_resilience_test ninfer_serve_resilience_test bounded native windows)
+
 ninfer_add_test(ninfer_serve_options_test
   HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_serve_options.cpp"
@@ -165,8 +194,14 @@ ninfer_add_test(ninfer_http_server_stop_test
   LIBRARIES ninfer_serve)
 
 ninfer_add_test(ninfer_stop_event_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_stop_event.cpp"
-  LIBRARIES ninfer_serve)
+          "${PROJECT_SOURCE_DIR}/src/serve/stop_event.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/opaque_id.cpp"
+  LIBRARIES spdlog::spdlog Threads::Threads)
+if(WIN32)
+  target_link_libraries(ninfer_stop_event_test PRIVATE bcrypt advapi32)
+endif()
 set_tests_properties(ninfer_stop_event_test PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_http_transport_test

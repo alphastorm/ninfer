@@ -190,6 +190,7 @@ struct RequestRecord {
     std::optional<LaneId> lane;
     std::optional<SequenceHandle> sequence;
     std::atomic<bool> cancelled{false};
+    bool shutdown = false; // Worker-owned; distinguishes stop drain from client cancellation.
     EngineRequestState model_state        = EngineRequestState::Waiting;
     bool capture_pending                  = false;
     EngineRequestState post_capture_state = EngineRequestState::Prefill;

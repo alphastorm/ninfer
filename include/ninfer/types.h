@@ -576,6 +576,7 @@ enum class RequestErrorKind : std::uint8_t {
     QueueTimeout,
     Cancelled,
     Unavailable,
+    NumericalFailure,
 };
 
 enum class RequestErrorSource : std::uint8_t { OutputConstraint, Tools };
@@ -1111,6 +1112,7 @@ struct RuntimeStats {
     // Decode batch executions and the sum of their batch sizes.
     std::uint64_t decode_rounds             = 0;
     std::uint64_t decode_row_rounds         = 0;
+    std::uint64_t numerical_failures        = 0;
     std::uint32_t running_requests          = 0;
     std::uint32_t prefilling_requests       = 0;
     std::uint32_t decode_ready_requests     = 0;

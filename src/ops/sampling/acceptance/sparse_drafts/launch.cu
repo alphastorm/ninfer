@@ -7,12 +7,15 @@ using namespace sampling_detail;
 using namespace common;
 
 namespace {
+template <typename Logit>
 __global__ __launch_bounds__(256) void speculative_accept_sparse_warp_greedy_kernel(
-    const int* target_tokens, const int* drafts, const int* current_extents, int* lengths,
+    const int* target_tokens, const Logit* logits, int token_domain, int physical_rows,
+    const int* drafts, const int* current_extents, int* lengths,
     int* anchors, int* licensed_tokens, int* licensed_counts, int* accepted, int k) {
     const int row    = threadIdx.x / 32;
     const int extent = min(k, max(0, current_extents[row]));
-    speculative_sparse_warp_greedy(target_tokens, drafts, lengths, anchors, licensed_tokens,
+    speculative_sparse_warp_greedy(target_tokens, logits, token_domain, physical_rows,
+                                   drafts, lengths, anchors, licensed_tokens,
                                    licensed_counts, accepted, row, extent, k);
 }
 } // namespace
@@ -29,7 +32,8 @@ void launch_typed(const Tensor& target_tokens, const Tensor& logits, const Tenso
     const std::int32_t cols  = k + 1;
     if (plan.raw_greedy) {
         speculative_accept_sparse_warp_greedy_kernel<<<1, 32 * batch, 0, stream>>>(
-            static_cast<const int*>(target_tokens.data), static_cast<const int*>(drafts.data),
+            static_cast<const int*>(target_tokens.data), static_cast<const Logit*>(logits.data),
+            token_domain, logits.ne[0], static_cast<const int*>(drafts.data),
             static_cast<const int*>(current_extents.data), static_cast<int*>(round_lengths.data),
             static_cast<int*>(round_anchors.data), static_cast<int*>(licensed_tokens.data),
             static_cast<int*>(licensed_counts.data), static_cast<int*>(accepted_drafts.data), k);

@@ -391,8 +391,11 @@ PendingBatch ProgramImpl::mtp_decode(std::span<Sequence* const> rows,
             throw std::logic_error("invalid MTP licensed prefix");
         const auto reached = (1U << n) - 1;
         pending.failed_[b] = (dead[b] & reached) != 0;
+        pending.numerical_failed_[b] = !runtime::license_generated_tokens(
+            std::span<TokenId>(pending.tokens_).subspan(b * width, n),
+            parameters.profile->public_tokens);
         pending.members_.push_back(handle(*rows[b]));
-        pending_failed[b] = pending.failed_[b];
+        pending_failed[b] = pending.failure(b).has_value();
         rows[b]->phase    = Phase::Pending;
     }
     pending_transaction = pending.transaction_;

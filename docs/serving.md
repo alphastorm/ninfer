@@ -317,6 +317,9 @@ the same ordered tool call. NInfer does not canonicalize semantically equivalent
 reorders members, inserts defaults, or otherwise rewrites a tool object, the changed rendered input
 does not match the model-held endpoint and can reuse only an earlier exact checkpoint.
 Generated token segmentation can also differ from re-encoding the same text, limiting prefix reuse.
+Malformed or non-object tool argument JSON is preserved as one raw `input` string in a mapping,
+instead of throwing during history rendering or Anthropic response serialization. Empty arguments
+become `{}`. Valid objects retain their member order and original streaming argument bytes.
 
 `--chat-template FILE` selects a local Jinja template; by default, the server uses the template
 stored in the artifact. See the [CLI guide](cli.md#text-input) for an example.
@@ -348,8 +351,13 @@ post-close model token, preparation is rejected with HTTP 400 code
 not promise that the model will emit nonempty content or a tool call after the marker.
 
 For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The selected template
-interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
-Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
+is probed once at startup for the other standard values (`minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`). Unsupported tiers map to the nearest supported enabled tier, preferring the higher
+tier on a tie. The shipped artifact's three-tier template therefore maps `minimal` to `low` and
+`high`/`max` to `xhigh`; already-supported tiers are unchanged. No artifact reconversion or template
+override is needed. Explicit disabled thinking ignores effort hints, including Anthropic
+`thinking: {"type":"disabled"}` with `output_config.effort`. Explicit enabled thinking with `none`
+still returns `conflicting_template_option`.
 
 `preserve_thinking` controls reasoning retention according to the selected template. Request
 options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unspecified
@@ -1015,8 +1023,11 @@ Missing or conflicting capabilities cannot access another namespace.
 Automatic saves run on one bounded worker and honor
 `--session-checkpoint-min-tokens`. Pressure checkpoints and graceful final saves
 also save shorter sessions. The stop path drains HTTP workers and accepted automatic
-work, then synchronously saves every relevant live session. A queued write is never
-an acknowledgement. When `--shutdown-report` is set, the schema-1
+work, then synchronously saves every relevant live session. SIGINT/SIGTERM are handled by a control
+thread; managed Windows stop events use the same stop path. Generation is stopped before HTTP
+workers join: live requests receive a shutdown error, while the checkpoint worker and completed
+catalog remain alive through final saves. Only Engine destruction stops and joins that worker.
+A queued write is never an acknowledgement. When `--shutdown-report` is set, the schema-1
 `ninfer_serve_shutdown_report` contains the managed launch ID and
 `saved`/`skipped`/`refused` counts; `complete=true` requires no refused final save.
 Publication or shutdown-report I/O failure makes the process exit unsuccessfully.
@@ -1034,6 +1045,9 @@ request bodies, credentials, or arbitrary client error messages.
 Internal failures include their single-line diagnostic detail. An Engine worker failure also
 writes its first cause and pre-cleanup request membership to stderr before failing requests;
 ordinary shutdown does not emit that failure diagnostic.
+Non-finite sampled logits or out-of-vocabulary generated tokens fail only the affected request with
+HTTP 500 `numerical_failure` (or a stream error after headers). Other rows and subsequent requests
+continue on the same Engine. Internal row-metadata or CUDA execution failures remain Engine-wide.
 If a tool marker is returned to text because its structure or tool identity cannot be represented,
 Serve emits one warning with only the failure classification, never the generated markup.
 

@@ -183,6 +183,7 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
     COUNTER(replayed_tokens, "replayed_tokens_total", "History tokens recomputed during recovery.");
     COUNTER(decode_rounds, "decode_rounds_total", "Decode batch executions.");
     COUNTER(decode_row_rounds, "decode_row_rounds_total", "Sum of decode batch sizes.");
+    COUNTER(numerical_failures, "numerical_failures_total", "Request-local numerical failures.");
     COUNTER(preemptions, "preemptions_total", "Resource-pressure pauses.");
     COUNTER(snapshot_restores, "snapshot_restores_total",
             "Restores from complete paused snapshots.");

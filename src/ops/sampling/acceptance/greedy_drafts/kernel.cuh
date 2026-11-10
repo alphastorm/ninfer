@@ -27,8 +27,20 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
     if (!(cfg.temperature > 0.0f) && !penalties && cfg.mask.words == nullptr) {
         if (tid == 0) {
             int a = 0;
-            while (a < extent && row_targets[a] == row_drafts[a]) { ++a; }
-            const int t_star = row_targets[a];
+            int t_star = -1;
+            for (; a <= extent; ++a) {
+                const int selected = row_targets[a];
+                if (selected < 0 || selected >= token_domain ||
+                    !isfinite(static_cast<float>(
+                        row_logits[static_cast<std::int64_t>(a) * physical_rows + selected]))) {
+                    t_star = -1;
+                    break;
+                }
+                if (a == extent || selected != row_drafts[a]) {
+                    t_star = selected;
+                    break;
+                }
+            }
             speculative_store_accept_result<true>(row_drafts, k, row, a, t_star, lengths, anchors,
                                                   row_tokens, licensed_counts, accepted, &cfg);
         }
@@ -81,8 +93,7 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
                 __syncthreads();
             }
             if (tid == 0) {
-                if (cfg.mask.words && !isfinite(red_val[0])) { asm volatile("trap;"); }
-                const int selected = red_idx[0];
+                const int selected = isfinite(red_val[0]) ? red_idx[0] : -1;
                 if (i < extent && selected == row_drafts[i]) {
                     a_sh = i + 1;
                 } else {

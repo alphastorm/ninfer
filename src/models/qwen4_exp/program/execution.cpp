@@ -326,8 +326,10 @@ PendingBatch ProgramImpl::sample(std::span<Sequence* const> rows, const Tensor& 
     pending_transaction = pending.transaction_;
     pending_members     = pending.members_;
     for (int row = 0; row < b; ++row) {
+        pending.numerical_failed_[row] = !runtime::license_generated_tokens(
+            std::span<TokenId>(pending.tokens_).subspan(row, 1), vocabulary);
         rows[row]->phase    = Phase::Pending;
-        pending_failed[row] = pending.failed_[row];
+        pending_failed[row] = pending.failure(row).has_value();
     }
     return pending;
 }

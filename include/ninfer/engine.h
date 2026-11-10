@@ -117,6 +117,11 @@ public:
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
     [[nodiscard]] bool is_available() const;
 
+    // Idempotent, thread-safe generation stop. Rejects new requests and drains existing device
+    // consumers. Handles remain collectable; the checkpoint worker/catalog live until destruction
+    // so serving can synchronously flush acknowledged sessions after its HTTP workers join.
+    void request_stop() noexcept;
+
     void reset_memory_peaks() noexcept;
 
 private:

@@ -47,12 +47,12 @@ speculative_store_accept_result(const std::int32_t* row_drafts, std::int32_t k, 
     const int produced   = accepted_count + 1;
     licensed_counts[row] = produced;
     accepted[row]        = accepted_count;
-    anchors[row]         = terminal_token;
+    anchors[row]         = terminal_token < 0 ? 0 : terminal_token;
     lengths[row] += produced;
     if constexpr (UpdateTokenCounts) {
         if (config->token_counts != nullptr) {
             for (int i = 0; i < produced; ++i) {
-                atomicAdd(&config->token_counts[row_tokens[i]], 1);
+                if (row_tokens[i] >= 0) atomicAdd(&config->token_counts[row_tokens[i]], 1);
             }
         }
     }
@@ -87,22 +87,30 @@ __device__ __forceinline__ void speculative_sparse_warp_store(const int* drafts,
     if (lane == 0) {
         licensed_counts[row] = accepted_count + 1;
         accepted[row]        = accepted_count;
-        anchors[row]         = terminal;
+        anchors[row]         = terminal < 0 ? 0 : terminal;
         lengths[row] += accepted_count + 1;
     }
 }
 
+template <typename Logit>
 __device__ __forceinline__ void speculative_sparse_warp_greedy(const int* target_tokens,
+                                                               const Logit* logits, int token_domain,
+                                                               int physical_rows,
                                                                const int* drafts, int* lengths,
                                                                int* anchors, int* licensed_tokens,
                                                                int* licensed_counts, int* accepted,
                                                                int row, int extent, int k) {
     const int lane = threadIdx.x & 31;
+    const int selected = lane <= extent ? target_tokens[row * (k + 1) + lane] : 0;
+    const bool finite = lane <= extent && selected >= 0 && selected < token_domain &&
+                        isfinite(static_cast<float>(
+                            logits[(static_cast<std::int64_t>(row) * (k + 1) + lane) *
+                                       physical_rows + selected]));
     const bool reject =
-        lane < extent && target_tokens[row * (k + 1) + lane] != drafts[row * k + lane];
+        lane < extent && (!finite || selected != drafts[row * k + lane]);
     const unsigned mask = __ballot_sync(0xffffffffU, reject);
     const int a         = mask ? __ffs(mask) - 1 : extent;
-    const int terminal  = target_tokens[row * (k + 1) + a];
+    const int terminal  = __shfl_sync(0xffffffffU, finite ? selected : -1, a);
     speculative_sparse_warp_store(drafts, k, row, a, terminal, lengths, anchors, licensed_tokens,
                                   licensed_counts, accepted);
 }
@@ -373,7 +381,8 @@ __launch_bounds__(S::kSamplerGroupBlock) __global__ void speculative_sampling_gr
     }
     __syncthreads();
 
-    if (tid == 0 && greedy && cfg.mask.words && !isfinite(cand_val[0])) { asm volatile("trap;"); }
+    if (tid == 0 && greedy && !isfinite(cand_val[0])) cand_idx[0] = -1;
+    __syncthreads();
 
     if constexpr (SparseProposal) {
         __shared__ int last_column;

@@ -236,9 +236,10 @@ __device__ inline void sampling_normalize_support(const SamplingConfig& cfg, flo
     if (tid == 0) {
         while (n > 0 && !isfinite(cand_val[n - 1])) { --n; }
         if (n == 0 || !isfinite(cand_val[0])) {
-            // The caller provides nonempty masks. Missing finite support is a model execution
-            // failure, not a distribution from which a placeholder token can be published.
-            asm volatile("trap;");
+            // Carry the numerical failure to the host row transaction without poisoning CUDA.
+            cand_idx[0] = -1;
+            prob[0] = 1.0f;
+            *n_support = 1;
         } else {
             const float inv_temp = 1.0f / cfg.temperature;
             const float m        = cand_val[0] * inv_temp;

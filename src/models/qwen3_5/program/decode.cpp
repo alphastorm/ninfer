@@ -322,21 +322,27 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         timing.end_wait();
 
         const double seconds = std::chrono::duration<double>(context::Clock::now() - start).count();
+        std::array<bool, kMaximumConcurrency> numerical_failures{};
+        for (std::size_t row = 0; row < lanes.size(); ++row)
+            numerical_failures[row] = !runtime::license_generated_tokens(
+                std::span<TokenId>(&ordinary_host_egress->sampled_tokens[row], 1),
+                parameters.model.resources().public_token_count);
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence    = active_sequence(lanes[row]);
             RequestControl& request    = requests[lanes[row]];
             const std::uint32_t base_E = sequence.continuation.metadata.execution_frontier;
             const std::uint32_t base_S = sequence.ledger_frontier;
             const TokenId token        = ordinary_host_egress->sampled_tokens[row];
-            validate_licensed_tokens(std::span<const TokenId>(&token, 1));
             const Continuation base                      = sequence.continuation;
-            sequence.continuation.metadata.text_kv_valid = base_E + 1;
-            commit_sequence_kv(sequence, sequence.continuation.metadata.text_kv_valid, 0);
-            sequence.continuation.metadata.tail_hidden_valid = true;
-            sequence.ledger.push_back(token);
-            sequence.prefix_identity.append_generated(1, sequence.continuation.metadata.rope_delta);
-            sequence.prefix_digests.append_generated(std::span<const TokenId>(&token, 1),
-                                                     sequence.continuation.metadata.rope_delta);
+            if (!numerical_failures[row]) {
+                sequence.continuation.metadata.text_kv_valid = base_E + 1;
+                commit_sequence_kv(sequence, sequence.continuation.metadata.text_kv_valid, 0);
+                sequence.continuation.metadata.tail_hidden_valid = true;
+                sequence.ledger.push_back(token);
+                sequence.prefix_identity.append_generated(1, sequence.continuation.metadata.rope_delta);
+                sequence.prefix_digests.append_generated(std::span<const TokenId>(&token, 1),
+                                                         sequence.continuation.metadata.rope_delta);
+            }
             request.pending   = PendingCandidate{.kind          = PendingKind::Ordinary,
                                                  .base          = base,
                                                  .base_S        = base_S,
@@ -349,6 +355,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
             .tokens =
                 std::span<const TokenId>(ordinary_host_egress->sampled_tokens.data(), lanes.size()),
             .timing = timing.finish(),
+            .numerical_failures = numerical_failures,
         };
     } catch (...) {
         timing.begin_wait();
@@ -513,6 +520,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
 
         const double seconds =
             std::chrono::duration<double>(context::Clock::now() - started).count();
+        std::array<bool, kMaximumConcurrency> numerical_failures{};
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
@@ -529,10 +537,10 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                     capacity) {
                 throw std::runtime_error("MTP batch returned invalid row metadata");
             }
-            const std::span<const TokenId> row_tokens(mtp_host_egress->licensed_tokens.data() +
-                                                          row * width,
-                                                      static_cast<std::size_t>(count_i));
-            validate_licensed_tokens(row_tokens);
+            const std::span<TokenId> row_tokens(mtp_host_egress->licensed_tokens.data() + row * width,
+                                                static_cast<std::size_t>(count_i));
+            numerical_failures[row] = !runtime::license_generated_tokens(
+                row_tokens, parameters.model.resources().public_token_count);
             const std::uint32_t pcur =
                 static_cast<std::uint32_t>(mtp_host_ingress->current_extents[row]);
             request.pending = PendingCandidate{
@@ -554,6 +562,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
                                                         lanes.size()),
             .row_stride = width,
             .timing     = timing.finish(),
+            .numerical_failures = numerical_failures,
         };
     } catch (...) {
         timing.begin_wait();
@@ -749,6 +758,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
 
         const double seconds =
             std::chrono::duration<double>(context::Clock::now() - started).count();
+        std::array<bool, kMaximumConcurrency> numerical_failures{};
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
@@ -765,16 +775,18 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                     capacity) {
                 throw std::runtime_error("DFlash batch returned invalid row metadata");
             }
-            const std::span<const TokenId> row_tokens(dflash_host_egress->licensed_tokens.data() +
-                                                          row * width,
-                                                      static_cast<std::size_t>(count_i));
-            validate_licensed_tokens(row_tokens);
+            const std::span<TokenId> row_tokens(dflash_host_egress->licensed_tokens.data() +
+                                                   row * width,
+                                               static_cast<std::size_t>(count_i));
+            numerical_failures[row] = !runtime::license_generated_tokens(
+                row_tokens, parameters.model.resources().public_token_count);
             // Forward has finished appending the previous accepted features. Publish that
             // backend prefix before a terminal commit may append this round's accepted tokens.
-            if (sequence.kv->backend) {
+            if (!numerical_failures[row] && sequence.kv->backend) {
                 backend_kv_histories->commit_frontier(sequence.kv->backend->handle(), base_E);
             }
-            sequence.continuation.metadata.dflash_context_frontier = base_E;
+            if (!numerical_failures[row])
+                sequence.continuation.metadata.dflash_context_frontier = base_E;
 
             request.pending = PendingCandidate{
                 .kind            = PendingKind::Speculative,
@@ -795,6 +807,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                                                         lanes.size()),
             .row_stride = width,
             .timing     = timing.finish(),
+            .numerical_failures = numerical_failures,
         };
     } catch (...) {
         timing.begin_wait();
