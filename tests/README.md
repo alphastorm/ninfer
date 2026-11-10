@@ -90,6 +90,7 @@ fresh, zero-frontier, exact-frontier, partial and beyond-frontier bindings in ev
 allocation/free boundary interposed; fragmentation, returned ranges and rollback run on CPU CI.
 `ninfer_resource_manager_test` includes fragmented Host placement, sufficient-action selection,
 failed-preservation source retention, explicit byte shortages and durable-generation release guards.
+It also verifies canonical source-cost arithmetic and unchanged candidate ordering.
 The native transaction fixture also checks released-set placement against physical Host accounting;
 that GPU fixture is not part of host-only qualification.
 `ninfer_scheduler_test` ports upstream pressure handoff, continuous contention and bounded recovery
@@ -98,6 +99,9 @@ fixture checks younger-owner progress and fresh-request deadline expiry while ad
 It also checks a fresh request completing before its deadline during continuing pressure, through
 the bounded rotation window without an additional resident preemption. Scheduler tests bound that
 window to one insertion per full service cycle and forbid it during protected recovery.
+The EngineCore busy-source fixture retains a preferred prefix while another request prefills:
+after its calibrated60ms preference budget, a fresh request recomputes from root without waiting
+for or preempting that resident. The available-source control still reuses the preferred prefix.
 It also bounds isolated-restore refusal and verifies that its retained fresh-admission notification
 admits queued work exactly once after the impossible paused owner is retired.
 `ninfer_operational_failure_test` links the real log renderers and request-event classification

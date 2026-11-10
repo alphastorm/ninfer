@@ -616,6 +616,12 @@ private:
         typename ResourceManagement::ReclaimCursor reclaim;
     };
 
+    struct SourceWaitRecheck {
+        std::uint64_t request;
+        Clock::time_point started;
+        std::uint64_t allowance_ns;
+    };
+
     struct CaptureDecision {
         SequenceHandle sequence;
         std::uint32_t frontier = 0;
@@ -1836,6 +1842,9 @@ private:
         request->admission.source_wait_seconds +=
             static_cast<double>(elapsed_ns(*request->source_wait_started, now)) * 1.0e-9;
         request->source_wait_started.reset();
+        if (source_wait_recheck_ && source_wait_recheck_->request == request->id) {
+            source_wait_recheck_.reset();
+        }
     }
 
     void retain_admission_source(const std::shared_ptr<Request>& request,
@@ -1847,6 +1856,39 @@ private:
         } else if (!restoring && !choice.source.reused_tokens) {
             finish_source_wait(request, Clock::now());
         }
+    }
+
+    [[nodiscard]] bool source_preference_pending(const AdmissionDecision& decision) {
+        const auto& request = decision.request;
+        const auto& source = decision.sources[decision.current].source;
+        if (decision.restoring || !source.reused_tokens || !request->source_wait_started ||
+            decision.current + 1 == decision.sources.size()) {
+            return true;
+        }
+        const auto preferred_cost = resources_.source_cost(source);
+        std::uint64_t alternative_cost = UINT64_MAX;
+        for (auto i = decision.current + 1; i < decision.sources.size(); ++i) {
+            alternative_cost =
+                std::min(alternative_cost, resources_.source_cost(decision.sources[i].source));
+        }
+        const auto allowance = alternative_cost > preferred_cost
+                                   ? alternative_cost - preferred_cost
+                                   : 0;
+        const auto now = Clock::now();
+        const auto elapsed = elapsed_ns(*request->source_wait_started, now);
+        if (elapsed >= allowance) { return false; }
+        const auto remaining = allowance - elapsed;
+        const auto prior_elapsed =
+            source_wait_recheck_ ? elapsed_ns(source_wait_recheck_->started, now) : 0;
+        if (!source_wait_recheck_ ||
+            remaining < source_wait_recheck_->allowance_ns -
+                            std::min(prior_elapsed, source_wait_recheck_->allowance_ns)) {
+            // Keep a relative bound: calibrated costs may saturate UINT64_MAX, so adding
+            // the estimate to Clock::time_point could overflow. One earliest alarm suffices.
+            source_wait_recheck_ =
+                SourceWaitRecheck{request->id, *request->source_wait_started, allowance};
+        }
+        return true;
     }
 
     bool try_admit_one(bool restoring) {
@@ -2029,9 +2071,11 @@ private:
                     }
                     if (!reservation) {
                         // Resident work or an off-lock export can release/unlock capacity.
-                        // Do not discard this source for a root chunk's smaller allocation.
+                        // Fresh source preference is worth at most the extra calibrated
+                        // cost of an alternative; retries still use ordinary binding rights.
                         if (reservation.capacity_possible &&
-                            admission_capacity_progress_pending(restoring)) {
+                            admission_capacity_progress_pending(restoring) &&
+                            source_preference_pending(decision)) {
                             deferred = true;
                             break;
                         }
@@ -2502,6 +2546,7 @@ private:
         instance_.program->fail_all_cleanup();
         materializing_.reset();
         admission_decision_.reset();
+        source_wait_recheck_.reset();
         for (auto& decision : capture_decisions_) { decision.reset(); }
         context_owner_.reset();
         std::vector<std::shared_ptr<Request>> paused;
@@ -2585,6 +2630,14 @@ private:
                 set_host_work_class(HostWorkClass::Control);
                 auto boundary = begin_host_phase();
                 (void)expire_pending_requests();
+                if (source_wait_recheck_ &&
+                    elapsed_ns(source_wait_recheck_->started, Clock::now()) >=
+                        source_wait_recheck_->allowance_ns) {
+                    source_wait_recheck_.reset();
+                    // Only re-arm fresh admission, not durable checkpoint progress:
+                    // the source's economics changed, not its physical lease state.
+                    admission_check_pending_.store(true, std::memory_order_release);
+                }
                 executed = progress_context_operation(boundary);
                 if (!instance_.program->has_context_operation()) {
                     for (const auto& request : slots_) {
@@ -2818,6 +2871,7 @@ private:
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
     std::optional<AdmissionDecision> admission_decision_;
+    std::optional<SourceWaitRecheck> source_wait_recheck_;
     std::uint64_t admission_generation_ = 1;
     std::array<std::optional<CaptureDecision>, kMaximumConcurrency> capture_decisions_;
     std::shared_ptr<Request> context_owner_;

@@ -607,9 +607,11 @@ struct Fixture {
     Cache cache;
     std::uint64_t next_order = 0;
 
-    explicit Fixture(std::size_t capacity)
+    explicit Fixture(std::size_t capacity,
+                     ninfer::runtime::ContextMachineCostModel costs =
+                         {.prefill = {.token_ns_q32 = ninfer::runtime::kContextCostQ32One}})
         : program{.host_capacity = capacity},
-          cache(true, {.prefill = {.token_ns_q32 = ninfer::runtime::kContextCostQ32One}}) {
+          cache(true, std::move(costs)) {
         program.host_free.reset(capacity);
     }
 
@@ -724,6 +726,29 @@ void test_candidates_keep_all_frontiers_and_independent_contents() {
     const auto surviving = f.cache.candidates(f.program, base);
     require(surviving.front().source.checkpoint == recomputed,
             "removing one same-key checkpoint erased its surviving index peer");
+}
+
+void test_source_cost_preserves_candidate_order() {
+    ninfer::runtime::ContextMachineCostModel costs;
+    costs.prefill.token_ns_q32 = 10 * ninfer::runtime::kContextCostQ32One;
+    costs.transfer[1].ns_per_byte_q32 = ninfer::runtime::kContextCostQ32One;
+    Fixture f(64, costs);
+    const auto shallow = f.program.add({1, 2});
+    const auto host = f.program.add({1, 2, 3, 4}, {f.program.host_block(64)});
+    const auto device = f.program.add({1, 2, 3, 4});
+    f.publish(shallow);
+    f.publish(host);
+    f.publish(device);
+    const auto choices = f.cache.candidates(f.program, Base{.tokens = {1, 2, 3, 4, 5, 6, 7}});
+    require(choices.size() == 4 && choices[0].source.checkpoint == device &&
+                choices[1].source.checkpoint == shallow && !choices[2].source.checkpoint &&
+                choices[3].source.checkpoint == host,
+            "canonical source-cost extraction changed candidate ordering");
+    const std::array<std::uint64_t, 4> expected{30, 50, 70, 94};
+    for (std::size_t i = 0; i < choices.size(); ++i) {
+        require(f.cache.source_cost(choices[i].source) == expected[i],
+                "source cost differs from independent transfer-plus-prefill arithmetic");
+    }
 }
 
 void test_private_continuation_advances_with_adoption_heat() {
@@ -2515,6 +2540,7 @@ void test_host_shortage_path_stays_byte_based() {
 
 int main() {
     try {
+        test_source_cost_preserves_candidate_order();
         test_failed_demotion_never_releases_its_sources();
         test_host_shortage_path_stays_byte_based();
         test_fragmented_host_evicts_a_victim_and_completes_the_demotion();

@@ -327,6 +327,12 @@ public:
         return out;
     }
 
+    [[nodiscard]] std::uint64_t source_cost(const Source& source) const noexcept {
+        const auto transfer = price_context_transfer_requirements(costs_, source.transfers);
+        const auto prefill  = costs_.prefill_ns(source.remaining_work);
+        return transfer > UINT64_MAX - prefill ? UINT64_MAX : transfer + prefill;
+    }
+
     [[nodiscard]] std::vector<SourceChoice>
     candidates(Program& program, const Base& base, std::uint32_t maximum_frontier = UINT32_MAX,
                std::optional<OwnerToken> own_resume = std::nullopt, std::uint64_t request = 0,
@@ -380,11 +386,6 @@ public:
         }
         std::erase_if(
             result, [&](auto& choice) { return !prepare_source(program, base, choice, request); });
-        const auto cost = [&](const Source& source) {
-            const auto transfer = price_context_transfer_requirements(costs_, source.transfers);
-            const auto prefill  = costs_.prefill_ns(source.remaining_work);
-            return transfer > UINT64_MAX - prefill ? UINT64_MAX : transfer + prefill;
-        };
         const auto bytes = [](const Source& source) {
             std::uint64_t total = 0;
             for (const auto& transfer : source.transfers) {
@@ -395,7 +396,7 @@ public:
             return total;
         };
         std::stable_sort(result.begin(), result.end(), [&](const auto& a, const auto& b) {
-            const auto left = cost(a.source), right = cost(b.source);
+            const auto left = source_cost(a.source), right = source_cost(b.source);
             if (left != right) { return left < right; }
             if (bytes(a.source) != bytes(b.source)) { return bytes(a.source) < bytes(b.source); }
             if (a.source.reused_tokens != b.source.reused_tokens) {
