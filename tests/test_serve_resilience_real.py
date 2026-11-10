@@ -40,8 +40,10 @@ def main() -> int:
                              capture_output=True, text=True).stdout
     source, upstream = build_provenance(version)
     binary_sha = digest_file(args.server)
+    server_pids: list[int] = []
     receipt = {"schema": "ninfer-serve-resilience/1", "source": source, "upstream": upstream,
-               "binary_sha256": binary_sha, "artifact_sha256": args.artifact_sha256}
+               "binary_sha256": binary_sha, "artifact_sha256": args.artifact_sha256,
+               "server_pids": server_pids}
     with tempfile.TemporaryDirectory(prefix="ninfer-serve-resilience-") as temporary:
         root = Path(temporary)
         key = secrets.token_hex(32)
@@ -84,6 +86,7 @@ def main() -> int:
             nonlocal log, process
             log = (root / f"server-{epoch}.log").open("wb")
             process = ManagedProcess(argv, log)
+            server_pids.append(process.child.pid)
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
                 require(process.child.poll() is None, "server exited during startup")
@@ -158,7 +161,8 @@ def main() -> int:
             require(process.stop(timeout=10) == 0, "restored server Stop failed")
             log.close(); log = None; process = None
             receipt["passed"] = True
-        except BaseException:
+        except BaseException as error:
+            receipt["failure"] = str(error)
             for path in root.glob("server-*.log"):
                 print(path.read_text(errors="replace"))
             raise
@@ -167,8 +171,8 @@ def main() -> int:
             if process is not None and process.child.poll() is None:
                 process.child.kill(); process.child.wait(timeout=10)
             if log is not None: log.close()
+            if args.receipt: args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
     text = json.dumps(receipt, indent=2) + "\n"
-    if args.receipt: args.receipt.write_text(text)
     print(text, end="")
     return 0
 
