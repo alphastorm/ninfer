@@ -40,6 +40,11 @@ ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"
   LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_binding_resume_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_binding_resume.cpp"
+  LIBRARIES ninfer_core ninfer::json)
+
 add_executable(ninfer_qwen3_5_checkpoint_restart_test
   "${CMAKE_CURRENT_LIST_DIR}/test_checkpoint_restart.cpp")
 ninfer_test_includes(ninfer_qwen3_5_checkpoint_restart_test)
@@ -66,7 +71,7 @@ ninfer_add_test(ninfer_qwen3_5_shared_prefix_real_test
 
 ninfer_add_test(ninfer_qwen3_5_preemption_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_preemption_real.cpp"
-  LIBRARIES ninfer_engine ninfer::json)
+  LIBRARIES ninfer_engine ninfer_core ninfer::json)
 
 ninfer_add_test(ninfer_qwen3_5_grammar_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_grammar_real.cpp"

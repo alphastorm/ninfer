@@ -82,7 +82,18 @@ BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runti
     transaction.backend_frontier = source ? checkpoint(*source).backend_frontier() : 0;
     transaction.source_tail_hidden =
         source && checkpoint(*source).continuation().metadata.tail_hidden_valid;
-    transaction.resume_snapshot = own_snapshot;
+    transaction.resume_without_replay = resume_without_replay(
+        resume != nullptr, transaction.reuse_frontier, resume ? resume->frontier() : 0);
+    if (transaction.resume_without_replay && source && !own_snapshot) {
+        const auto& restored = checkpoint(*source).continuation().metadata;
+        const auto& saved    = resume->impl_->sequence.continuation.metadata;
+        if (restored.execution_frontier != saved.execution_frontier ||
+            restored.text_kv_valid != saved.text_kv_valid ||
+            restored.backend_kv_valid != saved.backend_kv_valid ||
+            restored.dflash_context_frontier != saved.dflash_context_frontier ||
+            restored.tail_hidden_valid != saved.tail_hidden_valid)
+            return {.source_valid = false};
+    }
     const auto select_source    = [&](const SourceCandidate& actual) {
         transaction.take_private   = candidate.take_private;
         transaction.carried_points = actual.private_points;
@@ -120,7 +131,8 @@ BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runti
             transaction.state_action = StateBindingAction::Split;
         }
     }
-    if (!own_snapshot && speculative_backend == SpeculativeBackend::Mtp &&
+    if (!own_snapshot && !transaction.resume_without_replay &&
+        speculative_backend == SpeculativeBackend::Mtp &&
         transaction.reuse_frontier)
         transaction.backend_frontier = transaction.reuse_frontier - 1;
     auto& request = requests[lane];
@@ -128,7 +140,7 @@ BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runti
     if (!resume)
         first = prefill_unit(base.summary().prompt_tokens, transaction.reuse_frontier,
                              initial_mtp_extent(*base.impl_));
-    else if (!own_snapshot) {
+    else if (!transaction.resume_without_replay) {
         first                  = {.kind = ExecutionUnitKind::Replay,
                                   .main_frontier =
                                       std::min(transaction.reuse_frontier + prefill_chunk, resume->frontier())};
@@ -313,7 +325,9 @@ void ProgramImpl::install_binding(BindOperation& tx) {
         state.continuation.metadata =
             tx.source ? checkpoint(*tx.source).continuation().metadata : ContinuationMetadata{};
         state.continuation.metadata.rope_delta = rope_delta;
-        if (!tx.resume_snapshot) {
+        if (!tx.resume_without_replay) {
+            if (tx.reuse_frontier >= saved.frontier)
+                throw std::logic_error("replay binding has no missing committed history");
             request.resume_lifecycle                            = request.lifecycle;
             request.lifecycle                                   = Lifecycle::Replaying;
             request.replay_target                               = saved.frontier;
