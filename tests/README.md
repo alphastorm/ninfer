@@ -112,6 +112,12 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 
 The chat-template reference test uses Python Jinja2.
 
+`ninfer_nfc_test` compares boundary-segmented NFC normalization with one complete bundled
+utf8proc pass on 100,000 deterministic random texts, fixed composition/reordering/Hangul cases,
+embedded NULs and malformed UTF-8. Linux also interposes `utf8proc_map` to prove that one local
+combining sequence does not normalize an entire document; this is a work bound, not a timing
+threshold. The test runs in bounded, native and Windows host CI.
+
 ### GPU-free CI selection
 
 CMake declarations own the host selections and their executable build dependencies:
