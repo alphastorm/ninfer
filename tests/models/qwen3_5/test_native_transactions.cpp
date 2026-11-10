@@ -144,7 +144,14 @@ public:
     q35::SequenceHandle bind(const q35::RequestBasePlan& base, std::uint32_t lane = 0,
                              q35::ResumeState* resume           = nullptr,
                              q35::ExecutionUnitKind resume_kind = q35::ExecutionUnitKind::Decode) {
-        const bool needs_replay = resume && !resume->has_snapshot();
+        enum class Route { None, Replay, Snapshot, Direct };
+        const bool snapshot     = resume && resume->has_snapshot();
+        const bool needs_replay  = resume && !snapshot && resume->frontier() != 0;
+        const auto expected_route = !resume      ? Route::None
+                                    : needs_replay ? Route::Replay
+                                    : snapshot     ? Route::Snapshot
+                                                   : Route::Direct;
+        const auto target = resume ? resume->frontier() : 0;
         require(static_cast<bool>(
                     program_.start_binding(base, {lane}, root(base), resume, resume_kind,
                                            resume_kind == q35::ExecutionUnitKind::Prefill ? 0 : 1)),
@@ -154,7 +161,23 @@ public:
                 "binding did not publish a lane");
         if (needs_replay) {
             require(progress.replaying, "snapshot-free binding did not enter replay");
+        } else {
+            require(!progress.replaying, "binding entered replay without committed input");
         }
+        const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+            q35::detail::ContractAccess::owner(*progress.sequence));
+        const auto& control = native->requests[lane];
+        require(program_.recovery_pending(*progress.sequence) == (expected_route != Route::None),
+                "binding lost or invented recovery protection");
+        if (expected_route == Route::Replay)
+            require(control.replay_cursor < target && control.replay_target == target,
+                    "replay binding has no missing committed input");
+        if (expected_route == Route::Snapshot)
+            require(native->sequences[lane].continuation.metadata.text_kv_valid == target,
+                    "snapshot binding lost its committed frontier");
+        if (expected_route == Route::Direct)
+            require(target == 0 && control.prefill && control.prefill->cursor == 0,
+                    "direct binding invented historical work");
         return *progress.sequence;
     }
 
@@ -998,6 +1021,13 @@ public:
             reserve(resumed, q35::ExecutionUnitKind::Replay);
             const auto progress = program_.advance_replay(resumed);
             replayed += progress.processed_tokens;
+            const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+                q35::detail::ContractAccess::owner(resumed));
+            const auto& control =
+                native->requests[q35::detail::ContractAccess::lane(resumed).value];
+            require(control.replay_cursor == replayed &&
+                        progress.complete == (control.replay_cursor == control.replay_target),
+                    "replay progress lost its completed frontier");
             if (progress.complete) {
                 complete = true;
                 break;
@@ -1028,6 +1058,34 @@ public:
                 "paused replay cancellation lost its request target");
         cancelled.paused.reset();
         expect_empty("destroyed paused replay retained typed resources");
+        next_request();
+    }
+
+    void pause_before_first_prefill_chunk() {
+        auto base           = request(kPromptTokens);
+        const auto original = bind(base);
+        require(program_.start_pause(original, false), "unstarted prefill pause was not accepted");
+        auto paused = settle();
+        require(paused.paused && !paused.paused->has_snapshot() && paused.paused->frontier() == 0,
+                "unstarted prefill pause did not preserve its empty frontier");
+        expect_empty("unstarted prefill pause retained execution resources");
+        const auto resumed = bind(base, 1, &*paused.paused, q35::ExecutionUnitKind::Prefill);
+        paused.paused.reset();
+        require(program_.recovery_pending(resumed), "direct resume lost recovery protection");
+        const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+            q35::detail::ContractAccess::owner(resumed));
+        const auto lane = q35::detail::ContractAccess::lane(resumed).value;
+        const auto& permit = native->requests[lane].permit;
+        require(permit && permit->kind == q35::ExecutionUnitKind::Prefill &&
+                    permit->main_frontier == kChunk &&
+                    native->requests[lane].recovery->coverage.main_frontier >= kChunk,
+                "direct resume did not reserve its real first prefill unit");
+        prefill_prefix(resumed, kChunk);
+        require(!program_.recovery_pending(resumed),
+                "first resumed prefill chunk did not release recovery protection");
+        finish_prefill(resumed, kPromptTokens - kChunk, false);
+        decode_and_finish(resumed);
+        expect_empty("unstarted prefill resume retained resources after finishing");
         next_request();
     }
 
@@ -2149,6 +2207,8 @@ int main(int argc, char** argv) {
                 std::cout << "OK admitted_unit_acquires_tail_reader\n";
             } else if (std::string_view(scenario) == "prefix-replay-page") {
                 fixture.prefix_replay_crosses_page();
+            } else if (std::string_view(scenario) == "zero-frontier") {
+                fixture.pause_before_first_prefill_chunk();
             } else if (std::string_view(scenario) == "grammar-row-failure") {
                 fixture.grammar_row_failure();
                 fixture.grammar_row_failure(false);
@@ -2172,6 +2232,7 @@ int main(int argc, char** argv) {
             fixture.cancel_host_restore();
             fixture.cancel_and_destroy_paused_prefill();
             fixture.replay_pause_and_resume();
+            fixture.pause_before_first_prefill_chunk();
             fixture.independent_physical_demotions();
             fixture.demotion_holder_changes();
             fixture.batched_physical_demotions();

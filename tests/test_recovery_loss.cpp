@@ -1,6 +1,7 @@
 #include "models/common/context/recovery_loss.h"
 
 #include <array>
+#include <chrono>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -9,8 +10,13 @@
 
 namespace {
 struct Handle {
-    std::uint32_t index = UINT32_MAX, generation = 1;
-    friend bool operator==(Handle, Handle) = default;
+    std::uint32_t index = UINT32_MAX;
+    std::uint64_t generation = 1;
+    static inline std::uint64_t comparisons = 0;
+    friend bool operator==(Handle left, Handle right) {
+        ++comparisons;
+        return left.index == right.index && left.generation == right.generation;
+    }
 };
 struct View {
     struct Record {
@@ -145,6 +151,40 @@ void random_oracle() {
         }
     }
 }
+
+void hash_preserves_generation() {
+    const std::array removed{Handle{7, 1}};
+    const std::array surviving{Handle{7, (1ULL << 40U) + 1}};
+    const auto frontier = [](Handle h) { return h.generation == 1 ? 10U : 4U; };
+    const auto score = ninfer::models::context::branch_recovery_loss<Handle>(
+        removed, surviving, [](auto) { return true; }, frontier,
+        [&](auto left, auto right) { return frontier(left) <= frontier(right); });
+    require(score == 6, "membership conflated distinct checkpoint generations");
+}
+
+void survivor_membership_scale() {
+    for (const std::uint32_t count : {32U, 128U, 512U}) {
+        std::vector<Handle> removed, surviving;
+        for (std::uint32_t i = 0; i < count; ++i) removed.push_back({i});
+        for (std::uint32_t i = 0; i < 8 * count; ++i) surviving.push_back({i});
+        Handle::comparisons = 0;
+        const auto start = std::chrono::steady_clock::now();
+        const auto score = ninfer::models::context::branch_recovery_loss<Handle>(
+            removed, surviving, [](auto) { return true; }, [](auto) { return 1U; },
+            [](auto, auto) { return false; });
+        const auto elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const auto limit = 4ULL * count * (removed.size() + surviving.size());
+        std::cout << "removed=" << count << " surviving=" << surviving.size()
+                  << " score=" << score << " handle_comparisons=" << Handle::comparisons
+                  << " limit=" << limit << " seconds=" << elapsed << '\n';
+        require(score == count, "scale fixture changed recovery loss");
+        // Count equality operations, not elapsed time: the remaining prefix/lineage work is
+        // quadratic, but membership must not add another scan of every removed checkpoint.
+        require(Handle::comparisons <= limit,
+                "survivor membership still scans every removed handle");
+    }
+}
 } // namespace
 
 int main() {
@@ -152,6 +192,8 @@ int main() {
         agreement_cases();
         shared_ancestor_losses();
         random_oracle();
+        hash_preserves_generation();
+        survivor_membership_scale();
         std::cout << "ok\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

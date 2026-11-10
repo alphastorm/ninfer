@@ -185,6 +185,7 @@ public:
         bool binding_held     = false;
         bool pause_started    = false;
         bool paused           = false;
+        bool pressure_progress = false;
         bool export_blocked   = false;
         bool victim_finished  = false;
         bool pressure_finished_before_victim = false;
@@ -231,6 +232,7 @@ enum class Script : std::uint8_t {
     IsolatedMiss,    // The first legal unit never fits although total capacity could hold it.
     StateSlotMiss,   // No Device state can be reclaimed for an isolated request.
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
+    PressureProgress, // Pressure owner commits one prefill unit, then stalls.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
     VictimResume,    // Stall; can pause and restore, for younger-owner handoff.
@@ -239,7 +241,8 @@ enum class Script : std::uint8_t {
 
 [[nodiscard]] bool stalls(Script script) noexcept {
     return script == Script::Stall || script == Script::DecodeFailure ||
-           script == Script::Pressure || script == Script::VictimHold ||
+           script == Script::Pressure || script == Script::PressureProgress ||
+           script == Script::VictimHold ||
            script == Script::VictimPause || script == Script::VictimResume ||
            script == Script::ExportPressure;
 }
@@ -648,7 +651,8 @@ public:
             events_.record([](Events::State& state) { state.export_blocked = true; });
             return {.shortage = {.kv_page_groups = {1}}};
         }
-        if (live(units.front().sequence).script == Script::Pressure &&
+        if ((live(units.front().sequence).script == Script::Pressure ||
+             live(units.front().sequence).script == Script::PressureProgress) &&
             std::any_of(lanes_.begin(), lanes_.end(),
                         [](const Lane& lane) { return lane.active && victim(lane.script); })) {
             return {.shortage = {.kv_page_groups = {1}}};
@@ -669,12 +673,18 @@ public:
     [[nodiscard]] PrefillProgress advance_prefill(Sequence sequence,
                                                   rt::ExecutionTiming* = nullptr,
                                                   rt::TokenMaskProvider* = nullptr) {
-        const auto& lane = live(sequence);
+        auto& lane = live(sequence);
         require(lane.permit, "prefill consumed a released unit permit");
+        if (lane.script == Script::PressureProgress && !lane.partial_progress) {
+            lane.partial_progress = true;
+            events_.record([](Events::State& state) { state.pressure_progress = true; });
+            return {.summary = {.prompt_tokens = lane.prompt_tokens},
+                    .processed_prompt_tokens = 1};
+        }
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
         progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
-        progress.processed_prompt_tokens = lane.prompt_tokens;
+        progress.processed_prompt_tokens = lane.prompt_tokens - (lane.partial_progress ? 1U : 0U);
         progress.complete                = true;
         progress.pending.emplace(std::span<const Sequence>(&sequence, 1),
                                  lane.script == Script::DeadEnd);
@@ -1041,6 +1051,7 @@ private:
         std::uint32_t prompt_tokens = 0;
         bool publish                = false;
         bool permit                 = false;
+        bool partial_progress       = false;
     };
 
     struct Operation {
@@ -1619,6 +1630,28 @@ void fresh_arrival_waits_behind_paused_admitted_work() {
     require_membership(harness.observed_stats(), {}, "fresh admission cleanup");
 }
 
+void fresh_deadline_after_pressure_progress() {
+    Harness harness(2);
+    auto owner = harness.submit(Script::PressureProgress, 1);
+    auto paused = harness.submit(Script::VictimResume, 1);
+    harness.events().await([](const Events::State& state) {
+        return state.pressure_progress && state.paused;
+    },
+                           "pressure owner's first committed prefill unit");
+    const auto before = harness.observed_stats();
+    require(before.paused_requests == 1 && before.computed_prefill_tokens == 1,
+            "deadline fixture did not retain a paused peer after admitted progress");
+    auto fresh = harness.submit(Script::Complete, 1, false, Clock::now() + 400ms);
+    const auto outcome = harness.await(fresh);
+    // Settle held requests before asserting the regression, so predecessor RED is bounded.
+    require_finished(harness.await(paused, true), FinishReason::Cancelled, "deadline paused cleanup");
+    harness.release_stalls();
+    require_finished(harness.await(owner), FinishReason::OutputLimit, "deadline owner cleanup");
+    require_finished(outcome, FinishReason::OutputLimit,
+                     "fresh deadline after pressure owner's committed progress");
+    require_membership(harness.observed_stats(), {}, "deadline admission cleanup");
+}
+
 void control_rejection() {
     Harness harness(1);
     auto request = harness.submit(Script::ControlRejected, 4, true);
@@ -2037,6 +2070,7 @@ int main() {
              younger_pressure_owner_progresses_before_older_finishes},
         Case{"fresh_arrival_waits_behind_paused_admitted_work",
              fresh_arrival_waits_behind_paused_admitted_work},
+        Case{"fresh_deadline_after_pressure_progress", fresh_deadline_after_pressure_progress},
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
