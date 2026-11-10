@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -228,6 +230,9 @@ enum class Script : std::uint8_t {
     ControlRejected, // The first token requests target control; its preview violates grammar.
     DeadEnd,         // The first token's constraint mask has no legal token.
     DecodeFailure,   // Decode raises an internal error that fails the Engine.
+    NumericalPrefill,
+    NumericalDecode,
+    OutOfDomainDecode,
     IsolatedMiss,    // The first legal unit never fits although total capacity could hold it.
     StateSlotMiss,   // No Device state can be reclaimed for an isolated request.
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
@@ -371,8 +376,21 @@ public:
 
     [[nodiscard]] std::span<const TokenId> tokens() const noexcept { return tokens_; }
 
-    [[nodiscard]] bool constraint_failed(std::size_t row) const {
-        return constraint_failed_.at(row) != 0;
+    [[nodiscard]] std::optional<RequestErrorKind> failure(std::size_t row) const {
+        if (numerical_failed_[row]) return RequestErrorKind::NumericalFailure;
+        return constraint_failed_.at(row) ? std::optional(RequestErrorKind::ConstraintDeadEnd)
+                                         : std::nullopt;
+    }
+
+    void inject_numerical(std::size_t row, TokenId sampled) {
+        require(sampled < 0 || sampled >= 256, "fixture injection was a valid token");
+        tokens_[row] = 0;
+        numerical_failed_[row] = true;
+    }
+
+    void inject_nonfinite(std::size_t row, float logit) {
+        require(!std::isfinite(logit), "fixture injection was finite");
+        inject_numerical(row, -1);
     }
 
     [[nodiscard]] rt::ExecutionTiming execution_timing() const noexcept { return {}; }
@@ -383,6 +401,7 @@ private:
     std::vector<Sequence> sequences_;
     std::vector<TokenId> tokens_;
     std::vector<unsigned char> constraint_failed_;
+    std::array<bool, ninfer::kMaximumConcurrency> numerical_failed_{};
 };
 
 struct PrefillProgress {
@@ -678,6 +697,8 @@ public:
         progress.complete                = true;
         progress.pending.emplace(std::span<const Sequence>(&sequence, 1),
                                  lane.script == Script::DeadEnd);
+        if (lane.script == Script::NumericalPrefill)
+            progress.pending->inject_nonfinite(0, std::numeric_limits<float>::quiet_NaN());
         return progress;
     }
 
@@ -695,7 +716,14 @@ public:
                 throw std::logic_error("injected decode failure");
             }
         }
-        return PendingBatch(sequences, false);
+        PendingBatch pending(sequences, false);
+        for (std::size_t row = 0; row < sequences.size(); ++row) {
+            const auto script = live(sequences[row]).script;
+            if (script == Script::NumericalDecode)
+                pending.inject_nonfinite(row, std::numeric_limits<float>::infinity());
+            if (script == Script::OutOfDomainDecode) pending.inject_numerical(row, 256);
+        }
+        return pending;
     }
 
     [[nodiscard]] rt::ExecutionTiming
@@ -1669,6 +1697,48 @@ void normal_shutdown_is_quiet() {
             "ordinary shutdown was reported as a worker failure");
 }
 
+void numerical_failure_is_request_local() {
+    for (const auto script : {Script::NumericalPrefill, Script::NumericalDecode,
+                              Script::OutOfDomainDecode}) {
+        Harness harness(2);
+        auto sibling = harness.submit(Script::Stall, 1);
+        harness.events().await([](const Events::State& s) { return s.bound == 1; }, "sibling binding");
+        auto faulted = harness.submit(script, 4);
+        const auto failed = harness.await(faulted);
+        require_request_error(failed, RequestErrorKind::NumericalFailure, "numerical request");
+        require(harness.core().is_available(), "numerical failure latched the Engine");
+        harness.release_stalls();
+        require_finished(harness.await(sibling), FinishReason::OutputLimit, "numerical sibling");
+        auto next = harness.submit(Script::Complete, 1);
+        require_finished(harness.await(next), FinishReason::OutputLimit, "post-numerical request");
+    }
+}
+
+void stop_retains_durable_catalog() {
+    Harness harness(2, true);
+    auto completed = harness.submit_turn(Script::Complete, "acknowledged");
+    require_finished(harness.await(completed), FinishReason::OutputLimit, "shutdown seed");
+    harness.core().response_stored(kSession, "acknowledged");
+    auto resident = harness.submit(Script::Stall, 4);
+    harness.events().await([](const Events::State& s) { return s.bound == 2; }, "shutdown resident");
+    auto pending = harness.submit(Script::HoldBinding, 4);
+    harness.core().request_stop();
+    harness.core().request_stop();
+    const auto deadline = Clock::now() + 2s;
+    require_request_error(harness.await(resident, false, deadline), RequestErrorKind::Unavailable,
+                          "shutdown resident");
+    require_request_error(harness.await(pending, false, deadline), RequestErrorKind::Unavailable,
+                          "shutdown pending");
+    require(!harness.core().is_available(), "stop left generation available");
+    require(harness.save("acknowledged", kSession, rt::DurableSaveIntent::Final).state ==
+                rt::DurableExportState::Exported,
+            "stop discarded the catalog or stopped checkpoint commands before final_save");
+    bool refused = false;
+    try { auto next = harness.submit(Script::Complete, 1); }
+    catch (const RequestError& error) { refused = error.kind() == RequestErrorKind::Unavailable; }
+    require(refused, "stop admitted new generation");
+}
+
 void isolated_admission_refusal() {
     Harness harness(1);
     auto request = harness.submit(Script::IsolatedMiss, 1, true);
@@ -2041,6 +2111,8 @@ int main() {
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
         Case{"normal_shutdown_is_quiet", normal_shutdown_is_quiet},
+        Case{"numerical_failure_is_request_local", numerical_failure_is_request_local},
+        Case{"stop_retains_durable_catalog", stop_retains_durable_catalog},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
         Case{"isolated_restore_refusal_preserves_deferred_admission",

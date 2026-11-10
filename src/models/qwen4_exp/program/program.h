@@ -152,7 +152,10 @@ public:
 
     [[nodiscard]] std::uint32_t row_stride() const noexcept { return stride_; }
 
-    [[nodiscard]] bool constraint_failed(std::size_t row) const { return failed_.at(row); }
+    [[nodiscard]] std::optional<RequestErrorKind> failure(std::size_t row) const {
+        if (numerical_failed_.at(row)) return RequestErrorKind::NumericalFailure;
+        return failed_.at(row) ? std::optional(RequestErrorKind::ConstraintDeadEnd) : std::nullopt;
+    }
 
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
 private:
@@ -165,6 +168,7 @@ private:
     std::uint32_t stride_ = 1;
     bool decode_          = false;
     std::array<bool, kMaximumConcurrency> failed_{};
+    std::array<bool, kMaximumConcurrency> numerical_failed_{};
     runtime::ExecutionTiming timing_;
     friend class detail::ProgramImpl;
     friend class Program;

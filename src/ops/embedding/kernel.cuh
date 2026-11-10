@@ -31,7 +31,8 @@ __launch_bounds__(Threads) __global__
 
     const int token   = static_cast<int>(blockIdx.x) / BlocksPerToken;
     const int split   = static_cast<int>(blockIdx.x) - token * BlocksPerToken;
-    const int row     = ids[token];
+    // A numerical sampler marker may reach the MTP bridge before host retirement.
+    const int row     = max(0, ids[token]);
     const float scale = __bfloat162float(scales[row]);
 
     const int split_offset = split * kValuesPerBlock;
@@ -59,7 +60,7 @@ __global__ void embed_gather_dense_kernel(const std::int32_t* ids, const __nv_bf
     for (std::int64_t i = start; i < n; i += stride) {
         const std::int32_t t = static_cast<std::int32_t>(i / d);
         const std::int32_t k = static_cast<std::int32_t>(i - static_cast<std::int64_t>(t) * d);
-        out[i]               = table[static_cast<std::int64_t>(ids[t]) * d + k];
+        out[i]               = table[static_cast<std::int64_t>(max(0, ids[t])) * d + k];
     }
 }
 
@@ -75,7 +76,7 @@ __global__ void embed_gather_q6_kernel(const std::int32_t* ids, const std::uint8
     for (std::int64_t i = start; i < n; i += stride) {
         const std::int32_t t    = static_cast<std::int32_t>(i / d);
         const std::int32_t k    = static_cast<std::int32_t>(i - static_cast<std::int64_t>(t) * d);
-        const std::int32_t row  = ids[t];
+        const std::int32_t row  = max(0, ids[t]);
         const std::int32_t g    = k / kEmbedGatherQ6Group;
         const std::int32_t lane = k - g * kEmbedGatherQ6Group;
         const std::int64_t group_index = static_cast<std::int64_t>(row) * kg + g;
@@ -99,7 +100,7 @@ __launch_bounds__(kEmbedGatherQ6Group* kEmbedGatherQ6GroupsPerBlock) __global__
     const std::int32_t g            = block_group * kEmbedGatherQ6GroupsPerBlock + group_slot;
     if (g >= kg) { return; }
 
-    const std::int32_t row         = ids[t];
+    const std::int32_t row         = max(0, ids[t]);
     const std::int64_t group_index = static_cast<std::int64_t>(row) * kg + g;
 
     int scale_bits = 0;
@@ -126,7 +127,7 @@ __global__ void embed_gather_q8_kernel(const std::int32_t* ids, const std::uint8
     for (std::int64_t i = start; i < n; i += stride) {
         const std::int32_t t    = static_cast<std::int32_t>(i / d);
         const std::int32_t k    = static_cast<std::int32_t>(i - static_cast<std::int64_t>(t) * d);
-        const std::int32_t row  = ids[t];
+        const std::int32_t row  = max(0, ids[t]);
         const std::int32_t g    = k / kEmbedGatherQ8Group;
         const std::int32_t lane = k - g * kEmbedGatherQ8Group;
         const std::int64_t group_index = static_cast<std::int64_t>(row) * kg + g;
@@ -144,7 +145,7 @@ __launch_bounds__(Threads) __global__
     static_assert(D % Blocks == 0 && Values % 32 == 0);
     const int token      = static_cast<int>(blockIdx.x) / Blocks;
     const int split      = static_cast<int>(blockIdx.x) % Blocks;
-    const int row        = ids[token];
+    const int row        = max(0, ids[token]);
     const auto* code_row = codes + static_cast<std::int64_t>(row) * D;
     auto* output         = out + static_cast<std::int64_t>(token) * D;
 #pragma unroll
@@ -172,7 +173,7 @@ __launch_bounds__(32) __global__
                                              const std::uint8_t* scales, __nv_bfloat16* out) {
     const std::int32_t t   = static_cast<std::int32_t>(blockIdx.x) / kEmbedGatherQ8Groups;
     const std::int32_t g   = static_cast<std::int32_t>(blockIdx.x) - t * kEmbedGatherQ8Groups;
-    const std::int32_t row = ids[t];
+    const std::int32_t row = max(0, ids[t]);
     const std::int64_t group_index = static_cast<std::int64_t>(row) * kEmbedGatherQ8Groups + g;
 
     int scale_bits = 0;
@@ -194,7 +195,7 @@ __launch_bounds__(256) __global__
                                          const std::uint8_t* scales, __nv_bfloat16* out) {
     const int tid = static_cast<int>(threadIdx.x);
     const int t   = static_cast<int>(blockIdx.x);
-    const int row = ids[t];
+    const int row = max(0, ids[t]);
 
     constexpr int kValuesPerThread = kEmbedGatherQ8D / 256;
     static_assert(kValuesPerThread == 8);

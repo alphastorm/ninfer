@@ -145,12 +145,22 @@ public:
     }
 
     ~EngineCore() noexcept {
+        request_stop();
+        join();
+    }
+
+    void join() noexcept {
         {
             std::lock_guard lock(queue_mutex_);
             stopping_ = true;
         }
         queue_cv_.notify_all();
         if (worker_.joinable()) { worker_.join(); }
+    }
+
+    void request_stop() noexcept {
+        generation_stopping_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
     }
 
     EngineCore(const EngineCore&)            = delete;
@@ -238,7 +248,7 @@ public:
         std::uint64_t publication_order = 0;
         {
             std::lock_guard lock(queue_mutex_);
-            if (stopping_ || failed_) {
+            if (stopping_ || generation_stopping_.load(std::memory_order_acquire) || failed_) {
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
             }
@@ -298,7 +308,7 @@ public:
                 publication = std::unique_lock(request->checkpoint_gate->mutex);
             }
             std::lock_guard lock(queue_mutex_);
-            if (stopping_ || failed_) {
+            if (stopping_ || generation_stopping_.load(std::memory_order_acquire) || failed_) {
                 --outstanding_;
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
@@ -340,7 +350,7 @@ public:
 
     [[nodiscard]] bool is_available() const {
         std::lock_guard lock(queue_mutex_);
-        return !stopping_ && !failed_;
+        return !stopping_ && !generation_stopping_.load(std::memory_order_acquire) && !failed_;
     }
 
     void reset_memory_peaks() noexcept {
@@ -906,6 +916,12 @@ private:
     }
 
     void deliver(const std::shared_ptr<Request>& request, TerminalResponse&& response) {
+        if (const auto* result = std::get_if<GenerationResult>(&response);
+            result && result->finish_reason == FinishReason::Cancelled &&
+            request->shutdown) {
+            response = std::make_exception_ptr(RequestError(
+                RequestErrorKind::Unavailable, "inference engine is shutting down"));
+        }
         {
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
@@ -1153,7 +1169,8 @@ private:
                 }
                 if (decode_round) { ++request->host_timing.decode_rounds; }
                 cancelled[row] = cancelled_at_unit_start[lane];
-                failed[row]    = !cancelled[row] && pending.constraint_failed(row);
+                const auto failure = pending.failure(row);
+                failed[row]    = !cancelled[row] && failure.has_value();
                 const std::int32_t raw_count =
                     pending.row_counts().empty() ? 1 : pending.row_counts()[row];
                 if (raw_count <= 0 || raw_count > static_cast<std::int32_t>(pending.row_stride())) {
@@ -1164,6 +1181,15 @@ private:
                                                                      static_cast<std::size_t>(count));
                 generated_sizes[row]      = request->generated.size();
                 if (failed[row]) {
+                    if (*failure == RequestErrorKind::NumericalFailure) {
+                        ++cumulative_stats_.numerical_failures;
+                        std::fprintf(stderr, "NInfer numerical failure: request=%llu lane=%u\n",
+                                     static_cast<unsigned long long>(request->id), lane);
+                    }
+                    preview_errors[row] = std::make_exception_ptr(RequestError(
+                        *failure, *failure == RequestErrorKind::NumericalFailure
+                                      ? "model produced non-finite logits or a token outside the vocabulary"
+                                      : "grammar has no valid next token"));
                     decisions[row] = CommitDecision{.terminal = true, .failed = true};
                     continue;
                 }
@@ -2583,6 +2609,32 @@ private:
                 }
                 set_host_work_class(HostWorkClass::Control);
                 auto boundary = begin_host_phase();
+                if (generation_stopping_.load(std::memory_order_acquire) && !stop_drained_) {
+                    // Retire through the ordinary cancellation paths, not fail_all_cleanup:
+                    // completed catalog owners must remain exportable during final_save.
+                    {
+                        std::lock_guard lock(queue_mutex_);
+                        for (const auto& request : pending_) {
+                            request->shutdown = true;
+                            request->cancelled.store(true, std::memory_order_release);
+                        }
+                    }
+                    for (const auto& request : slots_) {
+                        if (!request) continue;
+                        request->shutdown = true;
+                        request->cancelled.store(true, std::memory_order_release);
+                    }
+                    for (const auto& request : paused_) {
+                        request->shutdown = true;
+                        request->cancelled.store(true, std::memory_order_release);
+                    }
+                    if (materializing_) {
+                        materializing_->request->shutdown = true;
+                        materializing_->request->cancelled.store(true, std::memory_order_release);
+                    }
+                    keep_warm_armed_ = false;
+                    stop_drained_ = true;
+                }
                 (void)expire_pending_requests();
                 executed = progress_context_operation(boundary);
                 if (!instance_.program->has_context_operation()) {
@@ -2814,6 +2866,8 @@ private:
     RuntimeStats published_stats_;
     bool stopping_ = false;
     bool failed_   = false;
+    std::atomic<bool> generation_stopping_{false};
+    bool stop_drained_ = false;
     // Owned entirely by the device-bound worker, including destruction.
     std::optional<GpuKeepWarm> keep_warm_;
     bool keep_warm_armed_ = false;

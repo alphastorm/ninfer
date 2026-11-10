@@ -23,7 +23,7 @@ ninfer_add_test(ninfer_engine_checkpoint_adapter_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
   LIBRARIES ninfer_core ninfer_session_checkpoint_store Threads::Threads)
 ninfer_add_test(ninfer_engine_core_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
   LIBRARIES ninfer_runtime_support ninfer_core Threads::Threads)
 # DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA

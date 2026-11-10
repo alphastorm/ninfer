@@ -296,6 +296,16 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         }
         const PendingCandidate& pending = requests[lane].pending;
         const SequenceState& sequence   = active_sequence(lane);
+        if (discarded[row]) {
+            if (accepted_tokens[row] != 0)
+                throw std::logic_error("discarded speculative row accepted tokens");
+            const auto selectors = state_selectors(sequence);
+            fold_rows[row] = {.source_state_slot = selectors.source,
+                              .destination_state_slot = selectors.destination,
+                              .commit_columns = 0};
+            hidden_selectors[row] = 0;
+            continue;
+        }
         if (sequence.continuation.metadata.execution_frontier !=
                 pending.base.metadata.execution_frontier ||
             sequence.ledger_frontier != pending.base_S ||
@@ -747,14 +757,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                                       (staged.vision ? staged.vision->elapsed_seconds() : 0.0);
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
 
-        validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
+        const bool numerical_failure = !runtime::license_generated_tokens(
+            std::span<TokenId>(host_tokens, 1), parameters.model.resources().public_token_count);
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");
         }
-        sequence.ledger.push_back(host_tokens[0]);
-        sequence.prefix_identity.append_generated(1, sequence.continuation.metadata.rope_delta);
-        sequence.prefix_digests.append_generated(std::span<const TokenId>(host_tokens, 1),
-                                                 sequence.continuation.metadata.rope_delta);
+        if (!numerical_failure) {
+            sequence.ledger.push_back(host_tokens[0]);
+            sequence.prefix_identity.append_generated(1, sequence.continuation.metadata.rope_delta);
+            sequence.prefix_digests.append_generated(std::span<const TokenId>(host_tokens, 1),
+                                                     sequence.continuation.metadata.rope_delta);
+        }
         sequence.continuation.metadata.text_kv_valid = prompt_tokens;
         if (staged.prepare_mtp) {
             if (sequence.continuation.metadata.backend_kv_valid != prompt_tokens) {
@@ -784,7 +797,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         request.lifecycle = Lifecycle::Pending;
         return runtime::PrefillStepResult{
             .summary = summary,
-            .round   = runtime::GeneratedRound{.tokens = std::span<const TokenId>(host_tokens, 1)},
+            .round   = runtime::GeneratedRound{.tokens = std::span<const TokenId>(host_tokens, 1),
+                                                .numerical_failure = numerical_failure},
             .processed_prompt_tokens = processed_prompt_tokens,
             .complete                = true,
             .timing                  = timing.finish(),

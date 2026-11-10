@@ -1814,7 +1814,10 @@ public:
         require(static_cast<bool>(program_.reserve_units(units)), "grammar mixed unit reservation");
         const std::array<runtime::RoundBudget, 2> budgets{{{1}, {1}}};
         auto pending = program_.decode(members, budgets, nullptr, &masks);
-        require(pending.constraint_failed(0) == native_dead_end && !pending.constraint_failed(1),
+        require(pending.failure(0) ==
+                    (native_dead_end ? std::optional(RequestErrorKind::ConstraintDeadEnd)
+                                     : std::nullopt) &&
+                    !pending.failure(1),
                 "grammar failure lost its row");
         // #399: Runtime can reject a sampled token even when the native mask had
         // legal candidates. That row must be discarded without releasing its sibling.

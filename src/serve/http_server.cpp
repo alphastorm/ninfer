@@ -669,7 +669,11 @@ void HttpServer::attach(GenerationService& service, SessionCheckpointCallbacks c
     const ninfer::RuntimeStats baseline = service.runtime_stats();
     public_model_id_                    = resolve_public_model_id(options_, status_load_.model_name);
     checkpoints_                       = std::move(checkpoints);
-    service_                            = &service;
+    {
+        std::lock_guard lock(stop_mutex_);
+        service_ = &service;
+        if (stop_requested_.load(std::memory_order_acquire)) service_->request_stop();
+    }
     metrics_.configure(public_model_id_, service.engine_options(), status_memory_, baseline);
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), public_model_id_, status_load_, status_memory_);
@@ -705,6 +709,10 @@ bool HttpServer::listen() {
 
 bool HttpServer::stop() noexcept {
     stop_requested_.store(true, std::memory_order_release);
+    {
+        std::lock_guard lock(stop_mutex_);
+        if (service_) service_->request_stop();
+    }
     const bool running = server_.is_running();
     server_.stop();
     return running;

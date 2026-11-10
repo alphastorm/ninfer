@@ -146,6 +146,8 @@ public:
 
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
+    void request_stop() noexcept { engine_->request_stop(); }
+
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {
         return engine_->media_cache_summary();
     }

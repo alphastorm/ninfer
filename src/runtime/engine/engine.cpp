@@ -363,6 +363,8 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             RequestErrorKind::ContextLengthExceeded,
             context_capacity_error(prompt_summary.prompt_tokens, impl_->options.max_context));
     }
+    if (!is_available())
+        throw RequestError(RequestErrorKind::Unavailable, "inference engine is unavailable");
     const double prepare_seconds = prompt.impl_->prepare.seconds;
     if (resolved_options.execution.requested_output_tokens == 0) {
         struct ImmediateSubmission {
@@ -472,6 +474,16 @@ RuntimeStats Engine::runtime_stats() const {
             } else {
                 return core->runtime_stats();
             }
+        },
+        impl_->core);
+}
+
+void Engine::request_stop() noexcept {
+    if (!impl_) return;
+    std::visit(
+        [](auto& core) {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (!std::is_same_v<CoreState, std::monostate>) core->request_stop();
         },
         impl_->core);
 }

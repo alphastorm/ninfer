@@ -1,5 +1,6 @@
 #include "serve/anthropic_messages.h"
 #include "product/constraint_observation.h"
+#include "text/tool_arguments.h"
 
 #include "serve/generation_service.h"
 #include "serve/opaque_id.h"
@@ -35,11 +36,7 @@ std::vector<ToolCall> materialize_tool_calls(const GenerationOutcome& outcome) {
 }
 
 OrderedJson parse_tool_input(const ToolCall& call) {
-    OrderedJson input = OrderedJson::parse(call.arguments_json, nullptr, false);
-    if (input.is_discarded() || !input.is_object()) {
-        throw std::logic_error("Engine produced non-object Anthropic tool input");
-    }
-    return input;
+    return text::tool_arguments_object(call.arguments_json);
 }
 
 struct StopPresentation {
@@ -326,7 +323,9 @@ std::vector<std::string> AnthropicMessagesStream::finish(const GenerationOutcome
     append(events, close_text());
 
     for (const ToolCall& call : materialize_tool_calls(outcome)) {
-        (void)parse_tool_input(call);
+        bool object_input = false;
+        const auto input = text::tool_arguments_object(call.arguments_json, &object_input);
+        const auto arguments = object_input ? call.arguments_json : input.dump();
         const int index = next_index_++;
         events.push_back(
             event("content_block_start", Json{{"type", "content_block_start"},
@@ -339,7 +338,7 @@ std::vector<std::string> AnthropicMessagesStream::finish(const GenerationOutcome
                                Json{{"type", "content_block_delta"},
                                     {"index", index},
                                     {"delta", Json{{"type", "input_json_delta"},
-                                                   {"partial_json", call.arguments_json}}}}));
+                                                   {"partial_json", arguments}}}}));
         events.push_back(
             event("content_block_stop", Json{{"type", "content_block_stop"}, {"index", index}}));
     }

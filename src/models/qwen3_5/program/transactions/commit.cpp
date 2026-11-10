@@ -43,8 +43,12 @@ PendingBatch ProgramImpl::wrap_pending(std::span<const std::uint32_t> lanes,
         round.tokens, round.row_counts, round.row_stride, round.timing);
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const auto count = round.row_counts.empty() ? 1 : round.row_counts[row];
-        ContractAccess::constraint_failed(pending, row,
-                                          (grammar_dead_positions[row] & ((1u << count) - 1)) != 0);
+        ContractAccess::failure(
+            pending, row,
+            round.numerical_failures[row] ? std::optional(RequestErrorKind::NumericalFailure)
+            : (grammar_dead_positions[row] & ((1u << count) - 1)) != 0
+                ? std::optional(RequestErrorKind::ConstraintDeadEnd)
+                : std::nullopt);
     }
     return pending;
 }
@@ -61,6 +65,7 @@ PrefillProgress ProgramImpl::wrap_prefill(std::uint32_t lane, runtime::PrefillSt
             .tokens     = step.round.tokens,
             .row_counts = {},
             .row_stride = 1,
+            .numerical_failures = {step.round.numerical_failure},
         };
         out.pending.emplace(wrap_pending(lanes, round));
     } else if (requests[lane].prefill && requests[lane].capture_pending) {
@@ -368,9 +373,9 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
     const auto input_rows       = ContractAccess::rows(pending);
     const std::size_t row_count = input_rows.size();
     for (std::size_t row = 0; row < row_count; ++row) { members[row] = input_rows[row]; }
-    std::array<bool, kMaximumConcurrency> constraint_failed{};
+    std::array<bool, kMaximumConcurrency> row_failed{};
     for (std::size_t row = 0; row < row_count; ++row) {
-        constraint_failed[row] = pending.constraint_failed(row);
+        row_failed[row] = pending.failure(row).has_value();
     }
     const bool valid = valid_pending(pending);
     ContractAccess::consume(pending);
@@ -409,7 +414,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             pending_kinds[row]                      = candidate.kind;
             const runtime::CommitDecision& decision = decisions[row];
             if ((decision.cancelled && decision.failed) ||
-                (!decision.cancelled && constraint_failed[row] && !decision.failed) ||
+                (!decision.cancelled && row_failed[row] && !decision.failed) ||
                 ((decision.cancelled || decision.failed) &&
                  (decision.accepted_tokens != 0 || !decision.terminal)) ||
                 (!(decision.cancelled || decision.failed) &&

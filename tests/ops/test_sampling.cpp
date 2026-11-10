@@ -15,8 +15,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -651,13 +653,46 @@ int increment_counts_contract() {
     return failures;
 }
 
+int non_finite_contract() {
+    int failures = 0;
+    for (const int domain : {64, 257, 248077}) {
+        for (const float temperature : {0.0f, 0.75f}) {
+            for (const float value : {std::numeric_limits<float>::quiet_NaN(),
+                                      std::numeric_limits<float>::infinity(),
+                                      -std::numeric_limits<float>::infinity()}) {
+                std::vector<float> logits(2 * domain, value);
+                std::fill(logits.begin() + domain, logits.end(), -1.0f);
+                logits.back() = 7.0f;
+                ops::SamplingConfig config;
+                config.temperature = temperature;
+                config.top_k = 1;
+                const std::vector<int> zero(domain, 0);
+                const auto result = run_batch(logits, domain, domain, {config, config}, {1, 2},
+                                               ops::kSamplePurposeDecode, {zero, zero});
+                failures += result.integrity_failures;
+                failures += verify_exact("numerical row marker and healthy sibling", result.tokens,
+                                         std::vector<int>{-1, domain - 1});
+                failures += verify_exact("numerical row did not index token counts", result.counts[0],
+                                         zero);
+                auto expected = zero;
+                expected.back() = 1;
+                failures += verify_exact("healthy sibling token count", result.counts[1], expected);
+            }
+        }
+    }
+    return failures;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--nonfinite-only")
+        return non_finite_contract() == 0 ? 0 : 1;
+    if (argc != 1) return 2;
 
     int failures            = 0;
     const std::size_t at_16 = ops::sampling_workspace_capacity_bytes(257, 16, 16);
@@ -682,6 +717,7 @@ int main() {
     failures += workspace_route_boundary_contract();
     failures += increment_counts_contract();
     failures += grammar_mask_contract();
+    failures += non_finite_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
     return failures == 0 ? 0 : 1;
