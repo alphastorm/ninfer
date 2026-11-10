@@ -235,6 +235,16 @@ add_test(NAME ninfer_chat_templates_test
           $<TARGET_FILE:ninfer_jinja_test>)
 ninfer_test_host_lanes(ninfer_chat_templates_test ninfer_jinja_test bounded native)
 
+ninfer_add_test(ninfer_nfc_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_nfc.cpp"
+  LIBRARIES ninfer_text)
+target_include_directories(ninfer_nfc_test PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(ninfer_nfc_test PRIVATE NINFER_NFC_WORK_CONTRACT)
+  target_link_options(ninfer_nfc_test PRIVATE "LINKER:--wrap=utf8proc_map")
+endif()
+
 ninfer_add_test(ninfer_weight_bank_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_weight_bank.cpp"
   LIBRARIES ninfer_core)
 

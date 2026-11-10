@@ -2,6 +2,7 @@
 
 #include <utf8proc/utf8proc.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -13,21 +14,21 @@ bool is_ascii_whitespace(std::int32_t codepoint) noexcept {
            codepoint == '\v' || codepoint == '\f';
 }
 
-} // namespace
-
-std::string normalize_nfc(std::string_view text) {
-    // Every byte below 0x80 is a starter with combining class zero and takes part in no canonical
-    // composition, so pure ASCII is already in NFC and utf8proc has nothing to do with it. The
-    // scan is one pass the compiler vectorises against utf8proc's decode, map and recompose.
-    bool ascii_only = true;
-    for (const char byte : text) {
-        if (static_cast<unsigned char>(byte) >= 0x80u) {
-            ascii_only = false;
-            break;
-        }
+// Nothing reorders or composes across a starter without a canonical decomposition that no
+// canonical composition takes as its second element. Hangul vowel and trailing jamo compose
+// algorithmically, outside utf8proc's table, so they are never boundaries.
+bool nfc_boundary(std::int32_t codepoint) noexcept {
+    if (codepoint < 0x80) { return true; }
+    if ((codepoint >= 0x1161 && codepoint <= 0x1175) ||
+        (codepoint >= 0x11a8 && codepoint <= 0x11c2)) {
+        return false;
     }
-    if (ascii_only) { return std::string(text); }
+    const utf8proc_property_t* property = utf8proc_get_property(codepoint);
+    return property->combining_class == 0 && property->decomp_seqindex == UINT16_MAX &&
+           !property->comb_issecond;
+}
 
+void append_utf8proc_nfc(std::string& out, std::string_view text) {
     utf8proc_uint8_t* mapped = nullptr;
     const utf8proc_ssize_t result =
         utf8proc_map(reinterpret_cast<const utf8proc_uint8_t*>(text.data()),
@@ -37,8 +38,43 @@ std::string normalize_nfc(std::string_view text) {
         throw std::invalid_argument(std::string("failed to normalize UTF-8 text as NFC: ") +
                                     utf8proc_errmsg(result));
     }
-    std::string normalized(reinterpret_cast<const char*>(mapped), static_cast<std::size_t>(result));
+    out.append(reinterpret_cast<const char*>(mapped), static_cast<std::size_t>(result));
     std::free(mapped);
+}
+
+} // namespace
+
+std::string normalize_nfc(std::string_view text) {
+    // Normalize only spans containing a non-boundary code point, from its preceding boundary
+    // (a starter a following mark may compose with) to the next one; copy the rest unchanged.
+    std::string normalized;
+    std::size_t copied   = 0;
+    std::size_t boundary = 0;
+    std::size_t offset   = 0;
+    while (offset < text.size()) {
+        if (static_cast<unsigned char>(text[offset]) < 0x80u) {
+            boundary = offset++;
+            continue;
+        }
+        const CodepointSpan codepoint = utf8_codepoint_at(text, offset, "NFC input");
+        if (nfc_boundary(codepoint.value)) {
+            boundary = offset;
+            offset += codepoint.length;
+            continue;
+        }
+        std::size_t end = offset + codepoint.length;
+        while (end < text.size() && static_cast<unsigned char>(text[end]) >= 0x80u) {
+            const CodepointSpan next = utf8_codepoint_at(text, end, "NFC input");
+            if (nfc_boundary(next.value)) { break; }
+            end += next.length;
+        }
+        if (normalized.empty()) { normalized.reserve(text.size() + 16); }
+        normalized.append(text.substr(copied, boundary - copied));
+        append_utf8proc_nfc(normalized, text.substr(boundary, end - boundary));
+        copied = boundary = offset = end;
+    }
+    if (copied == 0) { return std::string(text); }
+    normalized.append(text.substr(copied));
     return normalized;
 }
 
