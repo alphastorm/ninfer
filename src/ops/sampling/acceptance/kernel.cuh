@@ -13,6 +13,26 @@ using namespace common;
 
 inline constexpr int kSparseSpeculativeCandidates = 16;
 
+struct GreedyPrefix {
+    int accepted;
+    int terminal;
+};
+
+template <typename Logit>
+__device__ __forceinline__ GreedyPrefix
+finite_greedy_prefix(const int* targets, const Logit* logits, const int* drafts,
+                     int extent, int token_domain, int physical_rows) {
+    for (int a = 0; a <= extent; ++a) {
+        const int selected = targets[a];
+        if (selected < 0 || selected >= token_domain ||
+            !isfinite(static_cast<float>(
+                logits[static_cast<std::int64_t>(a) * physical_rows + selected])))
+            return {a, -1};
+        if (a == extent || selected != drafts[a]) return {a, selected};
+    }
+    return {extent, -1};
+}
+
 template <typename T>
 __device__ inline T* speculative_workspace_offset(T* ptr, std::size_t byte_offset) {
     return ptr == nullptr
@@ -269,9 +289,10 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_sampling_partial
     sampling_store_tile_topk<S>(keys, cap, workspace, col, partial, topk_storage.fp32);
 }
 
-template <class S, bool SparseProposal>
+template <class S, bool SparseProposal, typename Logit>
 __launch_bounds__(S::kSamplerGroupBlock) __global__ void speculative_sampling_group_finalize_kernel(
-    const std::int32_t* target_tokens, const std::int32_t* drafts,
+    const std::int32_t* target_tokens, const Logit* logits, std::int32_t physical_rows,
+    const std::int32_t* drafts,
     const std::int32_t* candidate_ids, const float* proposal_q, const std::int32_t* current_extents,
     std::int32_t* lengths, std::int32_t* anchors, std::int32_t* licensed_tokens,
     std::int32_t* licensed_counts, std::int32_t* accepted, const SamplingConfig* configs,
@@ -296,16 +317,18 @@ __launch_bounds__(S::kSamplerGroupBlock) __global__ void speculative_sampling_gr
     if (greedy && !penalties && cfg.mask.words == nullptr) {
         if constexpr (SparseProposal) {
             if (tid < 32 && col == 0 && group == 0)
-                speculative_sparse_warp_greedy(target_tokens, drafts, lengths, anchors,
+                speculative_sparse_warp_greedy(target_tokens, logits, token_domain, physical_rows,
+                                               drafts, lengths, anchors,
                                                licensed_tokens, licensed_counts, accepted, row,
                                                extent, k);
         } else {
 
             if (tid == 0 && col == 0 && group == 0) {
-                int a = 0;
-                while (a < extent && row_targets[a] == row_drafts[a]) { ++a; }
-                const int t_star = row_targets[a];
-                speculative_store_accept_result<!SparseProposal>(row_drafts, k, row, a, t_star,
+                const auto prefix = finite_greedy_prefix(
+                    row_targets, logits + static_cast<std::int64_t>(row) * cols * physical_rows,
+                    row_drafts, extent, token_domain, physical_rows);
+                speculative_store_accept_result<!SparseProposal>(row_drafts, k, row,
+                                                                 prefix.accepted, prefix.terminal,
                                                                  lengths, anchors, row_tokens,
                                                                  licensed_counts, accepted, &cfg);
             }

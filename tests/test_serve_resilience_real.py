@@ -27,6 +27,8 @@ def main() -> int:
     parser.add_argument("--artifact", type=Path, default=os.environ.get("NINFER_TEST_ARTIFACT"))
     parser.add_argument("--artifact-sha256", default=os.environ.get("NINFER_TEST_ARTIFACT_SHA256"))
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--shutdown-only", action="store_true",
+                        help="isolate live-client shutdown when replaying the predecessor")
     args = parser.parse_args()
     if args.artifact is None:
         print("SKIP: explicit NINFER_TEST_ARTIFACT required")
@@ -93,25 +95,26 @@ def main() -> int:
         try:
             launch(1)
             assert process is not None and log is not None
-            chat = {"model": "serve-resilience", "messages": [{"role": "user", "content": "Say OK."}],
-                    "max_tokens": 1, "temperature": 0, "reasoning_effort": "high"}
-            code, _ = request("POST", "/v1/chat/completions", chat)
-            require(code == 200, "high effort did not return HTTP 200")
-            receipt["high_http_status"] = code
-            code, _ = request("POST", "/v1/messages/count_tokens", {
-                "model": "serve-resilience", "messages": [{"role": "user", "content": "hi"}],
-                "thinking": {"type": "disabled"}, "output_config": {"effort": "max"}})
-            require(code == 200, "disabled thinking plus effort did not return HTTP 200")
-            receipt["disabled_effort_http_status"] = code
-            history = dict(chat, reasoning_effort="none", messages=[
-                {"role": "user", "content": "Use lookup."},
-                {"role": "assistant", "content": "", "tool_calls": [{"id": "call_bad", "type": "function",
-                    "function": {"name": "lookup", "arguments": "{\"text\":\"unfinished"}}]},
-                {"role": "tool", "tool_call_id": "call_bad", "content": "Invalid input."},
-                {"role": "user", "content": "Say OK instead."}])
-            code, _ = request("POST", "/v1/chat/completions", history)
-            require(code == 200, "malformed historical arguments poisoned the following turn")
-            receipt["malformed_history_http_status"] = code
+            if not args.shutdown_only:
+                chat = {"model": "serve-resilience", "messages": [{"role": "user", "content": "Say OK."}],
+                        "max_tokens": 1, "temperature": 0, "reasoning_effort": "high"}
+                code, _ = request("POST", "/v1/chat/completions", chat)
+                require(code == 200, "high effort did not return HTTP 200")
+                receipt["high_http_status"] = code
+                code, _ = request("POST", "/v1/messages/count_tokens", {
+                    "model": "serve-resilience", "messages": [{"role": "user", "content": "hi"}],
+                    "thinking": {"type": "disabled"}, "output_config": {"effort": "max"}})
+                require(code == 200, "disabled thinking plus effort did not return HTTP 200")
+                receipt["disabled_effort_http_status"] = code
+                history = dict(chat, reasoning_effort="none", messages=[
+                    {"role": "user", "content": "Use lookup."},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_bad", "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"text\":\"unfinished"}}]},
+                    {"role": "tool", "tool_call_id": "call_bad", "content": "Invalid input."},
+                    {"role": "user", "content": "Say OK instead."}])
+                code, _ = request("POST", "/v1/chat/completions", history)
+                require(code == 200, "malformed historical arguments poisoned the following turn")
+                receipt["malformed_history_http_status"] = code
             code, seed = request("POST", "/v1/responses", {"model": "serve-resilience",
                 "prompt_cache_key": cache_key, "input": "Name one primary color.", "temperature": 0,
                 "max_output_tokens": 16, "store": True})

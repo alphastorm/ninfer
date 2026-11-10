@@ -26,22 +26,10 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
 
     if (!(cfg.temperature > 0.0f) && !penalties && cfg.mask.words == nullptr) {
         if (tid == 0) {
-            int a = 0;
-            int t_star = -1;
-            for (; a <= extent; ++a) {
-                const int selected = row_targets[a];
-                if (selected < 0 || selected >= token_domain ||
-                    !isfinite(static_cast<float>(
-                        row_logits[static_cast<std::int64_t>(a) * physical_rows + selected]))) {
-                    t_star = -1;
-                    break;
-                }
-                if (a == extent || selected != row_drafts[a]) {
-                    t_star = selected;
-                    break;
-                }
-            }
-            speculative_store_accept_result<true>(row_drafts, k, row, a, t_star, lengths, anchors,
+            const auto prefix = finite_greedy_prefix(row_targets, row_logits, row_drafts,
+                                                      extent, token_domain, physical_rows);
+            speculative_store_accept_result<true>(row_drafts, k, row, prefix.accepted,
+                                                  prefix.terminal, lengths, anchors,
                                                   row_tokens, licensed_counts, accepted, &cfg);
         }
         return;

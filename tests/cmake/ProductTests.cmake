@@ -152,7 +152,8 @@ add_executable(ninfer_serve_resilience_test
   "${PROJECT_SOURCE_DIR}/src/serve/opaque_id.cpp")
 ninfer_test_includes(ninfer_serve_resilience_test)
 target_link_libraries(ninfer_serve_resilience_test PRIVATE
-  ninfer_jinja ninfer_grammar ninfer_runtime_support ninfer_serve_state Threads::Threads)
+  ninfer_jinja ninfer_grammar ninfer_runtime_support ninfer_serve_state
+  ninfer_product_logging Threads::Threads)
 if(WIN32)
   target_link_libraries(ninfer_serve_resilience_test PRIVATE bcrypt)
 endif()
