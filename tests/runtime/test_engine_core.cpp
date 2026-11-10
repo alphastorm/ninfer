@@ -95,6 +95,7 @@ constexpr std::uint32_t kPageGroups   = 64;
 constexpr std::size_t kCheckpointHostBytes = 4096;
 constexpr std::size_t kHostCapacityBytes   = 1U << 20;
 constexpr std::uint32_t kDurableFrontier   = 4;
+constexpr std::uint32_t kSourceFrontier    = 3;
 constexpr auto kSession                    = "session";
 // A publication that correctly precedes its result is held this long, while no observer can
 // return; a result delivered first is read by its observer within this interval.
@@ -190,6 +191,8 @@ public:
         bool export_blocked   = false;
         bool victim_finished  = false;
         bool pressure_finished_before_victim = false;
+        bool source_blocked = false;
+        std::uint32_t source_prefill_progress = 0;
     };
 
     template <class Update>
@@ -238,6 +241,9 @@ enum class Script : std::uint8_t {
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
     VictimResume,    // Stall; can pause and restore, for younger-owner handoff.
     ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
+    SourceSeed,     // Publish the short reusable prefix for the source-wait fixtures.
+    SourcePrefill,  // Progress, then remain in prefill until the test releases the source.
+    SourceArrival,  // Its preferred prefix is unavailable while SourcePrefill remains live.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
@@ -299,7 +305,9 @@ public:
 
     [[nodiscard]] std::vector<std::uint32_t> capture_frontiers() const { return {}; }
 
-    [[nodiscard]] std::optional<std::uint64_t> prefix_shortlist_key(std::uint32_t) const noexcept {
+    [[nodiscard]] std::optional<std::uint64_t>
+    prefix_shortlist_key(std::uint32_t frontier) const noexcept {
+        if (script_ == Script::SourceArrival && frontier == kSourceFrontier) { return frontier; }
         return std::nullopt;
     }
 
@@ -569,10 +577,17 @@ public:
                                                        bool = false,
                                                        std::span<const Checkpoint> = {},
                                                        std::span<const Checkpoint> = {}) const {
-        if (checkpoint) { return std::nullopt; }
-        Source source;
+        if (checkpoint &&
+            (!valid_checkpoint(*checkpoint) || base.script() != Script::SourceArrival ||
+             !live_record(*checkpoint).source_prefix)) {
+            return std::nullopt;
+        }
+        Source source{.checkpoint = checkpoint,
+                      .reused_tokens = checkpoint ? live_record(*checkpoint).frontier : 0};
         source.remaining_work =
-            rt::make_prefill_work(0, base.summary().prompt_tokens, 0, 0, kPrefillChunk);
+            rt::make_prefill_work(source.reused_tokens,
+                                 base.summary().prompt_tokens - source.reused_tokens,
+                                 0, 0, kPrefillChunk);
         return source;
     }
 
@@ -580,8 +595,18 @@ public:
                                                    const Source& source, Resume* resume = nullptr,
                                                    UnitKind = UnitKind::Decode,
                                                    std::uint32_t = 1) {
-        require(!operation_ && !lanes_.at(lane.value).active && !source.checkpoint,
+        require(!operation_ && !lanes_.at(lane.value).active &&
+                    (!source.checkpoint || base.script() == Script::SourceArrival),
                 "scripted binding overlaps native ownership");
+        if (source.checkpoint &&
+            std::any_of(lanes_.begin(), lanes_.end(), [](const Lane& resident) {
+                return resident.active && resident.script == Script::SourcePrefill;
+            })) {
+            // Native's preferred source cannot obtain its binding destination, while a
+            // root has an independent legal destination. This is not global capacity loss.
+            events_.record([](Events::State& state) { state.source_blocked = true; });
+            return {.capacity_possible = true, .shortage = {.state_slots = 1}};
+        }
         if (base.script() == Script::IsolatedMiss ||
             (resume != nullptr && base.script() == Script::VictimPause)) {
             return {.capacity_possible = true, .shortage = {.kv_page_groups = {1}}};
@@ -593,6 +618,7 @@ public:
                                .lane          = lane.value,
                                .script        = base.script(),
                                .prompt_tokens = base.summary().prompt_tokens,
+                               .reused_tokens = source.reused_tokens,
                                .publish       = base.summary().publish_continuation};
         if (base.script() == Script::HoldBinding) {
             events_.record([](Events::State& state) { state.binding_held = true; });
@@ -619,6 +645,7 @@ public:
                         .script        = operation.script,
                         .epoch         = next_epoch_++,
                         .prompt_tokens = operation.prompt_tokens,
+                        .reused_tokens = operation.reused_tokens,
                         .publish       = operation.publish};
             progress.published = true;
             if (operation.script != Script::InvalidBinding) {
@@ -676,6 +703,14 @@ public:
                                                   rt::TokenMaskProvider* = nullptr) {
         auto& lane = live(sequence);
         require(lane.permit, "prefill consumed a released unit permit");
+        if (lane.script == Script::SourcePrefill && !events_.stall_released.load()) {
+            if (lane.prefill_progress + 1 >= lane.prompt_tokens) { return {}; }
+            std::this_thread::sleep_for(1ms);
+            ++lane.prefill_progress;
+            events_.record([](Events::State& state) { ++state.source_prefill_progress; });
+            return {.summary = {.prompt_tokens = lane.prompt_tokens},
+                    .processed_prompt_tokens = 1};
+        }
         if (lane.script == Script::PressureProgress && !lane.partial_progress) {
             if (!events_.snapshot().paused) return {};
             // Service is charged from real wall time. One bounded unit crosses the real
@@ -689,7 +724,9 @@ public:
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
         progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
-        progress.processed_prompt_tokens = lane.prompt_tokens - (lane.partial_progress ? 1U : 0U);
+        progress.processed_prompt_tokens = lane.prompt_tokens - lane.reused_tokens -
+                                            lane.prefill_progress -
+                                            (lane.partial_progress ? 1U : 0U);
         progress.complete                = true;
         progress.pending.emplace(std::span<const Sequence>(&sequence, 1),
                                  lane.script == Script::DeadEnd);
@@ -760,6 +797,8 @@ public:
         if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
             lanes_[sequence.lane].epoch == sequence.epoch && lanes_[sequence.lane].publish) {
             result.checkpoint = publish_checkpoint(lanes_[sequence.lane].prompt_tokens);
+            records_[result.checkpoint->index].source_prefix =
+                lanes_[sequence.lane].script == Script::SourceSeed;
         }
         result.status = release(sequence);
         return result;
@@ -857,7 +896,7 @@ public:
     // Distinct checkpoints never share a prefix key, so no request reuses another's checkpoint.
     [[nodiscard]] std::uint64_t checkpoint_key(Checkpoint checkpoint,
                                                std::uint32_t position) const {
-        (void)live_record(checkpoint);
+        if (live_record(checkpoint).source_prefix) { return position; }
         return (std::uint64_t{checkpoint.index} << 32U) | position;
     }
 
@@ -1054,6 +1093,8 @@ private:
         Script script               = Script::Complete;
         std::uint64_t epoch         = 0;
         std::uint32_t prompt_tokens = 0;
+        std::uint32_t reused_tokens = 0;
+        std::uint32_t prefill_progress = 0;
         bool publish                = false;
         bool permit                 = false;
         bool partial_progress       = false;
@@ -1064,6 +1105,7 @@ private:
         std::uint32_t lane          = 0;
         Script script               = Script::Complete;
         std::uint32_t prompt_tokens = 0;
+        std::uint32_t reused_tokens = 0;
         bool publish                = false;
     };
 
@@ -1071,6 +1113,7 @@ private:
         std::uint32_t frontier = 0;
         std::uint32_t pins     = 0;
         bool valid             = false;
+        bool source_prefix     = false;
         std::size_t host_bytes = kCheckpointHostBytes;
     };
 
@@ -1352,13 +1395,14 @@ struct Restore {
 
 class Harness {
 public:
-    explicit Harness(std::uint32_t concurrency, bool context_cache = false) {
+    explicit Harness(std::uint32_t concurrency, bool context_cache = false,
+                     rt::ContextMachineCostModel costs = rt::generic_context_machine_cost_model()) {
         instance_.program = std::make_unique<Program>(events_, gate_);
         ninfer::EngineOptions options;
         options.max_concurrency       = concurrency;
         options.max_context           = 64;
         options.context_cache.enabled = context_cache;
-        core_.emplace(instance_, device(), options, rt::generic_context_machine_cost_model());
+        core_.emplace(instance_, device(), options, std::move(costs));
     }
 
     Harness(const Harness&)            = delete;
@@ -1368,6 +1412,11 @@ public:
                                      bool observed = false,
                                      Clock::time_point pending_deadline = {}) {
         Prompt prompt{.script = script, .observed = observed ? gate_ : nullptr};
+        return submit_prompt(std::move(prompt), output_tokens, pending_deadline);
+    }
+
+    [[nodiscard]] Submission submit_prompt(Prompt prompt, std::uint32_t output_tokens,
+                                           Clock::time_point pending_deadline = {}) {
         const ninfer::PromptSummary summary{.prompt_tokens = prompt.tokens};
         rt::ResolvedRequestOptions options;
         options.execution.requested_output_tokens = output_tokens;
@@ -1652,6 +1701,56 @@ void fresh_deadline_after_pressure_progress() {
     require(outcome.stats.preemptions == 1,
             "fresh admission paused a resident instead of using the free lane");
     require_membership(harness.observed_stats(), {}, "deadline admission cleanup");
+}
+
+void source_preference_wait_is_bounded() {
+    rt::ContextMachineCostModel costs;
+    costs.prefill.token_ns_q32 = 20'000'000ULL * rt::kContextCostQ32One;
+    Harness harness(2, true, costs);
+    auto seed = harness.submit_prompt(
+        {.script = Script::SourceSeed, .tokens = kSourceFrontier, .publish_continuation = true}, 1);
+    require_finished(harness.await(seed), FinishReason::OutputLimit, "source seed");
+    auto long_request = harness.submit_prompt({.script = Script::SourcePrefill, .tokens = 32}, 1);
+    harness.events().await([](const Events::State& state) {
+        return state.source_prefill_progress != 0;
+    }, "long prefill progress before the source arrival");
+    auto arrival = harness.submit(Script::SourceArrival, 1, false, Clock::now() + 500ms);
+    harness.events().await([](const Events::State& state) { return state.source_blocked; },
+                           "the unavailable preferred source");
+    const auto outcome = harness.await(arrival);
+    // Unblock cleanup before asserting, so the predecessor fails at a bounded queue deadline.
+    harness.release_stalls();
+    require_finished(harness.await(long_request), FinishReason::OutputLimit, "source prefill cleanup");
+    require_finished(outcome, FinishReason::OutputLimit, "bounded preferred-source wait");
+    require(outcome.result->admission.preferred_reused_tokens == kSourceFrontier &&
+                outcome.result->reused_prompt_tokens == 0 &&
+                outcome.result->computed_prefill_tokens == 4 &&
+                outcome.result->admission.source_wait_seconds >= 0.05 &&
+                outcome.result->admission.fallback_reason ==
+                    ninfer::AdmissionFallbackReason::IsolatedCapacity,
+            "busy preferred source did not wait its calibrated60ms budget then recompute");
+    require(outcome.stats.running_requests == 1 && outcome.stats.prefilling_requests == 1 &&
+                outcome.stats.preemptions == 0,
+            "source fallback waited for or preempted the long prefill");
+    std::cout << "source_wait_s=" << outcome.result->admission.source_wait_seconds
+              << " preferred=" << outcome.result->admission.preferred_reused_tokens
+              << " reused=" << outcome.result->reused_prompt_tokens
+              << " computed=" << outcome.result->computed_prefill_tokens << '\n';
+    require_membership(harness.observed_stats(), {}, "source fallback cleanup");
+}
+
+void ready_source_preserves_reuse() {
+    Harness harness(2, true);
+    auto seed = harness.submit_prompt(
+        {.script = Script::SourceSeed, .tokens = kSourceFrontier, .publish_continuation = true}, 1);
+    require_finished(harness.await(seed), FinishReason::OutputLimit, "ready source seed");
+    auto arrival = harness.submit(Script::SourceArrival, 1);
+    const auto outcome = harness.await(arrival);
+    require_finished(outcome, FinishReason::OutputLimit, "ready preferred source");
+    require(outcome.result->reused_prompt_tokens == kSourceFrontier &&
+                outcome.result->computed_prefill_tokens == 1 &&
+                outcome.result->admission.fallback_reason == ninfer::AdmissionFallbackReason::None,
+            "available no-pressure source changed its reuse path");
 }
 
 void control_rejection() {
@@ -2073,6 +2172,8 @@ int main() {
         Case{"fresh_arrival_waits_behind_paused_admitted_work",
              fresh_arrival_waits_behind_paused_admitted_work},
         Case{"fresh_deadline_after_pressure_progress", fresh_deadline_after_pressure_progress},
+        Case{"source_preference_wait_is_bounded", source_preference_wait_is_bounded},
+        Case{"ready_source_preserves_reuse", ready_source_preserves_reuse},
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
