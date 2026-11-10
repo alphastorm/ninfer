@@ -310,11 +310,17 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     const auto before = engine.runtime_stats();
     std::array<unsigned, 2> first_token_counts{};
     std::array<ninfer::GenerationObservationOptions, 2> observations{kObservations, kObservations};
+    std::optional<ninfer::GenerationSchedulingObservation> second_scheduling;
     for (std::size_t i = 0; i < observations.size(); ++i) {
         observations[i].first_token = [&, i](const ninfer::GenerationFirstTokenObservation& first) {
             require(first.elapsed_since_submit_seconds > 0.0 && first.prepare_seconds >= 0.0,
                     "first-token observation has invalid time boundaries");
             ++first_token_counts[i];
+        };
+    }
+    if (cancel_stage != CancelStage::None) {
+        observations[1].scheduling = [&](const ninfer::GenerationSchedulingObservation& event) {
+            second_scheduling = event;
         };
     }
 
@@ -373,20 +379,34 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     }
     bool cancellation_requested = false;
     ninfer::RuntimeStats cancellation_observed;
+    ninfer::GenerationSchedulingObservation cancellation_target;
+    std::uint64_t replayed_at_cancellation = 0;
     std::uint32_t committed_at_cancellation = 0;
     const ninfer::CancellationView cancellation([&] {
         if (cancellation_requested) { return true; }
         if (cancel_stage == CancelStage::None) { return false; }
-        const auto stats    = engine.runtime_stats();
+        if (!second_scheduling) { return false; }
+        const auto& target = *second_scheduling;
+        const auto stats   = engine.runtime_stats();
         const bool observed = cancel_stage == CancelStage::Paused
-                                  ? stats.paused_requests == 1
-                                  : stats.replaying_requests != 0 && stats.replayed_tokens != 0;
+                                  ? target.transition ==
+                                            ninfer::GenerationSchedulingTransition::Paused &&
+                                        stats.paused_requests != 0
+                                  : target.transition ==
+                                            ninfer::GenerationSchedulingTransition::Restored &&
+                                        target.route == ninfer::GenerationRecoveryRoute::Replay &&
+                                        stats.replaying_requests != 0 &&
+                                        stats.replayed_tokens > target.global_replayed_tokens;
         if (!observed) { return false; }
-        // The second request's ticket is strictly newer: its submit follows first.start().
-        // With only these two requests, protecting the oldest resident makes it the only victim.
-        // CancellationView is checked by the consumer, including while its stream is idle; it
-        // observes actual Engine state without delaying a model callback or guessing a sleep.
+        // Pressure service can preempt either request. Observe the target's own consumer-side
+        // lifecycle, not a global paused/replaying count. Only one protected recovery runs at
+        // a time, so replay work since this target's Restored boundary belongs to this target.
         cancellation_observed     = stats;
+        cancellation_target       = target;
+        replayed_at_cancellation  = target.request_replayed_tokens;
+        if (cancel_stage == CancelStage::Replay) {
+            replayed_at_cancellation += stats.replayed_tokens - target.global_replayed_tokens;
+        }
         committed_at_cancellation = second_sink.committed_tokens();
         cancellation_requested    = true;
         return true;
@@ -461,6 +481,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         std::cout << " observed_paused=" << cancellation_observed.paused_requests
                   << " observed_replaying=" << cancellation_observed.replaying_requests
                   << " observed_replayed_tokens=" << cancellation_observed.replayed_tokens
+                  << " target_replayed_at_cancel=" << replayed_at_cancellation
                   << " published_at_cancel=" << committed_at_cancellation
                   << " returned_tokens=" << second_result.generated_token_ids.size();
     }
@@ -472,10 +493,10 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
                 after.replayed_tokens - before.replayed_tokens == totals.replayed_tokens,
             "request and Engine scheduling counters disagree");
     if (cancel_stage != CancelStage::None) {
-        require(first_result->scheduling.preemptions == 0 &&
+        require(cancellation_target.engine_request_id == second_result.engine_request_id &&
                     second_result.scheduling.preemptions != 0 &&
                     second_result.scheduling.paused_ns != 0,
-                "cancellation pressure did not preserve the oldest resident");
+                "cancellation did not observe the target request's pressure state");
         // The consumer may still have committed events queued when it observes paused state.
         // validate() checks the complete drained stream against the terminal result as well.
         require(second_result.generated_token_ids.size() >= committed_at_cancellation,
@@ -483,16 +504,11 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         require(second_result.scheduling.snapshot_restores == 0 &&
                     totals.device_to_host_bytes == 0 && totals.host_to_device_bytes == 0,
                 "Host=0 cancellation unexpectedly used a physical snapshot");
-        if (cancel_stage == CancelStage::Paused) {
-            require(second_result.scheduling.replay_restores == 0 &&
-                        second_result.scheduling.replayed_tokens == 0,
-                    "paused cancellation unexpectedly resumed execution");
-        } else {
-            require(second_result.scheduling.replayed_tokens >=
-                            cancellation_observed.replayed_tokens &&
-                        second_result.scheduling.replayed_tokens != 0,
-                    "replay cancellation lost work performed before cancellation");
-        }
+        // Observation and cancellation delivery are not atomic; preserve already observed work
+        // rather than asserting that the worker could not advance between the two boundaries.
+        require(second_result.scheduling.replayed_tokens >= replayed_at_cancellation &&
+                    (cancel_stage != CancelStage::Replay || replayed_at_cancellation != 0),
+                "cancellation lost target replay work observed before cancellation");
     } else if (snapshot) {
         require(totals.snapshot_restores != 0 && totals.device_to_host_bytes != 0 &&
                     totals.host_to_device_bytes != 0,
