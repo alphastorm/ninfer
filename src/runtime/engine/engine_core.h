@@ -1866,11 +1866,9 @@ private:
             return true;
         }
         const auto preferred_cost = resources_.source_cost(source);
-        std::uint64_t alternative_cost = UINT64_MAX;
-        for (auto i = decision.current + 1; i < decision.sources.size(); ++i) {
-            alternative_cost =
-                std::min(alternative_cost, resources_.source_cost(decision.sources[i].source));
-        }
+        // Untried quotes retain candidates()'s cost order; only the current quote is refreshed.
+        const auto alternative_cost =
+            resources_.source_cost(decision.sources[decision.current + 1].source);
         const auto allowance = alternative_cost > preferred_cost
                                    ? alternative_cost - preferred_cost
                                    : 0;
