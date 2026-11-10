@@ -265,8 +265,8 @@ bool Program::recovery_pending(SequenceHandle sequence) const noexcept {
 bool Program::has_context_operation() const noexcept { return impl_->has_context_operation(); }
 
 PrefillProgress Program::advance_prefill(SequenceHandle h, runtime::ExecutionTiming* t,
-                                         runtime::TokenMaskProvider* m) {
-    return impl_->advance_prefill(h, t, m);
+                                         runtime::TokenMaskProvider* m, std::uint32_t max_tokens) {
+    return impl_->advance_prefill(h, t, m, max_tokens);
 }
 
 ReplayProgress Program::advance_replay(SequenceHandle h, runtime::ExecutionTiming* t) {

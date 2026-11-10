@@ -197,6 +197,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--gpu-keep-warm-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-stall-budget-ms N] [--decode-rounds-per-prefill N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
@@ -231,6 +232,10 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --prefill-chunk requires a positive multiple of 128; defaults to 1024, or "
            "4096 with CPU expert offload\n"
+           "       --prefill-stall-budget-ms targets a text step's time beside a generating "
+           "request (0: off; maximum 60000; Qwen3.5 family)\n"
+           "       --decode-rounds-per-prefill sets rounds per full chunk, scaled for shorter "
+           "steps (0: legacy alternation; maximum 4096)\n"
            "       --fp32-head-logits keeps Qwen3.5-family target logits in FP32 (default off)\n"
            "       startup defaults to " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
@@ -349,6 +354,18 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--gpu-keep-warm-ms is out of range");
             }
             options.gpu_keep_warm_ms = static_cast<std::uint32_t>(milliseconds);
+        } else if (arg == "--prefill-stall-budget-ms") {
+            options.prefill_stall_budget_ms = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--prefill-stall-budget-ms"), "prefill-stall-budget-ms"));
+            if (options.prefill_stall_budget_ms > 60000) {
+                throw std::invalid_argument("--prefill-stall-budget-ms must be in [0,60000]");
+            }
+        } else if (arg == "--decode-rounds-per-prefill") {
+            options.decode_rounds_per_prefill = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--decode-rounds-per-prefill"), "decode-rounds-per-prefill"));
+            if (options.decode_rounds_per_prefill > 4096) {
+                throw std::invalid_argument("--decode-rounds-per-prefill must be in [0,4096]");
+            }
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {

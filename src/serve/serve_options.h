@@ -46,6 +46,8 @@ struct ServeOptions {
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t gpu_keep_warm_ms     = 0;
     std::uint32_t prefill_chunk        = 0;
+    std::uint32_t prefill_stall_budget_ms = 0;
+    std::uint32_t decode_rounds_per_prefill = 0;
     std::filesystem::path context_cost_presets;
     std::uint32_t log_stats_interval_ms    = 5000; // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;

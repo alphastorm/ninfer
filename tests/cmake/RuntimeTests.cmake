@@ -3,6 +3,11 @@ ninfer_add_test(ninfer_scheduler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_prefill_pacing_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_prefill_pacing.cpp"
+  LIBRARIES ninfer_runtime_support)
+
 ninfer_add_test(ninfer_speculative_metrics_test
   HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_speculative_metrics.cpp")

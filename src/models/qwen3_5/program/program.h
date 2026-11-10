@@ -541,9 +541,12 @@ public:
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
     // A resumed binding retains its complete recovery capacity until committed new progress.
     [[nodiscard]] bool recovery_pending(SequenceHandle sequence) const noexcept;
+    // max_tokens only shortens text execution within the existing full-chunk permit.
+    // Zero and media prompts retain the planned step; capture boundaries remain authoritative.
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
                                                   runtime::ExecutionTiming* failed_timing = nullptr,
-                                                  runtime::TokenMaskProvider* masks = nullptr);
+                                                  runtime::TokenMaskProvider* masks = nullptr,
+                                                  std::uint32_t max_tokens = 0);
     [[nodiscard]] ReplayProgress advance_replay(SequenceHandle sequence,
                                                 runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,

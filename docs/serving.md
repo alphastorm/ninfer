@@ -921,6 +921,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--gpu-keep-warm-ms N` | bounded idle GPU warming window after real work; `0` disables it | `0` |
 | `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
+| `--prefill-stall-budget-ms N` | estimated text-prefill step budget beside a generating request, in milliseconds; `0` disables; maximum `60000`; Qwen3.5 family only | `0` |
+| `--decode-rounds-per-prefill N` | completed decode rounds per full prefill chunk; proportionally fewer for shorter steps; `0` keeps legacy alternation; maximum `4096` | `0` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
@@ -970,6 +972,31 @@ the hardware and a signature derived from the actual Text/Vision configuration, 
 A new representation without a matching measurement uses generic prefill coefficients. A malformed
 file aborts startup; the operational context-cost record and JSONL `server_start` identify the
 selected source.
+
+### Opt-in prefill pacing
+
+By default, the worker runs one decode round and one ready prefill/replay unit per cycle.
+Fresh requests can already be admitted while another request prefills, subject to free lanes,
+resource availability and the admitted-request pressure/recovery gate. Pacing does not bypass
+that gate or promise admission when all lanes are occupied.
+
+`--prefill-stall-budget-ms 250` keeps full chunks for solo prompts, but caps text steps while
+another resident request generates. The existing prefill cost model, corrected by observed
+text-step times, selects the largest 128-token multiple expected to fit. This is a latency
+target, **not a hard deadline**: minimum-sized steps, prediction error and indivisible media work
+can exceed it. Media prompts retain their planned steps. Pressure owners, protected recovery
+and replay are exempt. Full-chunk resource reservations and capture boundaries remain intact.
+
+`--decode-rounds-per-prefill 16` grants sixteen completed decode rounds per full chunk while
+decode can run. A shorter prefill step receives proportionally fewer rounds (rounded up, at
+least one); a short arrival need not wait a full chunk's cadence. If decode cannot execute,
+prefill proceeds immediately. Higher values improve streaming service at the cost of prompt
+completion time. Neither flag changes the other flag's default.
+
+Both options default to zero, retaining the existing execution schedule and chunk geometry.
+When enabled, different chunk boundaries or batch membership can change floating-point results;
+measure output parity and latency on the intended profile before enabling them. There is no
+recommended enabled profile default without that measurement.
 
 Engine selects sampling defaults from the loaded architecture and the request's resolved thinking mode.
 Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
@@ -1068,6 +1095,8 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_requests_running`, `waiting`, `paused`, `prefilling`, `decode_ready`, `replaying`, `materializing` | Current Engine gauges; prefill/decode/replay are subsets of resident requests |
 | `ninfer_prompt_tokens_total`, `ninfer_prompt_tokens_cached_total` | Full input and reused tokens counted once on initial binding |
 | `ninfer_prefill_tokens_total`, `ninfer_replayed_tokens_total` | Actual initial prefill and separate recovery recomputation |
+| `ninfer_paced_prefill_steps_total`, `ninfer_paced_prefill_deferred_tokens_total` | Steps executed with a shortened budget cap, and nominal tokens left for later by those steps (including earlier capture boundaries) |
+| `ninfer_prefill_cadence_deferrals_total`, `ninfer_prefill_budget_overruns_total` | Ready prefill units deferred for decode cadence; text steps beside a generating request exceeding the enabled budget |
 | `ninfer_generation_tokens_total`, `ninfer_decode_tokens_total` | All committed outputs, or decode/control outputs excluding the first token; include thinking and injected control tokens |
 | `ninfer_spec_decode_{rounds,draft_tokens,accepted_tokens,fallback_steps}_total` | Live native speculative work, including MTP and DFlash/DFlash2 |
 | `ninfer_{preemptions,snapshot_restores,replay_restores}_total` | Pressure pauses and recovery routes |

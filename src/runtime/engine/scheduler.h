@@ -142,6 +142,24 @@ public:
 
     void prefill_executed(std::uint32_t lane, std::uint32_t concurrency) noexcept {
         prefill_cursor_ = (lane + 1U) % concurrency;
+        decode_since_prefill_ = 0;
+    }
+
+    void decode_executed() noexcept {
+        if (decode_since_prefill_ != UINT32_MAX) ++decode_since_prefill_;
+    }
+
+    void reset_prefill_cadence() noexcept { decode_since_prefill_ = 0; }
+
+    // Charge only actual decode rounds. An unready decoder must never hold up prefill.
+    // Scaling down for a short tail lets a small arrival run after one round.
+    [[nodiscard]] bool prefill_due(bool decoded, std::uint32_t tokens, std::uint32_t chunk,
+                                   std::uint32_t rounds) const noexcept {
+        if (!decoded || rounds == 0) return true;
+        chunk = std::max(chunk, 1U);
+        const auto needed = std::max<std::uint64_t>(
+            1, (std::uint64_t{rounds} * std::min(tokens, chunk) + chunk - 1) / chunk);
+        return decode_since_prefill_ >= needed;
     }
 
     // Queue/capacity changes start a bounded pass. Ordinary decode cycles only continue
@@ -328,6 +346,7 @@ public:
 
 private:
     std::uint32_t prefill_cursor_      = 0;
+    std::uint32_t decode_since_prefill_ = 0;
     std::uint64_t scan_after_          = 0;
     std::uint64_t admission_scan_head_ = 0;
     std::vector<std::uint64_t> admission_scan_remaining_;

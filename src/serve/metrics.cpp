@@ -184,6 +184,14 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
     COUNTER(decode_rounds, "decode_rounds_total", "Decode batch executions.");
     COUNTER(decode_row_rounds, "decode_row_rounds_total", "Sum of decode batch sizes.");
     COUNTER(numerical_failures, "numerical_failures_total", "Request-local numerical failures.");
+    COUNTER(paced_prefill_steps, "paced_prefill_steps_total",
+            "Text-prefill steps executed with a shortened stall-budget cap.");
+    COUNTER(paced_prefill_deferred_tokens, "paced_prefill_deferred_tokens_total",
+            "Nominal prompt tokens left for later by capped prefill steps.");
+    COUNTER(prefill_cadence_deferrals, "prefill_cadence_deferrals_total",
+            "Ready prefill units deferred for configured decode rounds.");
+    COUNTER(prefill_budget_overruns, "prefill_budget_overruns_total",
+            "Text-prefill steps beside a generating request exceeding the enabled budget.");
     COUNTER(preemptions, "preemptions_total", "Resource-pressure pauses.");
     COUNTER(snapshot_restores, "snapshot_restores_total",
             "Restores from complete paused snapshots.");

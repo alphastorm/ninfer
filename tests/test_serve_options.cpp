@@ -107,6 +107,33 @@ int main() {
     }
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(defaults.prefill_stall_budget_ms == 0 &&
+                          defaults.decode_rounds_per_prefill == 0,
+                      "prefill pacing must default to disabled");
+    for (const auto value : {0U, 250U, 500U, 60000U}) {
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--prefill-stall-budget-ms",
+                                 std::to_string(value)}).prefill_stall_budget_ms == value,
+                          "prefill stall budget was not preserved");
+    }
+    for (const auto value : {0U, 1U, 16U, 64U, 4096U}) {
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--decode-rounds-per-prefill",
+                                 std::to_string(value)}).decode_rounds_per_prefill == value,
+                          "decode cadence was not preserved");
+    }
+    for (const char* flag : {"--prefill-stall-budget-ms", "--decode-rounds-per-prefill"}) {
+        for (const char* value : {"-1", "60001", "4294967296", "", "nan"}) {
+            bool rejected = false;
+            try { (void)parse({"ninfer-serve", "model.ninfer", flag, value}); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            failures += check(rejected, "invalid prefill pacing option was accepted");
+        }
+        failures += check(serve_usage_text("ninfer-serve").find(flag) != std::string::npos,
+                          "serve help omitted a pacing option");
+    }
+    bool invalid_rounds_rejected = false;
+    try { (void)parse({"ninfer-serve", "model.ninfer", "--decode-rounds-per-prefill", "4097"}); }
+    catch (const std::invalid_argument&) { invalid_rounds_rejected = true; }
+    failures += check(invalid_rounds_rejected, "decode cadence exceeded its bound");
     failures += check(defaults.gpu_keep_warm_ms == 0, "GPU keep-warm must default to disabled");
     for (const auto value : {0U, 60000U, std::numeric_limits<std::uint32_t>::max()}) {
         failures += check(parse({"ninfer-serve", "model.ninfer", "--gpu-keep-warm-ms",
