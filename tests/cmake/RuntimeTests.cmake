@@ -29,7 +29,10 @@ ninfer_add_test(ninfer_engine_core_test
 # DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA
 # runtime so a GPU-less host runs the production EngineCore without CUDA work.
 ninfer_cuda_test_interposition(ninfer_engine_core_test ninfer_runtime_support)
-if(NOT WIN32)
+if(WIN32)
+  set_tests_properties(ninfer_engine_core_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
   foreach(symbol IN ITEMS cudaGetDeviceCount cudaSetDevice cudaSetDeviceFlags
       cudaGetDeviceProperties cudaGetDeviceProperties_v2 cudaStreamCreateWithFlags
       cudaStreamDestroy)
