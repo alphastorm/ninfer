@@ -188,6 +188,10 @@ public:
         bool export_blocked   = false;
         bool victim_finished  = false;
         bool pressure_finished_before_victim = false;
+        bool decode_held = false;
+        bool decode_released = false;
+        std::uint32_t decode_rounds = 0;
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> prefill_steps;
     };
 
     template <class Update>
@@ -235,6 +239,8 @@ enum class Script : std::uint8_t {
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
     VictimResume,    // Stall; can pause and restore, for younger-owner handoff.
     ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
+    PacingDecode,   // Hold the first decode until the test has submitted its neighbour.
+    PacingPrefill,  // Chunked text work, recording executed caps and intervening decode rounds.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
@@ -668,13 +674,32 @@ public:
 
     [[nodiscard]] PrefillProgress advance_prefill(Sequence sequence,
                                                   rt::ExecutionTiming* = nullptr,
-                                                  rt::TokenMaskProvider* = nullptr) {
-        const auto& lane = live(sequence);
+                                                  rt::TokenMaskProvider* = nullptr,
+                                                  std::uint32_t max_tokens = 0) {
+        auto& lane = live(sequence);
         require(lane.permit, "prefill consumed a released unit permit");
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
         progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
         progress.processed_prompt_tokens = lane.prompt_tokens;
+        if (lane.script == Script::PacingPrefill) {
+            const auto prefix = lane.prefilled;
+            progress.processed_prompt_tokens = std::min(
+                lane.prompt_tokens - lane.prefilled,
+                max_tokens ? std::min(max_tokens, kPrefillChunk) : kPrefillChunk);
+            lane.prefilled += progress.processed_prompt_tokens;
+            lane.permit = false;
+            events_.record([&](Events::State& state) {
+                state.prefill_steps.emplace_back(progress.processed_prompt_tokens,
+                                                  state.decode_rounds);
+            });
+            // Deterministic timing independent of the host's clock or thread scheduling.
+            progress.timing.device_wait_ns =
+                rt::generic_context_machine_cost_model().prefill_ns(rt::make_prefill_work(
+                    prefix, progress.processed_prompt_tokens, 0, 0,
+                    progress.processed_prompt_tokens));
+            if (lane.prefilled != lane.prompt_tokens) return progress;
+        }
         progress.complete                = true;
         progress.pending.emplace(std::span<const Sequence>(&sequence, 1),
                                  lane.script == Script::DeadEnd);
@@ -691,6 +716,12 @@ public:
                                       rt::TokenMaskProvider* = nullptr) {
         for (const auto sequence : sequences) {
             require(live(sequence).permit, "decode consumed a released unit permit");
+            if (live(sequence).script == Script::PacingDecode) {
+                events_.record([](Events::State& state) { state.decode_held = true; });
+                events_.await([](const Events::State& state) { return state.decode_released; },
+                              "the test's decode release");
+                events_.record([](Events::State& state) { ++state.decode_rounds; });
+            }
             if (live(sequence).script == Script::DecodeFailure) {
                 throw std::logic_error("injected decode failure");
             }
@@ -1041,6 +1072,7 @@ private:
         std::uint32_t prompt_tokens = 0;
         bool publish                = false;
         bool permit                 = false;
+        std::uint32_t prefilled      = 0;
     };
 
     struct Operation {
@@ -1336,11 +1368,16 @@ struct Restore {
 
 class Harness {
 public:
-    explicit Harness(std::uint32_t concurrency, bool context_cache = false) {
+    explicit Harness(std::uint32_t concurrency, bool context_cache = false,
+                     std::uint32_t stall_budget = 0, std::uint32_t decode_rounds = 0,
+                     std::uint32_t max_context = 64) {
         instance_.program = std::make_unique<Program>(events_, gate_);
         ninfer::EngineOptions options;
         options.max_concurrency       = concurrency;
-        options.max_context           = 64;
+        options.max_context           = max_context;
+        options.prefill_chunk         = kPrefillChunk;
+        options.prefill_stall_budget_ms = stall_budget;
+        options.decode_rounds_per_prefill = decode_rounds;
         options.context_cache.enabled = context_cache;
         core_.emplace(instance_, device(), options, rt::generic_context_machine_cost_model());
     }
@@ -1350,8 +1387,10 @@ public:
 
     [[nodiscard]] Submission submit(Script script, std::uint32_t output_tokens,
                                      bool observed = false,
-                                     Clock::time_point pending_deadline = {}) {
-        Prompt prompt{.script = script, .observed = observed ? gate_ : nullptr};
+                                     Clock::time_point pending_deadline = {},
+                                     std::uint32_t prompt_tokens = 4) {
+        Prompt prompt{.script = script, .tokens = prompt_tokens,
+                      .observed = observed ? gate_ : nullptr};
         const ninfer::PromptSummary summary{.prompt_tokens = prompt.tokens};
         rt::ResolvedRequestOptions options;
         options.execution.requested_output_tokens = output_tokens;
@@ -1617,6 +1656,53 @@ void fresh_arrival_waits_behind_paused_admitted_work() {
     harness.release_stalls();
     require_finished(harness.await(owner), FinishReason::OutputLimit, "pressure cleanup");
     require_membership(harness.observed_stats(), {}, "fresh admission cleanup");
+}
+
+void prefill_pacing_and_disabled_schedule() {
+    for (const auto [budget, rounds] : {std::pair{0U, 0U}, std::pair{0U, 4U},
+                                       std::pair{25U, 4U}}) {
+        Harness harness(2, false, budget, rounds, 16384);
+        auto stream = harness.submit(Script::PacingDecode, 256);
+        harness.events().await([](const Events::State& state) { return state.decode_held; },
+                               "the generating neighbour");
+        auto prompt = harness.submit(Script::PacingPrefill, 1, false, {}, 4096);
+        harness.events().record([](Events::State& state) { state.decode_released = true; });
+        const auto result = harness.await(prompt, false, Clock::now() + kEventTimeout);
+        require_finished(result, FinishReason::OutputLimit, "paced prefill");
+        require_finished(harness.await(stream), FinishReason::OutputLimit, "paced decoder");
+        const auto steps = harness.events().snapshot().prefill_steps;
+        require(steps.size() == (budget ? 32U : 4U), "pacing lost or duplicated prompt chunks");
+        for (std::size_t i = 0; i < steps.size(); ++i) {
+            require(steps[i].first == (budget ? 128U : kPrefillChunk),
+                    "Engine did not propagate the text cap");
+            if (i != 0) {
+                const auto expected_rounds = budget || rounds == 0 ? 1U : rounds;
+                require(steps[i].second - steps[i - 1].second == expected_rounds,
+                        "Engine changed disabled alternation or ignored decode cadence");
+            }
+        }
+        const auto stats = harness.observed_stats();
+        require(stats.computed_prefill_tokens == 4100, "paced work was counted more than once");
+        require((stats.paced_prefill_steps != 0) == (budget != 0) &&
+                    (stats.prefill_cadence_deferrals != 0) == (rounds != 0 && budget == 0),
+                "pacing counters disagreed with actual execution");
+    }
+}
+
+void short_arrival_during_staged_prefill() {
+    // The base already admits during staged prefill. Both off and on must preserve it.
+    for (const auto budget : {0U, 250U}) {
+        Harness harness(2, false, budget, budget ? 64U : 0U);
+        auto long_prompt = harness.submit(Script::Stall, 1);
+        harness.events().await([](const Events::State& state) { return state.bound == 1; },
+                               "staged long prefill");
+        auto arrival = harness.submit(Script::Complete, 1);
+        const auto result = harness.await(arrival, false, Clock::now() + kEventTimeout);
+        require_finished(result, FinishReason::OutputLimit, "short prefill arrival");
+        require_membership(result.stats, {.running = 1}, "arrival beside staged prefill");
+        harness.release_stalls();
+        require_finished(harness.await(long_prompt), FinishReason::OutputLimit, "staged prefill");
+    }
 }
 
 void control_rejection() {
@@ -2037,6 +2123,8 @@ int main() {
              younger_pressure_owner_progresses_before_older_finishes},
         Case{"fresh_arrival_waits_behind_paused_admitted_work",
              fresh_arrival_waits_behind_paused_admitted_work},
+        Case{"prefill_pacing_and_disabled_schedule", prefill_pacing_and_disabled_schedule},
+        Case{"short_arrival_during_staged_prefill", short_arrival_during_staged_prefill},
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},

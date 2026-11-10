@@ -330,6 +330,14 @@ transport 通过队列、原子 cancellation flag 和 response event 交互。
 再执行可运行的 control、decode 和一个 prefill/Replay chunk。受保护恢复优先取得 chunk；其余 prefill
 在 resident 间轮转，decode 批次使用实际 `B`。
 
+Opt-in prefill pacing leaves that default cycle unchanged. `decode_rounds_per_prefill` counts
+actual completed decode rounds before a normal prefill unit, scaled to the unit's token count.
+When decode cannot execute, prefill does not wait. `prefill_stall_budget_ms` uses the existing
+machine cost model with observed text-step correction to cap a concurrent text unit; Native
+executes at most that cap within its unchanged full-chunk permit, then settles unused growth.
+Capture frontiers and final-chunk sampling remain authoritative. Pressure-owner, recovery and
+Replay work bypass pacing; the fresh-admission gate and durable checkpoint contracts are unchanged.
+
 Program 的 `reserve_units` 原子取得一个调用集合的 typed 增量需求；Engine 逐行调用，组成可运行
 子集。一行缺资源不会阻止其他已许可行执行。普通 unit 结算释放未用 reservation 与 provisional
 suffix；恢复许可保留未来重建及首新单元尚需的 reservation。压力可以回收 optional cache、撤销

@@ -23,6 +23,10 @@ int main() {
     memory.kv_capacity_page_groups     = 256;
     memory.host_context_capacity_bytes = 1048576;
     RuntimeStats baseline;
+    baseline.paced_prefill_steps = 1;
+    baseline.paced_prefill_deferred_tokens = 128;
+    baseline.prefill_cadence_deferrals = 2;
+    baseline.prefill_budget_overruns = 1;
     baseline.generated_tokens         = 4;
     baseline.speculative_draft_tokens = 3;
     baseline.speculative_accepted_tokens = 1;
@@ -31,6 +35,10 @@ int main() {
     Metrics metrics;
     metrics.configure("custom\"model\\name\nline", options, memory, baseline);
     RuntimeStats running = baseline;
+    running.paced_prefill_steps += 3;
+    running.paced_prefill_deferred_tokens += 4096;
+    running.prefill_cadence_deferrals += 8;
+    running.prefill_budget_overruns += 2;
     running.generated_tokens += 5;
     running.speculative_draft_tokens += 6;
     running.speculative_accepted_tokens += 3;
@@ -44,6 +52,11 @@ int main() {
     running.context_transfers.kv[2][1].bytes = 8192;
     metrics.first_token({.prepare_seconds = 0.05, .elapsed_since_submit_seconds = 0.2});
     const auto live = metrics.render(running, true);
+    check(live.find("ninfer_paced_prefill_steps_total 3\n") != std::string::npos &&
+              live.find("ninfer_paced_prefill_deferred_tokens_total 4096\n") != std::string::npos &&
+              live.find("ninfer_prefill_cadence_deferrals_total 8\n") != std::string::npos &&
+              live.find("ninfer_prefill_budget_overruns_total 2\n") != std::string::npos,
+          "pacing counters must be live and exclude startup warmup");
     check(live.find("ninfer_generation_tokens_total 5\n") != std::string::npos,
           "live generated count must exclude startup warmup");
     check(live.find("ninfer_spec_decode_draft_tokens_total 6\n") != std::string::npos,

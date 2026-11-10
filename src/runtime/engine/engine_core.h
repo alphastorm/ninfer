@@ -12,6 +12,7 @@
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
 #include "runtime/engine/scheduler.h"
+#include "runtime/engine/prefill_pacing.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/prefix_reuse_path.h"
 #include "text/grammar.h"
@@ -92,6 +93,9 @@ public:
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           keep_warm_grace_(std::chrono::milliseconds(options.gpu_keep_warm_ms)),
           checkpoint_cache_enabled_(options.context_cache.enabled),
+          prefill_chunk_(std::max(options.prefill_chunk, 1U)),
+          decode_rounds_per_prefill_(options.decode_rounds_per_prefill),
+          prefill_pacing_(options.prefill_stall_budget_ms, context_cost),
           resources_(options.context_cache.enabled, std::move(context_cost)) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
@@ -1527,8 +1531,35 @@ private:
         }
     }
 
+    [[nodiscard]] std::uint32_t planned_prefill_tokens(const Request& request) const noexcept {
+        const auto& begin = *request.admitted_begin;
+        return std::min(prefill_chunk_, begin.prompt_tokens - begin.reused_prompt_tokens -
+                                           request.computed_prompt_tokens);
+    }
+
+    [[nodiscard]] bool other_lane_streaming(std::uint32_t lane) const noexcept {
+        for (std::uint32_t other = 0; other < max_concurrency_; ++other) {
+            const auto& request = slots_[other];
+            if (other != lane && request &&
+                !request->cancelled.load(std::memory_order_acquire) &&
+                (request->is_decode_ready() || request->is_control_ready())) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::uint32_t paced_prefill_cap(std::uint32_t lane) const noexcept {
+        const auto& request = *slots_[lane];
+        if (!prefill_pacing_.enabled() || request.prompt_summary.has_media ||
+            !other_lane_streaming(lane)) return 0;
+        return prefill_pacing_.cap(
+            std::uint64_t{request.admitted_begin->reused_prompt_tokens} +
+                request.computed_prompt_tokens,
+            planned_prefill_tokens(request));
+    }
+
     void run_prefill_step(std::uint32_t lane,
-                          const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+                          const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start,
+                          std::uint32_t max_tokens) {
         nvtx::ScopedRange prefill_range(nvtx::Name::Prefill, nvtx::Category::Prefill);
         EnginePhaseScope setup(*this, EngineHostPhase::CommitOutput);
         const auto request = slots_[lane];
@@ -1545,9 +1576,36 @@ private:
         ProgramCallScope program_call(*this);
         const auto before = progress_mark(*request);
         const auto started = Clock::now();
-        auto progress = instance_.program->advance_prefill(*request->sequence,
-                                                           &program_call.failed_timing(), provider);
+        auto progress = [&] {
+            if constexpr (requires {
+                instance_.program->advance_prefill(*request->sequence,
+                                                   &program_call.failed_timing(), provider,
+                                                   max_tokens);
+            }) {
+                return instance_.program->advance_prefill(
+                    *request->sequence, &program_call.failed_timing(), provider, max_tokens);
+            } else {
+                // Other architectures retain their native step sizing; startup rejects budgets.
+                return instance_.program->advance_prefill(
+                    *request->sequence, &program_call.failed_timing(), provider);
+            }
+        }();
         program_call.finish(progress.timing);
+        if (prefill_pacing_.enabled() && !request->prompt_summary.has_media) {
+            const auto elapsed = progress.timing.elapsed_ns();
+            const auto prefix = std::uint64_t{request->admitted_begin->reused_prompt_tokens} +
+                                request->computed_prompt_tokens;
+            prefill_pacing_.observe(prefix, progress.processed_prompt_tokens, elapsed);
+            if (max_tokens != 0 && progress.processed_prompt_tokens != 0) {
+                ++cumulative_stats_.paced_prefill_steps;
+                cumulative_stats_.paced_prefill_deferred_tokens +=
+                    planned_prefill_tokens(*request) - progress.processed_prompt_tokens;
+            }
+            if (!scheduler_.progress_owner() && !request->recovery_pending &&
+                other_lane_streaming(lane) && prefill_pacing_.over_budget(elapsed)) {
+                ++cumulative_stats_.prefill_budget_overruns;
+            }
+        }
         if (!request->first_output_timing) {
             record_execution_work(request->prefill_work, progress.timing);
         }
@@ -2697,6 +2755,7 @@ private:
                 if (!decode.empty()) {
                     set_host_work_class(HostWorkClass::Decode, decode.lane_span());
                     run_decode_round(decode, cancelled);
+                    if (decode_rounds_per_prefill_ != 0) scheduler_.decode_executed();
                     executed = true;
                 }
                 if (instance_.program->has_context_operation()) {
@@ -2719,35 +2778,50 @@ private:
                 }
                 if (const auto lane = scheduler_.next_prefill(prefill_slots, max_concurrency_)) {
                     const auto request = slots_[*lane];
-                    set_host_work_class(HostWorkClass::Prefill);
-                    if (request->is_replaying()) {
-                        ProgramCallScope call(*this);
-                        const auto replay_started = Clock::now();
-                        auto progress = instance_.program->advance_replay(*request->sequence,
-                                                                          &call.failed_timing());
-                        call.finish(progress.timing);
-                        scheduler_.recovery_work(request->id, elapsed_ns(replay_started, Clock::now()));
-                        if (!request->first_output_timing) {
-                            record_execution_work(request->replay_work, progress.timing);
-                        }
-                        request->replayed_tokens += progress.processed_tokens;
-                        cumulative_stats_.replayed_tokens += progress.processed_tokens;
-                        if (progress.capture_ready) {
-                            reserve_active_capture(request, EngineRequestState::Replay);
-                        }
-                        if (progress.complete) {
-                            ++cumulative_stats_.replay_restores;
-                            ++request->replay_restores;
-                            request->model_state = request->resume_phase;
-                            observe_scheduling(request,
-                                               GenerationSchedulingTransition::ReplayComplete);
-                        }
+                    // Do not delay pressure turns or replay/recovery with optional pacing.
+                    const bool pace = !scheduler_.progress_owner() && !recovering &&
+                                      request->is_prefilling();
+                    const auto cap = pace ? paced_prefill_cap(*lane) : 0U;
+                    const auto tokens = pace && decode_rounds_per_prefill_ != 0
+                        ? (cap ? cap : planned_prefill_tokens(*request)) : 0U;
+                    const bool due = !pace || scheduler_.prefill_due(
+                        !decode.empty(), tokens, prefill_chunk_, decode_rounds_per_prefill_);
+                    if (!due) {
+                        ++cumulative_stats_.prefill_cadence_deferrals;
                     } else {
-                        run_prefill_step(*lane, snapshot_cancellations());
+                        set_host_work_class(HostWorkClass::Prefill);
+                        if (request->is_replaying()) {
+                            ProgramCallScope call(*this);
+                            const auto replay_started = Clock::now();
+                            auto progress = instance_.program->advance_replay(
+                                *request->sequence, &call.failed_timing());
+                            call.finish(progress.timing);
+                            scheduler_.recovery_work(
+                                request->id, elapsed_ns(replay_started, Clock::now()));
+                            if (!request->first_output_timing) {
+                                record_execution_work(request->replay_work, progress.timing);
+                            }
+                            request->replayed_tokens += progress.processed_tokens;
+                            cumulative_stats_.replayed_tokens += progress.processed_tokens;
+                            if (progress.capture_ready) {
+                                reserve_active_capture(request, EngineRequestState::Replay);
+                            }
+                            if (progress.complete) {
+                                ++cumulative_stats_.replay_restores;
+                                ++request->replay_restores;
+                                request->model_state = request->resume_phase;
+                                observe_scheduling(request,
+                                                   GenerationSchedulingTransition::ReplayComplete);
+                            }
+                        } else {
+                            run_prefill_step(*lane, snapshot_cancellations(), cap);
+                        }
+                        scheduler_.prefill_executed(*lane, max_concurrency_);
+                        update_recovery(request);
+                        executed = true;
                     }
-                    scheduler_.prefill_executed(*lane, max_concurrency_);
-                    update_recovery(request);
-                    executed = true;
+                } else if (decode_rounds_per_prefill_ != 0) {
+                    scheduler_.reset_prefill_cadence();
                 }
                 publish_runtime_stats();
             } catch (...) {
@@ -2774,6 +2848,9 @@ private:
     const std::chrono::milliseconds pending_timeout_;
     const std::chrono::milliseconds keep_warm_grace_;
     const bool checkpoint_cache_enabled_;
+    const std::uint32_t prefill_chunk_;
+    const std::uint32_t decode_rounds_per_prefill_;
+    PrefillPacing prefill_pacing_;
     ResourceManagement resources_;
     CheckpointControl checkpoints_;
     std::mutex checkpoint_provider_mutex_;
