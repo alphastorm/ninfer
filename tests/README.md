@@ -79,7 +79,12 @@ from this Op test.
 ## Build and run
 
 `ninfer_recovery_loss_test` exercises the pure checkpoint scoring used by Qwen3.5's native
-reclaim adapter, without CUDA, weights or an Engine. It is selected by every host CI lane.
+reclaim adapter, without CUDA, weights or an Engine. Its 4,000 randomized independent-oracle
+queries (plus permutations), stale/duplicate handles and generation identity protect score
+equivalence. Operation-count scale checks bound membership and validity/frontier lookups without
+wall-clock thresholds. It is selected by every host CI lane.
+`ninfer_qwen3_5_binding_resume_test` is GPU-free and checks the production no-replay predicate for
+fresh, zero-frontier, exact-frontier, partial and beyond-frontier bindings in every host lane.
 `ninfer_free_extents_test` checks first-fit and grouped placement without backing memory.
 `ninfer_host_context_arena_test` uses the real arena and pinned-buffer owner with only the CUDA
 allocation/free boundary interposed; fragmentation, returned ranges and rollback run on CPU CI.
@@ -90,6 +95,9 @@ that GPU fixture is not part of host-only qualification.
 `ninfer_scheduler_test` ports upstream pressure handoff, continuous contention and bounded recovery
 allowance cases, retaining the fork's C2 cancellation/compaction case. The real scripted EngineCore
 fixture checks younger-owner progress and fresh-request deadline expiry while admitted work is paused.
+It also checks a fresh request completing before its deadline during continuing pressure, through
+the bounded rotation window without an additional resident preemption. Scheduler tests bound that
+window to one insertion per full service cycle and forbid it during protected recovery.
 It also bounds isolated-restore refusal and verifies that its retained fresh-admission notification
 admits queued work exactly once after the impossible paused owner is retired.
 `ninfer_operational_failure_test` links the real log renderers and request-event classification
@@ -473,6 +481,13 @@ Snapshot/Replay recovery and cancellation while paused or replaying; `NINFER_PRE
 selects `all`, `snapshot`, `replay`, `cancel-paused` or `cancel-replay`. Native transaction tests cover
 physical state/KV ownership, binding, capture, reclamation and abort; their positional backend is
 `none`, `mtp`, `dflash` or `dflash2`. Each backend requires an artifact containing that component.
+`NINFER_NATIVE_TRANSACTION_SCENARIO=zero-frontier` isolates a pause before the first prefill chunk;
+`catalog-frontier` isolates compatible exact-frontier resume, incompatible-source refusal and
+backend coverage. The full fixture runs both, plus nonempty Replay/Snapshot recovery. Replay
+frontier/completion assertions use native control state without an observability schema change.
+The real preemption fixture requests 512 output tokens and selects page geometry that requires
+preemption even if only one request grows while its peer remains at the initial frontier; either
+complete request still fits alone.
 `ninfer_qwen3_5_checkpoint_reclaim_real_test` requires the DFlash2 artifact and checks a Host-only
 victim import under capacity pressure. Its release callback must observe exactly one complete
 native validation and two pins; pressure settlement independently validates and re-pins before

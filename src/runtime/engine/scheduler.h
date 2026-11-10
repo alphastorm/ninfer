@@ -8,10 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace ninfer::runtime {
@@ -208,9 +210,17 @@ public:
 
     void admitted(const std::deque<RequestPtr>& fresh, const Request& admitted,
                   std::uint32_t concurrency) {
+        if (pressure_ && !fresh_admitting_)
+            throw std::logic_error("fresh pressure admission requires a bounded window");
         for (const auto& skipped : fresh) {
             if (skipped->id == admitted.id) {
-                service_order_.push_back(admitted.id);
+                if (pressure_) {
+                    service_order_.push_front(admitted.id);
+                    reset_service();
+                    rotations_since_fresh_ = 0;
+                } else {
+                    service_order_.push_back(admitted.id);
+                }
                 return;
             }
             if (skipped->admission_bypasses >= concurrency) {
@@ -253,26 +263,43 @@ public:
     }
 
     // Called at a safe Engine boundary. Waiting and recovery never expire a turn.
-    bool advance_service(bool have_paused, bool recovering) noexcept {
+    bool advance_service(bool have_paused, bool recovering, bool have_fresh) noexcept {
         if (!pressure_ || recovering || !served_) return false;
         if (service_ns_ < std::max(service_quantum_ns, recovery_ns_) && service_order_.size() > 1)
             return false;
         if (!have_paused && (!contended_ || service_order_.size() <= 1)) {
             pressure_ = false;
+            fresh_window_ = false;
+            rotations_since_fresh_ = std::numeric_limits<std::size_t>::max();
             begin_admission_scan();
         } else {
             std::rotate(service_order_.begin(), service_order_.begin() + 1, service_order_.end());
+            if (rotations_since_fresh_ != std::numeric_limits<std::size_t>::max())
+                ++rotations_since_fresh_;
+            fresh_window_ = have_fresh && rotations_since_fresh_ >= service_order_.size();
         }
         reset_service();
         contended_ = false;
         return true;
     }
 
+    [[nodiscard]] bool take_fresh_window() noexcept {
+        if (!std::exchange(fresh_window_, false)) return false;
+        fresh_admitting_ = true;
+        return true;
+    }
+
+    void end_fresh_window() noexcept { fresh_admitting_ = false; }
+
     void finished(std::uint64_t request) noexcept {
         const bool owner = progress_owner() == request;
         std::erase(service_order_, request);
         if (owner) reset_service();
-        if (service_order_.empty()) pressure_ = false;
+        if (service_order_.empty()) {
+            pressure_ = false;
+            fresh_window_ = false;
+            rotations_since_fresh_ = std::numeric_limits<std::size_t>::max();
+        }
         begin_admission_scan();
     }
 
@@ -311,6 +338,9 @@ private:
     bool served_               = false;
     std::uint64_t service_ns_  = 0;
     std::uint64_t recovery_ns_ = 0;
+    bool fresh_window_         = false;
+    bool fresh_admitting_      = false;
+    std::size_t rotations_since_fresh_ = std::numeric_limits<std::size_t>::max();
 
     void reset_service() noexcept {
         served_      = false;

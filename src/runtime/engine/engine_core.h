@@ -1631,6 +1631,7 @@ private:
                                                       : EngineRequestState::Prefill;
             if (control.resumed) {
                 if (!progress.replaying) {
+                    // Includes exact catalog restores and the empty-root Direct route.
                     ++cumulative_stats_.snapshot_restores;
                     ++request->snapshot_restores;
                 }
@@ -2614,8 +2615,13 @@ private:
                 if (!paused_.empty() && !scheduler_.progress_owner()) {
                     scheduler_.require_progress(paused_.front()->id);
                 }
+                bool have_fresh = false;
+                if (scheduler_.progress_owner() && !recovering) {
+                    std::lock_guard lock(queue_mutex_);
+                    have_fresh = !pending_.empty();
+                }
                 if (!instance_.program->has_context_operation() &&
-                    scheduler_.advance_service(!paused_.empty(), recovering)) {
+                    scheduler_.advance_service(!paused_.empty(), recovering, have_fresh)) {
                     std::array<SequenceHandle, kMaximumConcurrency> sequences{};
                     std::size_t count = 0;
                     for (const auto& request : slots_) {
@@ -2624,6 +2630,20 @@ private:
                     instance_.program->release_units(std::span(sequences).first(count));
                     admission_decision_.reset();
                     request_admission_check();
+                }
+                if (scheduler_.take_fresh_window()) {
+                    // One catalog-only admission may use the free lane at a pressure rotation.
+                    // It cannot pause residents or consume protected recovery capacity.
+                    if (!instance_.program->has_context_operation() && !checkpoints_.pending() &&
+                        free_lane()) {
+                        if (!admission_decision_ && consume_admission_check()) {
+                            ++admission_generation_;
+                            scheduler_.begin_admission_scan();
+                        }
+                        (void)try_admit_one(false);
+                        executed |= progress_context_operation(boundary);
+                    }
+                    scheduler_.end_fresh_window();
                 }
                 if (!recovering && !checkpoints_.pending() && scheduler_.progress_owner()) {
                     (void)try_admit_one(true);

@@ -40,6 +40,11 @@ ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"
   LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_binding_resume_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_binding_resume.cpp"
+  LIBRARIES ninfer_core)
+
 add_executable(ninfer_qwen3_5_checkpoint_restart_test
   "${CMAKE_CURRENT_LIST_DIR}/test_checkpoint_restart.cpp")
 ninfer_test_includes(ninfer_qwen3_5_checkpoint_restart_test)
