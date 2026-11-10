@@ -303,6 +303,7 @@ public:
 
     [[nodiscard]] bool take_fresh_window() noexcept {
         if (!std::exchange(fresh_window_, false)) return false;
+        rotations_since_fresh_ = 0;
         fresh_admitting_ = true;
         return true;
     }

@@ -1433,6 +1433,7 @@ private:
         if (decision && decision->sequence != *request->sequence) { decision.reset(); }
         if (instance_.program->capture_is_input(*request->sequence) && !decision) {
             (void)resources_.recycle_input(*instance_.program, request->continuation_owner);
+            if (checkpoints_.pending()) { return false; }
         }
         while (const auto capture = instance_.program->prepare_capture(*request->sequence)) {
             if (const auto owner = scheduler_.progress_owner(); owner && *owner != request->id) {
@@ -1455,6 +1456,7 @@ private:
                     CaptureDecision{*request->sequence, capture->frontier,
                                     resources_.begin_reclaim(*instance_.program, admission)});
             }
+            if (checkpoints_.pending()) { return false; }
             if (capture->host_run.count) {
                 const std::span<const HostAllocationRun> runs(&capture->host_run, 1);
                 if (!instance_.program->host_can_place(runs)) {
@@ -1819,7 +1821,7 @@ private:
             }
             return true;
         }
-        if (checkpoints_.pending()) { return false; }
+        if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) { return false; }
         if (cursor && cursor->rights.purpose != ReclaimPurpose::Execution) { return false; }
         for (auto it = paused_.rbegin(); it != paused_.rend(); ++it) {
             auto& request = **it;
@@ -1837,6 +1839,7 @@ private:
                 request_admission_check();
                 return true;
             }
+            if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) { return false; }
         }
         return allow_pause && pause_reclaim_victim();
     }
@@ -1847,6 +1850,7 @@ private:
         while (const auto victim = scheduler_.preemption_victim(
                    slots_, max_concurrency_, std::span(skipped).first(count))) {
             if (pause_resident(*victim)) { return true; }
+            if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) { return false; }
             skipped[count++] = *victim;
         }
         return false;
@@ -1993,6 +1997,7 @@ private:
                                                         : std::nullopt,
                                                     request->id, request->publication_order);
                 }
+                if (checkpoints_.pending()) { return false; }
                 if (!restoring && !sources.empty()) {
                     const auto preferred = sources.front().source.reused_tokens;
                     if (!request->admission_observed) {
@@ -2006,6 +2011,7 @@ private:
                     request, restoring, std::move(sources), 0,
                     resources_.begin_reclaim(*instance_.program, std::nullopt, rights)});
             }
+            if (checkpoints_.pending()) { return false; }
             auto& decision = *admission_decision_;
             ContextResources shortage;
             bool deferred = false;
@@ -2112,6 +2118,10 @@ private:
                         }
                     }
                     if (!reservation) {
+                        if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) {
+                            deferred = true;
+                            break;
+                        }
                         // Resident work or an off-lock export can release/unlock capacity.
                         // Do not discard this source for a root chunk's smaller allocation.
                         if (reservation.capacity_possible &&
@@ -2163,7 +2173,7 @@ private:
             }
             admission_decision_.reset();
             if (deferred) {
-                if (restoring) {
+                if (restoring || checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) {
                     return false;
                 }
                 continue;
@@ -2334,6 +2344,10 @@ private:
                     break;
                 }
                 if (!cursor) { cursor.emplace(resources_.begin_reclaim(*instance_.program)); }
+                if (checkpoints_.pending()) {
+                    stop = priority == lane;
+                    break;
+                }
                 if (reclaim(result.shortage, false, {}, &*cursor)) {
                     if (!instance_.program->has_context_operation()) { continue; }
                     stop = priority == lane;
@@ -2351,6 +2365,10 @@ private:
                 scheduler_.require_progress(request->id);
                 if (pause_reclaim_victim()) {
                     stop = true;
+                    break;
+                }
+                if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) {
+                    stop = priority == lane;
                     break;
                 }
                 throw std::logic_error("progress owner cannot obtain its legal unit");
