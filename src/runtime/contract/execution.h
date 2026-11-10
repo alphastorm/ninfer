@@ -2,6 +2,7 @@
 
 #include "runtime/contract/request.h"
 #include "runtime/contract/timing.h"
+#include <array>
 #include <compare>
 #include <span>
 
@@ -66,6 +67,7 @@ struct BeginSummary {
 
 struct GeneratedRound {
     std::span<const TokenId> tokens;
+    bool numerical_failure = false;
 };
 
 struct BatchedGeneratedRound {
@@ -73,7 +75,21 @@ struct BatchedGeneratedRound {
     std::span<const std::int32_t> row_counts;
     std::uint32_t row_stride = 1;
     ExecutionTiming timing;
+    std::array<bool, kMaximumConcurrency> numerical_failures{};
 };
+
+// Preserve row layout for transactional release, but never publish or reuse an invalid token.
+[[nodiscard]] inline bool license_generated_tokens(std::span<TokenId> tokens,
+                                                   std::uint32_t public_token_count) noexcept {
+    bool valid = true;
+    for (auto& token : tokens) {
+        if (token < 0 || static_cast<std::uint32_t>(token) >= public_token_count) {
+            token = 0;
+            valid = false;
+        }
+    }
+    return valid;
+}
 
 struct PrefillStepResult {
     BeginSummary summary;

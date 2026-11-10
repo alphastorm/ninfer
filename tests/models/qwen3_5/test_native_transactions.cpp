@@ -33,6 +33,11 @@ void require(bool condition, std::string_view message) {
     if (!condition) { throw std::runtime_error(std::string(message)); }
 }
 
+template <class Quote>
+std::size_t host_bytes(const Quote& quote) {
+    return total_bytes(std::span(&quote.host_run, 1));
+}
+
 bool transferred(const q35::ContextProgress& progress, runtime::ContextTransferDirection direction,
                  std::optional<runtime::ContextTransferResource> resource = std::nullopt) {
     return std::any_of(progress.transfers.begin(), progress.transfers.end(),
@@ -139,7 +144,14 @@ public:
     q35::SequenceHandle bind(const q35::RequestBasePlan& base, std::uint32_t lane = 0,
                              q35::ResumeState* resume           = nullptr,
                              q35::ExecutionUnitKind resume_kind = q35::ExecutionUnitKind::Decode) {
-        const bool needs_replay = resume && !resume->has_snapshot();
+        enum class Route { None, Replay, Snapshot, Direct };
+        const bool snapshot     = resume && resume->has_snapshot();
+        const bool needs_replay  = resume && !snapshot && resume->frontier() != 0;
+        const auto expected_route = !resume      ? Route::None
+                                    : needs_replay ? Route::Replay
+                                    : snapshot     ? Route::Snapshot
+                                                   : Route::Direct;
+        const auto target = resume ? resume->frontier() : 0;
         require(static_cast<bool>(
                     program_.start_binding(base, {lane}, root(base), resume, resume_kind,
                                            resume_kind == q35::ExecutionUnitKind::Prefill ? 0 : 1)),
@@ -149,7 +161,23 @@ public:
                 "binding did not publish a lane");
         if (needs_replay) {
             require(progress.replaying, "snapshot-free binding did not enter replay");
+        } else {
+            require(!progress.replaying, "binding entered replay without committed input");
         }
+        const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+            q35::detail::ContractAccess::owner(*progress.sequence));
+        const auto& control = native->requests[lane];
+        require(program_.recovery_pending(*progress.sequence) == (expected_route != Route::None),
+                "binding lost or invented recovery protection");
+        if (expected_route == Route::Replay)
+            require(control.replay_cursor < target && control.replay_target == target,
+                    "replay binding has no missing committed input");
+        if (expected_route == Route::Snapshot)
+            require(native->sequences[lane].continuation.metadata.text_kv_valid == target,
+                    "snapshot binding lost its committed frontier");
+        if (expected_route == Route::Direct)
+            require(target == 0 && control.prefill && control.prefill->cursor == 0,
+                    "direct binding invented historical work");
         return *progress.sequence;
     }
 
@@ -682,7 +710,7 @@ public:
             require(!candidates.empty(), "shared history has no Host demotion candidate");
             while (!candidates.empty()) {
                 const auto& quote = candidates.front();
-                require(quote.host_bytes > 0 && program_.start_demote(quote),
+                require(host_bytes(quote) > 0 && program_.start_demote(quote),
                         "shared history could not transfer its selected KV pages to Host");
                 require(settle().published, "shared history Host transfer did not complete");
                 candidates = program_.plan_reclaim(history, {}, shortage).demotions;
@@ -776,7 +804,7 @@ public:
             require(prepared && !prepared->reserved &&
                         prepared->frontier == marked.frontiers.front() &&
                         prepared->shortage == q35::ContextResources{.state_slots = 1} &&
-                        prepared->host_bytes > 0,
+                        host_bytes(*prepared) > 0,
                     "failed capture preparation lost its semantic boundary or physical shortage");
             expect_usage(full, "failed capture preparation retained a physical reservation");
         }
@@ -900,7 +928,7 @@ public:
                     usage.kv_page_groups[resource.pool->index];
             const auto candidates = program_.plan_reclaim(allowed, {}, shortage).demotions;
             const auto* quote     = demotion_with_sources(candidates, allowed);
-            require(quote && quote->host_bytes != 0 && program_.start_demote(*quote),
+            require(quote && host_bytes(*quote) != 0 && program_.start_demote(*quote),
                     "source could not demote its selected resources for restore");
             const auto demoted = settle();
             require(
@@ -993,6 +1021,13 @@ public:
             reserve(resumed, q35::ExecutionUnitKind::Replay);
             const auto progress = program_.advance_replay(resumed);
             replayed += progress.processed_tokens;
+            const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+                q35::detail::ContractAccess::owner(resumed));
+            const auto& control =
+                native->requests[q35::detail::ContractAccess::lane(resumed).value];
+            require(control.replay_cursor == replayed &&
+                        progress.complete == (control.replay_cursor == control.replay_target),
+                    "replay progress lost its completed frontier");
             if (progress.complete) {
                 complete = true;
                 break;
@@ -1026,6 +1061,101 @@ public:
         next_request();
     }
 
+    void pause_before_first_prefill_chunk() {
+        auto base           = request(kPromptTokens);
+        const auto original = bind(base);
+        require(program_.start_pause(original, false), "unstarted prefill pause was not accepted");
+        auto paused = settle();
+        require(paused.paused && !paused.paused->has_snapshot() && paused.paused->frontier() == 0,
+                "unstarted prefill pause did not preserve its empty frontier");
+        expect_empty("unstarted prefill pause retained execution resources");
+        const auto resumed = bind(base, 1, &*paused.paused, q35::ExecutionUnitKind::Prefill);
+        paused.paused.reset();
+        require(program_.recovery_pending(resumed), "direct resume lost recovery protection");
+        const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+            q35::detail::ContractAccess::owner(resumed));
+        const auto lane = q35::detail::ContractAccess::lane(resumed).value;
+        const auto& permit = native->requests[lane].permit;
+        require(permit && permit->kind == q35::ExecutionUnitKind::Prefill &&
+                    permit->main_frontier == kChunk &&
+                    native->requests[lane].recovery->coverage.main_frontier >= kChunk,
+                "direct resume did not reserve its real first prefill unit");
+        prefill_prefix(resumed, kChunk);
+        require(!program_.recovery_pending(resumed),
+                "first resumed prefill chunk did not release recovery protection");
+        finish_prefill(resumed, kPromptTokens - kChunk, false);
+        decode_and_finish(resumed);
+        expect_empty("unstarted prefill resume retained resources after finishing");
+        next_request();
+    }
+
+    void catalog_frontier_resume() {
+        constexpr std::uint32_t frontier = 65;
+        auto base = request(frontier, true);
+        const auto original = bind(base);
+        finish_prefill(original, frontier, false);
+        auto* native = const_cast<q35::detail::ProgramImpl*>(
+            static_cast<const q35::detail::ProgramImpl*>(
+                q35::detail::ContractAccess::owner(original)));
+        require(program_.start_pause(original, true), "catalog resume could not pause");
+        auto paused = settle();
+        require(paused.paused && paused.paused->snapshot_handle() &&
+                    paused.paused->frontier() == frontier,
+                "catalog resume did not preserve its full committed frontier");
+        const auto snapshot = *paused.paused->snapshot_handle();
+        const auto saved_metadata = native->checkpoint(snapshot).continuation().metadata;
+        // A normal MTP input capture intentionally retains backend F-1, so it is not a
+        // replay-free Active source. Retain a distinct real catalog record for the full
+        // paused snapshot, then revoke the request's own snapshot reference.
+        const auto retained = native->checkpoints.reserve();
+        require(retained.has_value(), "catalog resume could not retain its full source");
+        native->checkpoints.publish(*retained, native->checkpoint(snapshot));
+        const auto point = *retained;
+        require(program_.revoke_snapshot(*paused.paused) && !paused.paused->has_snapshot(),
+                "catalog resume still depended on its own snapshot");
+        const auto source = program_.inspect_source(base, point);
+        require(source && source->reused_tokens == frontier,
+                "catalog resume did not select its exact committed frontier");
+
+        auto& metadata = const_cast<q35::ContinuationMetadata&>(
+            native->checkpoint(point).continuation().metadata);
+        const auto compatible_metadata = metadata;
+        metadata.tail_hidden_valid = !saved_metadata.tail_hidden_valid;
+        const auto before = program_.physical_usage();
+        const auto rejected = program_.start_binding(base, {1}, *source, &*paused.paused);
+        require(!rejected && !rejected.source_valid && !program_.has_context_operation(),
+                "incompatible exact-frontier source was not rejected before binding");
+        expect_usage(before, "rejected exact-frontier source changed resource ownership");
+        metadata = compatible_metadata;
+
+        require(static_cast<bool>(program_.start_binding(base, {1}, *source, &*paused.paused)),
+                "compatible exact-frontier source did not reserve its next real unit");
+        auto restored = settle();
+        paused.paused.reset();
+        require(restored.sequence && !restored.replaying &&
+                    program_.recovery_pending(*restored.sequence),
+                "exact catalog frontier entered replay or lost recovery protection");
+        const auto lane = q35::detail::ContractAccess::lane(*restored.sequence).value;
+        require(native->requests[lane].permit &&
+                    native->requests[lane].permit->kind == q35::ExecutionUnitKind::Decode &&
+                    native->sequences[lane].continuation.metadata.backend_kv_valid ==
+                        saved_metadata.backend_kv_valid,
+                "exact catalog resume changed its next unit or backend frontier");
+        reserve(*restored.sequence, q35::ExecutionUnitKind::Decode, 1);
+        const std::array<q35::SequenceHandle, 1> members{*restored.sequence};
+        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
+        auto pending = program_.decode(members, budgets);
+        const std::array<runtime::CommitDecision, 1> terminal{{{.accepted_tokens = 1, .terminal = true}}};
+        (void)program_.commit(std::move(pending), terminal);
+        require(!program_.recovery_pending(*restored.sequence),
+                "catalog resume kept recovery protection after a committed decode unit");
+        const auto finished = program_.finish(*restored.sequence);
+        require(finished.checkpoint && program_.release_checkpoint(*finished.checkpoint) &&
+                    program_.release_checkpoint(point),
+                "catalog resume retained a finished checkpoint");
+        expect_empty("catalog-frontier resume leaked resources");
+    }
+
     void retired_host_image_preserves_input() {
         auto base         = request(65, true);
         const auto active = bind(base);
@@ -1054,7 +1184,7 @@ public:
                              [](const auto& p) { return p.released.state_slots == 1; });
             require(found != plans.demotions.end() && program_.start_demote(*found),
                     "Host retirement fixture could not offload its State image");
-            const auto bytes = found->host_bytes;
+            const auto bytes = host_bytes(*found);
             require(settle().published, "Host retirement State transfer failed");
             return bytes;
         };
@@ -1335,19 +1465,19 @@ public:
         const auto* first_quote  = demotion_with_sources(candidates, first_owner);
         const auto* second_quote = demotion_with_sources(candidates, second_owner);
         require(first_quote && first_quote->released.kv_page_groups[0] == 1 && second_quote &&
-                    second_quote->released.kv_page_groups[0] == 2 && first_quote->host_bytes > 0 &&
+                    second_quote->released.kv_page_groups[0] == 2 && host_bytes(*first_quote) > 0 &&
                     program_.start_demote(*first_quote),
                 "independent physical owners did not offer independently executable demotions");
         require(settle().published &&
                     program_.physical_usage().occupied.kv_page_groups[0] + 1 ==
                         before.kv_page_groups[0] &&
-                    program_.physical_usage().occupied.host_bytes == first_quote->host_bytes,
+                    program_.physical_usage().occupied.host_bytes == host_bytes(*first_quote),
                 "demotion changed resources outside its selected physical owner");
-        require(second_quote->host_bytes > 0 && program_.start_demote(*second_quote),
+        require(host_bytes(*second_quote) > 0 && program_.start_demote(*second_quote),
                 "demoting one independent owner invalidated the other physical action");
         require(settle().published && program_.physical_usage().occupied.kv_page_groups[0] == 0 &&
                     program_.physical_usage().occupied.host_bytes ==
-                        first_quote->host_bytes + second_quote->host_bytes,
+                        host_bytes(*first_quote) + host_bytes(*second_quote),
                 "independent demotions did not account for their separate Host allocations");
         require(program_.release_checkpoint(first) && program_.release_checkpoint(second),
                 "independent demotions retained a completed checkpoint reference");
@@ -1479,7 +1609,7 @@ public:
                     program_.physical_usage().occupied.kv_page_groups[0] + 2 ==
                         baseline.occupied.kv_page_groups[0] &&
                     program_.physical_usage().occupied.host_bytes ==
-                        baseline.occupied.host_bytes + clipped->host_bytes &&
+                        baseline.occupied.host_bytes + host_bytes(*clipped) &&
                     program_.checkpoint_matches(first, first_base) &&
                     program_.checkpoint_matches(second, second_base),
                 "one batch did not publish exactly two Main pages while preserving both histories");
@@ -1508,10 +1638,10 @@ public:
             program_.plan_reclaim(source_set, {}, {.kv_page_groups = {1}}).demotions;
         const auto* state_quote = demotion_with_sources(state_candidates, source_set);
         const auto* main_quote  = demotion_with_sources(main_candidates, source_set);
-        require(state_quote && state_quote->host_bytes > 0 && main_quote &&
-                    main_quote->host_bytes > 0 && main_quote->released.kv_page_groups[0] == 1,
+        require(state_quote && host_bytes(*state_quote) > 0 && main_quote &&
+                    host_bytes(*main_quote) > 0 && main_quote->released.kv_page_groups[0] == 1,
                 "device-only checkpoint did not report its selected Host allocation demand");
-        const auto main_bytes = main_quote->host_bytes;
+        const auto main_bytes = host_bytes(*main_quote);
         require(program_.start_demote(*main_quote),
                 "shared-prefix fact fixture could not demote its selected Main page");
         require(settle().published, "shared-prefix fact fixture lost its demotion");
@@ -1551,6 +1681,15 @@ public:
                     program_.host_bytes_released(family) == main_bytes &&
                     program_.host_bytes_released(repeated) == main_bytes,
                 "fixed-set Host accounting double-counted shared or duplicate references");
+        {
+            const auto capacity = program_.physical_usage().capacity.host_bytes;
+            const std::array<HostAllocationRun, 1> whole{{{capacity, 1}}};
+            const std::array<HostAllocationRun, 1> beyond{{{capacity + 1, 1}}};
+            require(!program_.host_can_place(whole) && program_.host_can_place(whole, family) &&
+                        program_.host_can_place(whole, repeated) &&
+                        !program_.host_can_place(beyond, family),
+                    "fixed-set placement disagrees with fixed-set Host accounting");
+        }
         const auto main_releases = program_.plan_releases(family, {}, {.kv_page_groups = {1}});
         const auto expected_main = program_.physical_usage().occupied.kv_page_groups[0] -
                                    empty_.occupied.kv_page_groups[0];
@@ -1574,8 +1713,8 @@ public:
         const auto* private_tail = demotion_with_sources(family_candidates, descendant_set);
         require(program_.plan_reclaim(source_set, {}, {.kv_page_groups = {1}}).demotions.empty() &&
                     shared_page && shared_page->released.kv_page_groups[0] == 1 &&
-                    shared_page->host_bytes == 0 && private_tail &&
-                    private_tail->released.kv_page_groups[0] == 1 && private_tail->host_bytes > 0,
+                    host_bytes(*shared_page) == 0 && private_tail &&
+                    private_tail->released.kv_page_groups[0] == 1 && host_bytes(*private_tail) > 0,
                 "shared Main page was reclaimable without every retained alias in allowed");
         const std::array tail_only{*private_tail};
         const auto family_batch =
@@ -1600,7 +1739,7 @@ public:
                             [&](const auto& quote) {
                                 return quote.sources ==
                                            std::vector<q35::CheckpointHandle>{descendant} &&
-                                       quote.host_bytes > 0;
+                                       host_bytes(quote) > 0;
                             }),
                 "demotion exposed an excluded Device/Host prefix through its descendant alias");
         const auto baseline = program_.physical_usage();
@@ -1625,7 +1764,7 @@ public:
             demotion_batch(mixed_plan, overlapping_holders, {.kv_page_groups = {2}}).finish();
         require(mixed_batch && mixed_batch->released.kv_page_groups[0] == 2 &&
                     mixed_batch->sources.size() == family.size() &&
-                    mixed_batch->host_bytes == private_tail->host_bytes &&
+                    host_bytes(*mixed_batch) == host_bytes(*private_tail) &&
                     program_.start_demote(*mixed_batch),
                 "overlapping holders prevented batching distinct shared and private pages");
         const auto mixed_cancelled = settle(true);
@@ -1699,7 +1838,7 @@ public:
         require(partial_progress.published &&
                     after_partial.occupied.kv_page_groups[0] + 1 ==
                         before_partial.occupied.kv_page_groups[0] &&
-                    after_partial.occupied.host_bytes == partial_quote->host_bytes &&
+                    after_partial.occupied.host_bytes == host_bytes(*partial_quote) &&
                     program_.checkpoint_matches(partial_source, larger),
                 "partial demotion moved excess KV or invalidated its complete recovery point");
         const auto partial_candidate = program_.inspect_source(larger, partial_source);
@@ -1721,7 +1860,9 @@ public:
         auto pause_base     = request(2 * kChunk);
         const auto to_pause = bind(pause_base);
         prefill_prefix(to_pause, kChunk);
-        const auto pause_bytes = program_.pause_host_bytes(to_pause);
+        const auto pause_runs = program_.pause_host_runs(to_pause);
+        const auto pause_bytes = pause_runs ? std::optional(total_bytes(*pause_runs))
+                                            : std::optional<std::size_t>{};
         require(pause_bytes && *pause_bytes > 0 && program_.start_pause(to_pause, true),
                 "snapshot fact fixture could not reserve its Host demand");
         auto paused = settle();
@@ -1798,7 +1939,10 @@ public:
         require(static_cast<bool>(program_.reserve_units(units)), "grammar mixed unit reservation");
         const std::array<runtime::RoundBudget, 2> budgets{{{1}, {1}}};
         auto pending = program_.decode(members, budgets, nullptr, &masks);
-        require(pending.constraint_failed(0) == native_dead_end && !pending.constraint_failed(1),
+        require(pending.failure(0) ==
+                    (native_dead_end ? std::optional(RequestErrorKind::ConstraintDeadEnd)
+                                     : std::nullopt) &&
+                    !pending.failure(1),
                 "grammar failure lost its row");
         // #399: Runtime can reject a sampled token even when the native mask had
         // legal candidates. That row must be discarded without releasing its sibling.
@@ -1849,7 +1993,7 @@ void shared_capture_alignment(DeviceContext& device, const q35::execution::Param
             {{sequence, q35::ExecutionUnitKind::Prefill}}};
         require(static_cast<bool>(program.reserve_units(units)),
                 "aligned capture could not reserve its prefill unit");
-        auto step = program.advance_prefill(sequence, nullptr, nullptr);
+        auto step = program.advance_prefill(sequence, nullptr, nullptr, 0);
         if (step.pending) {
             const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
             const auto committed = program.commit(std::move(*step.pending), accepted, {}, nullptr);
@@ -2005,7 +2149,7 @@ void replay_sampling_counts(DeviceContext& device, const q35::execution::Paramet
 
     const auto initial = bind(0, nullptr);
     reserve(initial, q35::ExecutionUnitKind::Prefill);
-    auto begin = program.advance_prefill(initial, nullptr, nullptr);
+    auto begin = program.advance_prefill(initial, nullptr, nullptr, 0);
     require(begin.complete && begin.pending && begin.pending->tokens().size() == 1,
             "sampling-count fixture did not produce exactly one Begin token");
     const TokenId first = begin.pending->tokens().front();
@@ -2133,6 +2277,10 @@ int main(int argc, char** argv) {
                 std::cout << "OK admitted_unit_acquires_tail_reader\n";
             } else if (std::string_view(scenario) == "prefix-replay-page") {
                 fixture.prefix_replay_crosses_page();
+            } else if (std::string_view(scenario) == "zero-frontier") {
+                fixture.pause_before_first_prefill_chunk();
+            } else if (std::string_view(scenario) == "catalog-frontier") {
+                fixture.catalog_frontier_resume();
             } else if (std::string_view(scenario) == "grammar-row-failure") {
                 fixture.grammar_row_failure();
                 fixture.grammar_row_failure(false);
@@ -2156,6 +2304,8 @@ int main(int argc, char** argv) {
             fixture.cancel_host_restore();
             fixture.cancel_and_destroy_paused_prefill();
             fixture.replay_pause_and_resume();
+            fixture.pause_before_first_prefill_chunk();
+            fixture.catalog_frontier_resume();
             fixture.independent_physical_demotions();
             fixture.demotion_holder_changes();
             fixture.batched_physical_demotions();

@@ -68,7 +68,6 @@ struct Contract {
     struct Program {};
     struct Instance { Program* program = nullptr; };
     struct Resources {};
-    struct Scheduler {};
     struct Request {
         bool finished = false;
         std::string checkpoint_session = "session";
@@ -266,10 +265,6 @@ struct ExportContract : Contract {
     using Program = ExportProgram;
     struct Instance { Program* program = nullptr; };
     using Resources = ExportResources;
-    struct Scheduler {
-        unsigned capacity_events = 0;
-        void capacity_released() { ++capacity_events; }
-    };
 };
 
 struct IndexReader final : ContinuationCheckpointReader {
@@ -350,7 +345,6 @@ class AdapterFixture {
     using Request = typename ModelContract::Request;
     typename ModelContract::Instance instance_;
     typename ModelContract::Resources resources_;
-    typename ModelContract::Scheduler scheduler_;
     CheckpointControl checkpoints_;
     std::mutex checkpoint_provider_mutex_;
     std::mutex queue_mutex_;
@@ -468,9 +462,9 @@ public:
             throw std::logic_error("isolated request misclassified finite export pins");
         });
     }
-    std::pair<unsigned, unsigned> progress() {
+    std::pair<std::uint64_t, unsigned> progress() {
         return on_worker([&] {
-            return std::pair(scheduler_.capacity_events, admission_notifications_);
+            return std::pair(checkpoint_progress(), admission_notifications_);
         });
     }
     std::uint64_t observed_progress() const { return checkpoint_progress(); }
@@ -510,7 +504,7 @@ void isolated_import_waits_for_export(bool writer_throws) {
     require(threw == writer_throws, "writer exception was swallowed or manufactured");
     const auto after = core.progress();
     require(after.first == before.first + 1 && after.second == before.second + 1,
-            "export retirement did not publish one capacity/admission event");
+            "export retirement did not publish one observed-progress/admission event");
     require(!core.capacity_pending() && core.on_worker([&] { return program.pinned_device_slots() == 0; }),
             "completed export still owns a native reader or pending-capacity claim");
     require(core.isolated_admission() && core.on_worker([&] { return program.images.size() == 8; }),
@@ -586,7 +580,7 @@ void export_command_allocation_failures_precede_native_lease() {
                 "command allocation failure acquired or retired a native export lease");
     }
     require(core.save(writer).state == DurableExportState::Exported &&
-                core.progress().first == before.first + 1,
+                core.progress() == std::pair(before.first + 1, before.second + 1),
             "export did not recover after command allocation failure");
 }
 
@@ -606,7 +600,8 @@ void overlapping_exports_retain_progress_until_last_release() {
     require(!core.isolated_admission(), "overlapping exports did not defer isolated admission");
     first.release();
     require(saving_first.get().state == DurableExportState::Exported, "first overlapping export failed");
-    require(core.capacity_pending() && !core.isolated_admission(),
+    require(core.progress() == std::pair(before.first + 1, before.second + 1) &&
+                core.capacity_pending() && !core.isolated_admission(),
             "first export retirement forgot the other export's native pins");
     second.release();
     require(saving_second.get().state == DurableExportState::Exported, "second overlapping export failed");

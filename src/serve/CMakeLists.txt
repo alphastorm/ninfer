@@ -29,9 +29,11 @@ add_library(ninfer_serve STATIC
   anthropic_messages_http.cpp
   translate.cpp
   generation_service.cpp
+  generation_errors.cpp
   session_checkpoint_service.cpp
   request_events.cpp
   operational_log.cpp
+  operational_capacity.cpp
   request_log.cpp
   metrics.cpp
   http_server.cpp

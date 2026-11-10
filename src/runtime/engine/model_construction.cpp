@@ -52,6 +52,11 @@ void validate_options(const EngineOptions& options) {
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
     }
+    if (options.prefill_stall_budget_ms > 60000 || options.decode_rounds_per_prefill > 4096) {
+        throw std::invalid_argument(
+            "Engine prefill_stall_budget_ms must be in [0,60000] and "
+            "decode_rounds_per_prefill in [0,4096]");
+    }
     if (options.enable_vision && options.media_live_bytes == 0) {
         throw std::invalid_argument(
             "Engine media_live_bytes must be nonzero when Vision is enabled");
@@ -133,6 +138,9 @@ ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) 
     inspect.complete();
     switch (models::resolve_architecture(reader.directory())) {
     case models::Architecture::Qwen4Exp: {
+        if (options.prefill_stall_budget_ms != 0) {
+            throw std::invalid_argument("prefill stall budgets require a Qwen3.5-family model");
+        }
         auto built =
             detail::build_model<models::qwen4_exp::Startup>(reader, options, device, budget, start);
         return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};

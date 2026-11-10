@@ -49,6 +49,7 @@ void launch_typed(const Tensor& target_tokens, const Tensor& logits, const Tenso
     speculative_sampling_group_finalize_kernel<Schedule, false>
         <<<batched_group_grid, Schedule::kSamplerGroupBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(target_tokens.data),
+            static_cast<const Logit*>(logits.data), physical_rows,
             static_cast<const std::int32_t*>(drafts.data), nullptr, nullptr,
             static_cast<const std::int32_t*>(current_extents.data),
             static_cast<std::int32_t*>(lengths.data), static_cast<std::int32_t*>(anchors.data),

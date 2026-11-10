@@ -26,10 +26,10 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
 
     if (!(cfg.temperature > 0.0f) && !penalties && cfg.mask.words == nullptr) {
         if (tid == 0) {
-            int a = 0;
-            while (a < extent && row_targets[a] == row_drafts[a]) { ++a; }
-            const int t_star = row_targets[a];
-            speculative_store_accept_result<true>(row_drafts, k, row, a, t_star, lengths, anchors,
+            const auto prefix = finite_greedy_prefix(row_targets, row_logits, row_drafts,
+                                                      extent, token_domain, physical_rows);
+            speculative_store_accept_result<true>(row_drafts, k, row, prefix.accepted,
+                                                  prefix.terminal, lengths, anchors,
                                                   row_tokens, licensed_counts, accepted, &cfg);
         }
         return;
@@ -81,8 +81,7 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
                 __syncthreads();
             }
             if (tid == 0) {
-                if (cfg.mask.words && !isfinite(red_val[0])) { asm volatile("trap;"); }
-                const int selected = red_idx[0];
+                const int selected = isfinite(red_val[0]) ? red_idx[0] : -1;
                 if (i < extent && selected == row_drafts[i]) {
                     a_sh = i + 1;
                 } else {

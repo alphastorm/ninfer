@@ -71,7 +71,7 @@ std::optional<CapturePreparation> Program::prepare_capture(SequenceHandle h) {
     }
     if (!destination)
         return CapturePreparation{
-            point.frontier, false, {.state_slots = 1}, p.resources.states->storage().image_bytes()};
+            point.frontier, false, {.state_slots = 1}, {p.resources.states->storage().image_bytes(), 1}};
     ticket->destination = *destination;
     s.capture           = std::move(ticket);
     return CapturePreparation{point.frontier, true};
@@ -144,7 +144,7 @@ bool Program::start_capture(SequenceHandle h) {
     return true;
 }
 
-std::optional<std::size_t> Program::pause_host_bytes(SequenceHandle h) const {
+std::optional<std::vector<HostAllocationRun>> Program::pause_host_runs(SequenceHandle h) const {
     const auto& p = *impl_;
     const auto& s = p.sequence(h);
     if (!s.request->can_checkpoint(s.continuation.metadata.main_frontier) ||
@@ -164,7 +164,8 @@ std::optional<std::size_t> Program::pause_host_bytes(SequenceHandle h) const {
                 bytes += p.pools[pool].host_page_stride;
         }
     }
-    return bytes;
+    // Preserve this backend's byte-only planning until it exposes released physical ranges.
+    return std::vector<HostAllocationRun>{{bytes, bytes ? 1U : 0U}};
 }
 
 bool Program::start_pause(SequenceHandle h, bool save, runtime::ExecutionTiming* observation) {
@@ -175,8 +176,8 @@ bool Program::start_pause(SequenceHandle h, bool save, runtime::ExecutionTiming*
         s.phase != detail::Phase::Active)
         throw std::logic_error("pause requires a committed boundary");
     if (save) {
-        const auto bytes = pause_host_bytes(h);
-        if (!bytes || *bytes > p.resources.host_context->free_bytes()) return false;
+        const auto runs = pause_host_runs(h);
+        if (!runs || !host_can_place(*runs)) return false;
     }
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, observation);
     timing.begin_wait();

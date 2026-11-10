@@ -101,7 +101,7 @@ std::optional<CapturePreparation> ProgramImpl::prepare_capture(SequenceHandle ha
         CapturePreparation result{.frontier = frontier};
         if (state_store->device_occupied() == state_store->device_capacity()) {
             result.shortage.state_slots = 1;
-            result.host_bytes           = state_images->storage().image_bytes();
+            result.host_run = {state_images->storage().image_bytes(), 1};
         }
         return result;
     }

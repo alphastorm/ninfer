@@ -141,6 +141,7 @@ private:
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
     std::atomic<bool> stop_requested_{false};
+    std::mutex stop_mutex_;
     std::mutex stats_mutex_;
     std::condition_variable stats_cv_;
     std::thread stats_thread_;

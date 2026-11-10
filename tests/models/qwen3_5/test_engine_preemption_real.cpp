@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "context_budget.h"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -21,9 +22,7 @@
 
 namespace {
 
-constexpr std::uint32_t kPromptTokens    = 192;
-constexpr std::uint32_t kOutputTokens    = 256;
-constexpr std::uint32_t kCapacity        = 512;
+constexpr std::uint32_t kOutputTokens    = 512;
 constexpr std::size_t kSnapshotHostBytes = 512ULL << 20;
 const ninfer::GenerationObservationOptions kObservations{
     .phase_timings = true, .live_timings = true, .prompt_progress = true};
@@ -91,8 +90,6 @@ ninfer::EngineOptions engine_options(const std::filesystem::path& artifact,
                                      ninfer::SpeculativeBackend selected, bool snapshot) {
     ninfer::EngineOptions options;
     options.artifact_path        = artifact;
-    options.max_context          = kCapacity;
-    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(kCapacity);
     options.prefill_chunk        = 128;
     options.use_cuda_graph       = std::getenv("NINFER_TEST_EAGER") == nullptr;
     options.max_concurrency      = 2;
@@ -145,22 +142,24 @@ struct Timeline {
 
 class ObservationSink final : public ninfer::OutputSink {
 public:
-    ObservationSink(Timeline& timeline, std::size_t row, std::function<void()> on_start = {})
-        : timeline_(timeline), row_(row), on_start_(std::move(on_start)) {}
+    ObservationSink(Timeline& timeline, std::size_t row, std::uint32_t prompt_tokens,
+                    std::function<void()> on_start = {})
+        : timeline_(timeline), row_(row), prompt_tokens_(prompt_tokens),
+          on_start_(std::move(on_start)) {}
 
     void start(ninfer::GenerationStart start) override {
         require(++starts_ == 1, "resume published GenerationStart more than once");
-        require(start.prompt.prompt_tokens == kPromptTokens && start.reused_prompt_tokens == 0,
+        require(start.prompt.prompt_tokens == prompt_tokens_ && start.reused_prompt_tokens == 0,
                 "initial admission reported an unexpected prompt or history hit");
         timeline_.start(row_);
         if (on_start_) { on_start_(); }
     }
 
     void progress(ninfer::PromptProgress progress) override {
-        require(starts_ == 1 && !timing_seen_ && progress.total_prompt_tokens == kPromptTokens &&
+        require(starts_ == 1 && !timing_seen_ && progress.total_prompt_tokens == prompt_tokens_ &&
                     progress.reused_prompt_tokens == 0 &&
                     progress.processed_prompt_tokens >= processed_ &&
-                    progress.processed_prompt_tokens <= kPromptTokens &&
+                    progress.processed_prompt_tokens <= prompt_tokens_ &&
                     progress.elapsed_ns >= progress_elapsed_ns_,
                 "pause/replay repeated or regressed initial prompt progress");
         processed_           = progress.processed_prompt_tokens;
@@ -168,7 +167,7 @@ public:
     }
 
     void timing(ninfer::GenerationTimingObservation timing) override {
-        require(starts_ == 1 && processed_ == kPromptTokens &&
+        require(starts_ == 1 && processed_ == prompt_tokens_ &&
                     timing.generated_tokens > last_timing_.generated_tokens &&
                     timing.generated_tokens <= kOutputTokens &&
                     (!timing_seen_ ||
@@ -191,10 +190,10 @@ public:
 
     void validate(const ninfer::GenerationResult& result, ninfer::SpeculativeBackend selected,
                   bool cancelled = false) const {
-        require(starts_ == 1 && timing_seen_ && processed_ == kPromptTokens &&
+        require(starts_ == 1 && timing_seen_ && processed_ == prompt_tokens_ &&
                     last_timing_.generated_tokens == result.generated_token_ids.size(),
                 "stream did not publish one complete request lifetime");
-        require(result.prompt.prompt_tokens == kPromptTokens &&
+        require(result.prompt.prompt_tokens == prompt_tokens_ &&
                     (cancelled ? result.generated_token_ids.size() > 1 &&
                                      result.generated_token_ids.size() < kOutputTokens &&
                                      result.finish_reason == ninfer::FinishReason::Cancelled
@@ -242,7 +241,7 @@ public:
                     partitioned <= first.elapsed_seconds + epsilon,
                 "first-output wall-time boundaries overlap or exceed the completed lifetime");
         require(first.computed_prefill_tokens <= result.computed_prefill_tokens &&
-                    first.computed_prefill_tokens == kPromptTokens &&
+                    first.computed_prefill_tokens == prompt_tokens_ &&
                     first.prefill.gpu_seconds > 0.0,
                 "first-output snapshot omitted completed initial prefill or GPU work");
         require(first.engine.decode_rounds < result.engine_timing.decode_rounds &&
@@ -269,6 +268,7 @@ public:
 private:
     Timeline& timeline_;
     std::size_t row_;
+    std::uint32_t prompt_tokens_;
     std::function<void()> on_start_;
     unsigned starts_                   = 0;
     bool timing_seen_                  = false;
@@ -297,15 +297,20 @@ void settled(const ninfer::RuntimeStats& stats, const ninfer::MemorySummary& mem
 void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend selected,
               std::string_view backend_name, bool snapshot,
               CancelStage cancel_stage = CancelStage::None) {
-    ninfer::Engine engine(engine_options(artifact, selected, snapshot));
+    auto options = engine_options(artifact, selected, snapshot);
+    const auto prompt_tokens =
+        ninfer::test::qwen3_5::configure_two_request_pressure(options, kOutputTokens, true);
+    ninfer::Engine engine(options);
     const auto memory = engine.memory_summary();
-    require(memory.max_context == kCapacity && memory.kv_capacity == kCapacity,
+    require(memory.max_context == options.max_context &&
+                memory.kv_capacity == options.kv_capacity.explicit_tokens,
             "Engine changed the fixed pressure workload's context capacity");
     require(memory.host_context_capacity_bytes <= (snapshot ? kSnapshotHostBytes : 0),
             "Engine exceeded the fixture's fixed Host quota");
     const auto before = engine.runtime_stats();
     std::array<unsigned, 2> first_token_counts{};
     std::array<ninfer::GenerationObservationOptions, 2> observations{kObservations, kObservations};
+    std::optional<ninfer::GenerationSchedulingObservation> second_scheduling;
     for (std::size_t i = 0; i < observations.size(); ++i) {
         observations[i].first_token = [&, i](const ninfer::GenerationFirstTokenObservation& first) {
             require(first.elapsed_since_submit_seconds > 0.0 && first.prepare_seconds >= 0.0,
@@ -313,12 +318,16 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
             ++first_token_counts[i];
         };
     }
+    if (cancel_stage != CancelStage::None) {
+        observations[1].scheduling = [&](const ninfer::GenerationSchedulingObservation& event) {
+            second_scheduling = event;
+        };
+    }
 
-    // Main KV pages hold 64 tokens. Both 192-token prompts fit together in six of eight pages;
-    // both can begin decoding, but their continued growth cannot remain resident together.
-    // Each 448-token complete request fits alone, including the K=3 speculative unit.
-    std::vector<ninfer::TokenId> first_prompt(kPromptTokens, 198);
-    std::vector<ninfer::TokenId> second_prompt(kPromptTokens, 198);
+    // The helper requires pressure from either request growing alone, independent of any
+    // speculative-acceptance imbalance, while both prefills and either full request fit.
+    std::vector<ninfer::TokenId> first_prompt(prompt_tokens, 198);
+    std::vector<ninfer::TokenId> second_prompt(prompt_tokens, 198);
     first_prompt.front()  = 1000;
     second_prompt.front() = 1001;
     auto first_prepared   = engine.prepare_tokens(std::move(first_prompt));
@@ -331,7 +340,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     bool first_finished = false;
     std::exception_ptr first_error;
     std::optional<ninfer::GenerationResult> first_result;
-    ObservationSink first_sink(timeline, 0, [&] {
+    ObservationSink first_sink(timeline, 0, prompt_tokens, [&] {
         // OutputSink runs in wait()'s consumer thread. This gate submits already prepared input
         // at the observed first admission without holding up the Engine or a model callback.
         auto handle = engine.submit(std::move(second_prepared), request(kOutputTokens),
@@ -342,7 +351,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         }
         handoff.notify_one();
     });
-    ObservationSink second_sink(timeline, 1);
+    ObservationSink second_sink(timeline, 1, prompt_tokens);
     auto first_handle = engine.submit(std::move(first_prepared), request(kOutputTokens),
                                       ninfer::OutputConsumerMode::Streaming, observations[0]);
     std::jthread first_consumer([&] {
@@ -370,20 +379,34 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     }
     bool cancellation_requested = false;
     ninfer::RuntimeStats cancellation_observed;
+    ninfer::GenerationSchedulingObservation cancellation_target;
+    std::uint64_t replayed_at_cancellation = 0;
     std::uint32_t committed_at_cancellation = 0;
     const ninfer::CancellationView cancellation([&] {
         if (cancellation_requested) { return true; }
         if (cancel_stage == CancelStage::None) { return false; }
-        const auto stats    = engine.runtime_stats();
+        if (!second_scheduling) { return false; }
+        const auto& target = *second_scheduling;
+        const auto stats   = engine.runtime_stats();
         const bool observed = cancel_stage == CancelStage::Paused
-                                  ? stats.paused_requests == 1
-                                  : stats.replaying_requests != 0 && stats.replayed_tokens != 0;
+                                  ? target.transition ==
+                                            ninfer::GenerationSchedulingTransition::Paused &&
+                                        stats.paused_requests != 0
+                                  : target.transition ==
+                                            ninfer::GenerationSchedulingTransition::Restored &&
+                                        target.route == ninfer::GenerationRecoveryRoute::Replay &&
+                                        stats.replaying_requests != 0 &&
+                                        stats.replayed_tokens > target.global_replayed_tokens;
         if (!observed) { return false; }
-        // The second request's ticket is strictly newer: its submit follows first.start().
-        // With only these two requests, protecting the oldest resident makes it the only victim.
-        // CancellationView is checked by the consumer, including while its stream is idle; it
-        // observes actual Engine state without delaying a model callback or guessing a sleep.
+        // Pressure service can preempt either request. Observe the target's own consumer-side
+        // lifecycle, not a global paused/replaying count. Only one protected recovery runs at
+        // a time, so replay work since this target's Restored boundary belongs to this target.
         cancellation_observed     = stats;
+        cancellation_target       = target;
+        replayed_at_cancellation  = target.request_replayed_tokens;
+        if (cancel_stage == CancelStage::Replay) {
+            replayed_at_cancellation += stats.replayed_tokens - target.global_replayed_tokens;
+        }
         committed_at_cancellation = second_sink.committed_tokens();
         cancellation_requested    = true;
         return true;
@@ -410,7 +433,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     settled(after, completed_memory);
     require(first_token_counts[0] == 1 && first_token_counts[1] == 1,
             "recovery or cancellation duplicated/lost first-token observations");
-    require(after.prompt_tokens - before.prompt_tokens == 2 * kPromptTokens &&
+    require(after.prompt_tokens - before.prompt_tokens == 2 * prompt_tokens &&
                 after.generated_tokens - before.generated_tokens ==
                     first_result->generated_token_ids.size() +
                         second_result.generated_token_ids.size(),
@@ -427,7 +450,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     require(after.decode_row_rounds - before.decode_row_rounds >
                 after.decode_rounds - before.decode_rounds,
             "fixture never executed a real two-request decode batch");
-    require(after.computed_prefill_tokens - before.computed_prefill_tokens == 2 * kPromptTokens &&
+    require(after.computed_prefill_tokens - before.computed_prefill_tokens == 2 * prompt_tokens &&
                 after.committed_decode_tokens - before.committed_decode_tokens ==
                     first_result->generated_token_ids.size() +
                         second_result.generated_token_ids.size() - 2,
@@ -458,6 +481,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         std::cout << " observed_paused=" << cancellation_observed.paused_requests
                   << " observed_replaying=" << cancellation_observed.replaying_requests
                   << " observed_replayed_tokens=" << cancellation_observed.replayed_tokens
+                  << " target_replayed_at_cancel=" << replayed_at_cancellation
                   << " published_at_cancel=" << committed_at_cancellation
                   << " returned_tokens=" << second_result.generated_token_ids.size();
     }
@@ -469,10 +493,10 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
                 after.replayed_tokens - before.replayed_tokens == totals.replayed_tokens,
             "request and Engine scheduling counters disagree");
     if (cancel_stage != CancelStage::None) {
-        require(first_result->scheduling.preemptions == 0 &&
+        require(cancellation_target.engine_request_id == second_result.engine_request_id &&
                     second_result.scheduling.preemptions != 0 &&
                     second_result.scheduling.paused_ns != 0,
-                "cancellation pressure did not preserve the oldest resident");
+                "cancellation did not observe the target request's pressure state");
         // The consumer may still have committed events queued when it observes paused state.
         // validate() checks the complete drained stream against the terminal result as well.
         require(second_result.generated_token_ids.size() >= committed_at_cancellation,
@@ -480,23 +504,18 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         require(second_result.scheduling.snapshot_restores == 0 &&
                     totals.device_to_host_bytes == 0 && totals.host_to_device_bytes == 0,
                 "Host=0 cancellation unexpectedly used a physical snapshot");
-        if (cancel_stage == CancelStage::Paused) {
-            require(second_result.scheduling.replay_restores == 0 &&
-                        second_result.scheduling.replayed_tokens == 0,
-                    "paused cancellation unexpectedly resumed execution");
-        } else {
-            require(second_result.scheduling.replayed_tokens >=
-                            cancellation_observed.replayed_tokens &&
-                        second_result.scheduling.replayed_tokens != 0,
-                    "replay cancellation lost work performed before cancellation");
-        }
+        // Observation and cancellation delivery are not atomic; preserve already observed work
+        // rather than asserting that the worker could not advance between the two boundaries.
+        require(second_result.scheduling.replayed_tokens >= replayed_at_cancellation &&
+                    (cancel_stage != CancelStage::Replay || replayed_at_cancellation != 0),
+                "cancellation lost target replay work observed before cancellation");
     } else if (snapshot) {
         require(totals.snapshot_restores != 0 && totals.device_to_host_bytes != 0 &&
                     totals.host_to_device_bytes != 0,
                 "fixed 512 MiB Host case did not save and restore a real request snapshot");
     } else {
         require(totals.snapshot_restores == 0 && totals.replay_restores != 0 &&
-                    totals.replayed_tokens > kPromptTokens && totals.device_to_host_bytes == 0 &&
+                    totals.replayed_tokens > prompt_tokens && totals.device_to_host_bytes == 0 &&
                     totals.host_to_device_bytes == 0,
                 "Host=0 did not rebuild prompt and already published output without a snapshot");
     }

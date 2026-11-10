@@ -93,8 +93,8 @@ struct RequestFailure {
     std::string error_type;
     std::string error_code;
     std::string param;
-    // Used only by the independent JSONL measurement writer. Operational rendering never consumes
-    // this field.
+    // JSONL retains the full detail. Operational rendering includes it only for Internal failures,
+    // formatted as one line; arbitrary client error messages remain excluded.
     std::string machine_message;
 };
 

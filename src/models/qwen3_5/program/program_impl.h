@@ -304,7 +304,9 @@ public:
     // Exact Host bytes freed by deleting this fixed set, with physical sharing counted once.
     [[nodiscard]] std::size_t
     host_bytes_released(std::span<const CheckpointHandle> checkpoints) const;
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(SequenceHandle sequence) const;
+    [[nodiscard]] std::optional<std::vector<HostAllocationRun>> pause_host_runs(SequenceHandle sequence) const;
+    [[nodiscard]] bool host_can_place(std::span<const HostAllocationRun>,
+                                      std::span<const CheckpointHandle> released = {}) const;
     [[nodiscard]] std::size_t
     release_redundant_host(std::span<const CheckpointHandle> excluded,
                            std::optional<SequenceHandle> pending_backup = std::nullopt);
@@ -336,7 +338,7 @@ public:
     [[nodiscard]] bool recovery_pending(SequenceHandle) const noexcept;
 
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle, runtime::ExecutionTiming*,
-                                                  runtime::TokenMaskProvider*);
+                                                  runtime::TokenMaskProvider*, std::uint32_t);
     [[nodiscard]] ReplayProgress advance_replay(SequenceHandle, runtime::ExecutionTiming*);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle>,
                                       std::span<const runtime::RoundBudget>,
@@ -464,7 +466,7 @@ public:
         StateBindingAction state_action = StateBindingAction::Root;
         bool consume_source             = false;
         bool take_private               = false;
-        bool resume_snapshot            = false;
+        bool resume_without_replay      = false;
         bool source_tail_hidden         = false;
     };
 
@@ -538,6 +540,8 @@ public:
     [[nodiscard]] std::optional<CheckpointHandle> reserve_checkpoint();
     [[nodiscard]] std::optional<CheckpointHandle> detach_checkpoint(SequenceState&);
     void abort_context() noexcept;
+    [[nodiscard]] bool reserve_host_backups(context::MigrationBatch&, runtime::KvPoolId,
+        context::LogicalKVPageStore&, std::span<const context::LogicalKVPageHandle>, bool drop_device);
     [[nodiscard]] bool prepare_backup(context::MigrationBatch&, CheckpointState&,
                                       bool shared_device, bool& preserve_state_device);
     void install_binding(BindOperation&);
@@ -573,7 +577,8 @@ public:
     [[nodiscard]] PendingBatch wrap_pending(std::span<const std::uint32_t>,
                                             const runtime::BatchedGeneratedRound&);
     [[nodiscard]] runtime::PrefillStepResult advance_prefill_raw(std::uint32_t,
-                                                                 runtime::ExecutionTiming*);
+                                                                 runtime::ExecutionTiming*,
+                                                                 std::uint32_t);
     [[nodiscard]] runtime::ExecutionTiming
     resolve_pending_raw(std::span<const std::uint32_t>, std::span<const std::uint32_t>,
                         std::span<const std::uint8_t>, std::span<const std::uint8_t>,
@@ -599,7 +604,7 @@ public:
                                     runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] runtime::PrefillStepResult
     advance_prefill(SequenceState& sequence, RequestControl& request,
-                    runtime::ExecutionTiming* failed_timing);
+                    runtime::ExecutionTiming* failed_timing, std::uint32_t max_tokens);
     void enqueue_dflash_context_append(std::span<const std::uint32_t> lanes,
                                        std::span<const std::uint32_t> starts,
                                        std::span<const std::uint32_t> counts);

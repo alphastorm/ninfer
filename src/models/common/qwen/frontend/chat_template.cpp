@@ -2,9 +2,11 @@
 
 #include "models/common/qwen/frontend/media_cache.h"
 #include "models/common/qwen/frontend/prompt_layout.h"
+#include "text/tool_arguments.h"
 #include "text/unicode.h"
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <stdexcept>
 
@@ -47,7 +49,8 @@ void merge_option(Json& context, std::string_view key, const Json& value) {
     context[name] = value;
 }
 
-Json template_parameters(const ChatRenderOptions& options, const Json& special_tokens) {
+Json template_parameters(const ChatRenderOptions& options, const Json& special_tokens,
+                         std::uint8_t effort_support) {
     Json context = options.chat_template_kwargs_json.empty()
                        ? Json::object()
                        : Json::parse(options.chat_template_kwargs_json);
@@ -88,11 +91,18 @@ Json template_parameters(const ChatRenderOptions& options, const Json& special_t
             throw std::invalid_argument("invalid reasoning_effort template parameter");
         }
         const bool thinking = effort != "none";
-        if (context.contains("enable_thinking") && context["enable_thinking"] != thinking) {
-            throw std::invalid_argument("reasoning_effort conflicts with enable_thinking");
+        if (context.contains("enable_thinking") && context["enable_thinking"] == false) {
+            // An explicit thinking switch is authoritative; an effort hint is not a toggle.
+            context.erase("reasoning_effort");
+        } else if (!thinking) {
+            if (context.value("enable_thinking", false))
+                throw std::invalid_argument("reasoning_effort conflicts with enable_thinking");
+            context["enable_thinking"] = false;
+            context.erase("reasoning_effort");
+        } else {
+            context["reasoning_effort"] =
+                normalize_reasoning_effort(effort.get_ref<const std::string&>(), effort_support);
         }
-        // The protocol's 'none' is an explicit disable. Other efforts retain template defaults.
-        if (!thinking) context["enable_thinking"] = false;
     }
     context.update(special_tokens);
     return context;
@@ -135,6 +145,25 @@ bool real_user(const ChatMessage& message) {
 
 } // namespace
 
+std::string_view normalize_reasoning_effort(std::string_view requested,
+                                           std::uint8_t support) noexcept {
+    constexpr std::array<std::string_view, 7> tiers{
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"};
+    const auto found = std::find(tiers.begin(), tiers.end(), requested);
+    if (found == tiers.end() || requested == "none") return requested;
+    const auto index = static_cast<int>(found - tiers.begin());
+    if (support & (1u << index)) return requested;
+    int nearest = -1, distance = static_cast<int>(tiers.size());
+    for (int i = 1; i < static_cast<int>(tiers.size()); ++i) {
+        const auto delta = i > index ? i - index : index - i;
+        if ((support & (1u << i)) && delta <= distance) {
+            nearest = i;
+            distance = delta;
+        }
+    }
+    return nearest < 0 ? requested : tiers[nearest];
+}
+
 bool ChatMessage::has_media() const noexcept {
     return std::any_of(parts.begin(), parts.end(),
                        [](const ChatPart& part) { return part.kind != ChatPartKind::Text; });
@@ -142,8 +171,21 @@ bool ChatMessage::has_media() const noexcept {
 
 CompiledChatTemplate CompiledChatTemplate::resolve(std::string_view source, std::string source_name,
                                                    Json special_tokens) {
-    return CompiledChatTemplate(text::JinjaTemplate(std::string(source), std::move(source_name)),
-                                std::move(special_tokens));
+    CompiledChatTemplate result(
+        text::JinjaTemplate(std::string(source), std::move(source_name)), std::move(special_tokens));
+    for (std::uint8_t tier = 0; tier != 7; ++tier) {
+        Json probe{{"messages", Json::array({Json{{"role", "user"}, {"content", "x"}}})},
+                   {"add_generation_prompt", true},
+                   {"continue_final_message", false},
+                   {"reasoning_effort", reasoning_effort_name(static_cast<ReasoningEffort>(tier))}};
+        if (tier == 0) probe["enable_thinking"] = false;
+        probe.update(result.special_tokens_);
+        try {
+            (void)result.compiled_.render(probe);
+            result.effort_support_ |= static_cast<std::uint8_t>(1u << tier);
+        } catch (const std::invalid_argument&) {}
+    }
+    return result;
 }
 
 RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messages,
@@ -153,7 +195,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     check_preparation_control(control, "chat template");
     const bool continuation =
         options.continuation == PromptContinuationMode::ContinueFinalAssistant;
-    Json context = template_parameters(options, special_tokens_);
+    Json context = template_parameters(options, special_tokens_, effort_support_);
     if (continuation) {
         const auto& final = messages.back();
         if (final.role != ChatRole::Assistant || final.has_media() ||
@@ -218,16 +260,14 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         if (!message.tool_calls.empty()) {
             value["tool_calls"] = Json::array();
             for (const auto& call : message.tool_calls) {
+                Json arguments = call.kind == ToolKind::Custom
+                                     ? Json{{"input", call.arguments_json}}
+                                     : text::tool_arguments_object(call.arguments_json);
                 value["tool_calls"].push_back(
                     {{"id", call.id},
                      {"type", "function"},
                      {"function",
-                      {{"name", call.name},
-                       {"arguments",
-                        (call.kind == ToolKind::Custom
-                             ? Json{{"input", call.arguments_json}}
-                             : call.arguments_json.empty() ? Json::object()
-                                                           : Json::parse(call.arguments_json))}}}});
+                      {{"name", call.name}, {"arguments", std::move(arguments)}}}});
             }
         }
         if (!message.tool_call_id.empty()) value["tool_call_id"] = message.tool_call_id;

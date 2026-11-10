@@ -190,8 +190,13 @@ std::size_t Program::host_bytes_released(std::span<const CheckpointHandle> check
     return impl_->host_bytes_released(checkpoints);
 }
 
-std::optional<std::size_t> Program::pause_host_bytes(SequenceHandle sequence) const {
-    return impl_->pause_host_bytes(sequence);
+std::optional<std::vector<HostAllocationRun>> Program::pause_host_runs(SequenceHandle sequence) const {
+    return impl_->pause_host_runs(sequence);
+}
+
+bool Program::host_can_place(std::span<const HostAllocationRun> runs,
+                              std::span<const CheckpointHandle> released) const {
+    return impl_->host_can_place(runs, released);
 }
 
 std::size_t Program::release_redundant_host(std::span<const CheckpointHandle> excluded,
@@ -260,8 +265,8 @@ bool Program::recovery_pending(SequenceHandle sequence) const noexcept {
 bool Program::has_context_operation() const noexcept { return impl_->has_context_operation(); }
 
 PrefillProgress Program::advance_prefill(SequenceHandle h, runtime::ExecutionTiming* t,
-                                         runtime::TokenMaskProvider* m) {
-    return impl_->advance_prefill(h, t, m);
+                                         runtime::TokenMaskProvider* m, std::uint32_t max_tokens) {
+    return impl_->advance_prefill(h, t, m, max_tokens);
 }
 
 ReplayProgress Program::advance_replay(SequenceHandle h, runtime::ExecutionTiming* t) {

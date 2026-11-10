@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/host_placement.h"
+
 #include "models/common/context/checkpoint_store.h"
 #include "models/common/qwen/frontend/prepared_prompt.h"
 #include "models/qwen4_exp/program/planning.h"
@@ -83,7 +85,7 @@ struct BindingReservation {
 
 struct ContextDemotion {
     std::vector<CheckpointHandle> sources;
-    std::size_t host_bytes = 0;
+    HostAllocationRun host_run;
     ContextResources released;
     std::shared_ptr<const detail::Demotion> impl;
 };
@@ -150,7 +152,10 @@ public:
 
     [[nodiscard]] std::uint32_t row_stride() const noexcept { return stride_; }
 
-    [[nodiscard]] bool constraint_failed(std::size_t row) const { return failed_.at(row); }
+    [[nodiscard]] std::optional<RequestErrorKind> failure(std::size_t row) const {
+        if (numerical_failed_.at(row)) return RequestErrorKind::NumericalFailure;
+        return failed_.at(row) ? std::optional(RequestErrorKind::ConstraintDeadEnd) : std::nullopt;
+    }
 
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
 private:
@@ -163,6 +168,7 @@ private:
     std::uint32_t stride_ = 1;
     bool decode_          = false;
     std::array<bool, kMaximumConcurrency> failed_{};
+    std::array<bool, kMaximumConcurrency> numerical_failed_{};
     runtime::ExecutionTiming timing_;
     friend class detail::ProgramImpl;
     friend class Program;
@@ -223,7 +229,7 @@ struct CapturePreparation {
     std::uint32_t frontier = 0;
     bool reserved          = false;
     ContextResources shortage;
-    std::size_t host_bytes = 0;
+    HostAllocationRun host_run;
 };
 enum class ContextOperationKind : std::uint8_t { Bind, Capture, Demote, Pause };
 
@@ -277,7 +283,9 @@ public:
     [[nodiscard]] bool revoke_snapshot(ResumeState&) noexcept;
     [[nodiscard]] ContextResources snapshot_resources(const ResumeState&) const;
     [[nodiscard]] std::size_t host_bytes_released(std::span<const CheckpointHandle>) const;
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(SequenceHandle) const;
+    [[nodiscard]] std::optional<std::vector<HostAllocationRun>> pause_host_runs(SequenceHandle) const;
+    [[nodiscard]] bool host_can_place(std::span<const HostAllocationRun>,
+                                      std::span<const CheckpointHandle> released = {}) const;
     [[nodiscard]] std::size_t release_redundant_host(std::span<const CheckpointHandle>,
                                                      std::optional<SequenceHandle> = {});
     [[nodiscard]] ResourceReservation reserve_units(std::span<const ExecutionUnit>);

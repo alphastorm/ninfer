@@ -53,7 +53,10 @@ __launch_bounds__(S::kSamplerBlock) __global__
             __syncthreads();
         }
         if (tid == 0) {
-            if (cfg.mask.words && !isfinite(red_val[0])) { asm volatile("trap;"); }
+            if (!isfinite(red_val[0]) || red_idx[0] < 0 || red_idx[0] >= token_domain) {
+                out[row] = -1;
+                return;
+            }
             out[row] = red_idx[0];
             if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[red_idx[0]], 1); }
         }
@@ -88,7 +91,7 @@ __launch_bounds__(S::kSamplerBlock) __global__
         }
     }
     out[row] = picked;
-    if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+    if (picked >= 0 && cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
 }
 
 template <class S, typename Logit>
@@ -203,10 +206,13 @@ __launch_bounds__(S::kSamplerGroupBlock) __global__
         }
         best = block_reduce_max_key(best, greedy_warp_keys);
         if (tid == 0) {
-            if (cfg.mask.words && !isfinite(score_from_order_key(best))) { asm volatile("trap;"); }
             const int picked = id_from_order_key(best);
-            out[col]         = picked;
-            if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+            if (!isfinite(score_from_order_key(best)) || picked < 0 || picked >= token_domain)
+                out[col] = -1;
+            else {
+                out[col] = picked;
+                if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+            }
             workspace.group_done[col] = 0;
         }
         return;
@@ -285,7 +291,7 @@ __launch_bounds__(S::kSamplerGroupBlock) __global__
             }
         }
         out[col] = picked;
-        if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+        if (picked >= 0 && cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
         workspace.group_done[col] = 0;
     }
 }

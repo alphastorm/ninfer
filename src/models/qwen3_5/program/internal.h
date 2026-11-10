@@ -9,12 +9,18 @@ namespace ninfer::models::qwen3_5 {
 
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
 
+[[nodiscard]] constexpr bool resume_without_replay(bool resumed, std::uint32_t reuse_frontier,
+                                                   std::uint32_t resume_frontier) noexcept {
+    return resumed && reuse_frontier == resume_frontier;
+}
+
 } // namespace ninfer::models::qwen3_5
 
 namespace ninfer::models::qwen3_5::detail {
 struct ContractAccess {
-    static void constraint_failed(PendingBatch& pending, std::size_t row, bool failed) {
-        pending.constraint_failed_.at(row) = failed;
+    static void failure(PendingBatch& pending, std::size_t row,
+                        std::optional<RequestErrorKind> failure) {
+        pending.failures_.at(row) = failure;
     }
 
     static SequenceHandle make_sequence(const void* owner, runtime::LaneId lane,

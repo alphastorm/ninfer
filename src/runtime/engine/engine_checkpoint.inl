@@ -93,7 +93,6 @@
                     if (prepared_export) {
                         prepared_export = false;
                         --checkpoint_exports_in_flight_;
-                        scheduler_.capacity_released();
                         request_admission_check();
                         queue_cv_.notify_all();
                     }
@@ -122,7 +121,6 @@
                     ? checkpoints_.oracle() : nullptr;
                 const auto notify = [&] {
                     if (changed) {
-                        scheduler_.capacity_released();
                         notify_checkpoint_progress();
                     }
                 };
@@ -402,7 +400,6 @@
                         pins.push_back(std::move(current));
                         reclaimed = resources_.release_durable_victim(*instance_.program, victim);
                         if (reclaimed) {
-                            scheduler_.capacity_released();
                             request_admission_check();
                         }
                     }
@@ -458,7 +455,6 @@
                             return {.state = DurableImportState::PolicyDisabled,
                                     .reason = DurableReason::StalePublication};
                         }
-                        scheduler_.capacity_released();
                         request_admission_check();
                         return {DurableImportState::Imported, DurableReason::None, stats};
                     });

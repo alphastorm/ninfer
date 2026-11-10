@@ -151,11 +151,11 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
     };
     if (effort) {
         const bool enables = *effort != RequestedReasoningEffort::None;
-        if (thinking && *thinking != enables)
+        if (thinking && *thinking && !enables)
             invalid_prompt_option("reasoning effort conflicts with enable_thinking",
                                   "reasoning_effort", "conflicting_template_option");
-        // A request effort overrides the server's thinking default.
-        result.enable_thinking = enables;
+        // Explicit disabled thinking is authoritative. Effort only overrides a server default.
+        result.enable_thinking = thinking ? thinking : std::optional<bool>(enables);
         switch (*effort) {
         case RequestedReasoningEffort::None:
             result.reasoning_effort = ninfer::ReasoningEffort::None;

@@ -1,5 +1,11 @@
 ninfer_add_test(ninfer_scheduler_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
+  LIBRARIES ninfer_runtime_support)
+
+ninfer_add_test(ninfer_prefill_pacing_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_prefill_pacing.cpp"
   LIBRARIES ninfer_runtime_support)
 
 ninfer_add_test(ninfer_speculative_metrics_test
@@ -22,13 +28,16 @@ ninfer_add_test(ninfer_engine_checkpoint_adapter_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
   LIBRARIES ninfer_core ninfer_session_checkpoint_store Threads::Threads)
 ninfer_add_test(ninfer_engine_core_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
   LIBRARIES ninfer_runtime_support ninfer_core Threads::Threads)
 # DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA
 # runtime so a GPU-less host runs the production EngineCore without CUDA work.
 ninfer_cuda_test_interposition(ninfer_engine_core_test ninfer_runtime_support)
-if(NOT WIN32)
+if(WIN32)
+  set_tests_properties(ninfer_engine_core_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
   foreach(symbol IN ITEMS cudaGetDeviceCount cudaSetDevice cudaSetDeviceFlags
       cudaGetDeviceProperties cudaGetDeviceProperties_v2 cudaStreamCreateWithFlags
       cudaStreamDestroy)

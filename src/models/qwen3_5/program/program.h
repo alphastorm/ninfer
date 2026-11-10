@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/host_placement.h"
+
 #include "ninfer/types.h"
 #include "models/common/context/checkpoint_store.h"
 #include "models/common/context/state_store.h"
@@ -196,7 +198,7 @@ struct BindingReservation {
 
 struct ContextDemotion {
     std::vector<CheckpointHandle> sources;
-    std::size_t host_bytes = 0;
+    HostAllocationRun host_run;
     ContextResources released;
     std::shared_ptr<const detail::DemotionPlan> impl;
 };
@@ -277,7 +279,7 @@ public:
           transaction_(std::exchange(other.transaction_, 0)), rows_(other.rows_),
           row_count_(std::exchange(other.row_count_, 0)), tokens_(other.tokens_),
           row_counts_(other.row_counts_), row_stride_(other.row_stride_), timing_(other.timing_),
-          constraint_failed_(other.constraint_failed_) {
+          failures_(other.failures_) {
         other.tokens_     = {};
         other.row_counts_ = {};
         other.row_stride_ = 0;
@@ -297,8 +299,8 @@ public:
 
     [[nodiscard]] std::uint32_t row_stride() const noexcept { return row_stride_; }
 
-    [[nodiscard]] bool constraint_failed(std::size_t row) const {
-        return constraint_failed_.at(row);
+    [[nodiscard]] std::optional<RequestErrorKind> failure(std::size_t row) const {
+        return failures_.at(row);
     }
 
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
@@ -312,7 +314,7 @@ private:
     std::span<const std::int32_t> row_counts_;
     std::uint32_t row_stride_ = 0;
     runtime::ExecutionTiming timing_;
-    std::array<bool, kMaximumConcurrency> constraint_failed_{};
+    std::array<std::optional<RequestErrorKind>, kMaximumConcurrency> failures_{};
 
     friend struct detail::ContractAccess;
 };
@@ -376,7 +378,7 @@ struct CapturePreparation {
     std::uint32_t frontier = 0;
     bool reserved          = false;
     ContextResources shortage;
-    std::size_t host_bytes = 0;
+    HostAllocationRun host_run;
 };
 enum class ContextOperationKind : std::uint8_t { Bind, Capture, Demote, Pause };
 
@@ -505,7 +507,9 @@ public:
     // Exact Host bytes freed by deleting this fixed set, with physical sharing counted once.
     [[nodiscard]] std::size_t
     host_bytes_released(std::span<const CheckpointHandle> checkpoints) const;
-    [[nodiscard]] std::optional<std::size_t> pause_host_bytes(SequenceHandle sequence) const;
+    [[nodiscard]] std::optional<std::vector<HostAllocationRun>> pause_host_runs(SequenceHandle sequence) const;
+    [[nodiscard]] bool host_can_place(std::span<const HostAllocationRun>,
+                                      std::span<const CheckpointHandle> released = {}) const;
     [[nodiscard]] std::size_t
     release_redundant_host(std::span<const CheckpointHandle> excluded,
                            std::optional<SequenceHandle> pending_backup = std::nullopt);
@@ -537,9 +541,12 @@ public:
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
     // A resumed binding retains its complete recovery capacity until committed new progress.
     [[nodiscard]] bool recovery_pending(SequenceHandle sequence) const noexcept;
+    // max_tokens only shortens text execution within the existing full-chunk permit.
+    // Zero and media prompts retain the planned step; capture boundaries remain authoritative.
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
                                                   runtime::ExecutionTiming* failed_timing = nullptr,
-                                                  runtime::TokenMaskProvider* masks = nullptr);
+                                                  runtime::TokenMaskProvider* masks = nullptr,
+                                                  std::uint32_t max_tokens = 0);
     [[nodiscard]] ReplayProgress advance_replay(SequenceHandle sequence,
                                                 runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] PendingBatch decode(std::span<const SequenceHandle> sequences,

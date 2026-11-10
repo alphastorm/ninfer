@@ -16,6 +16,9 @@
 
 namespace ninfer::models::qwen::frontend {
 
+[[nodiscard]] std::string_view normalize_reasoning_effort(std::string_view requested,
+                                                         std::uint8_t support) noexcept;
+
 inline constexpr std::string_view kCanonicalReasoningCloseSerialization = "\n</think>\n\n";
 
 struct ToolCall {
@@ -141,6 +144,7 @@ private:
 
     text::JinjaTemplate compiled_;
     nlohmann::ordered_json special_tokens_;
+    std::uint8_t effort_support_ = 0;
 };
 
 } // namespace ninfer::models::qwen::frontend

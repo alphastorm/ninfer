@@ -317,6 +317,9 @@ the same ordered tool call. NInfer does not canonicalize semantically equivalent
 reorders members, inserts defaults, or otherwise rewrites a tool object, the changed rendered input
 does not match the model-held endpoint and can reuse only an earlier exact checkpoint.
 Generated token segmentation can also differ from re-encoding the same text, limiting prefix reuse.
+Malformed or non-object tool argument JSON is preserved as one raw `input` string in a mapping,
+instead of throwing during history rendering or Anthropic response serialization. Empty arguments
+become `{}`. Valid objects retain their member order and original streaming argument bytes.
 
 `--chat-template FILE` selects a local Jinja template; by default, the server uses the template
 stored in the artifact. See the [CLI guide](cli.md#text-input) for an example.
@@ -348,8 +351,13 @@ post-close model token, preparation is rejected with HTTP 400 code
 not promise that the model will emit nonempty content or a tool call after the marker.
 
 For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The selected template
-interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
-Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
+is probed once at startup for the other standard values (`minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`). Unsupported tiers map to the nearest supported enabled tier, preferring the higher
+tier on a tie. The shipped artifact's three-tier template therefore maps `minimal` to `low` and
+`high`/`max` to `xhigh`; already-supported tiers are unchanged. No artifact reconversion or template
+override is needed. Explicit disabled thinking ignores effort hints, including Anthropic
+`thinking: {"type":"disabled"}` with `output_config.effort`. Explicit enabled thinking with `none`
+still returns `conflicting_template_option`.
 
 `preserve_thinking` controls reasoning retention according to the selected template. Request
 options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unspecified
@@ -913,6 +921,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
 | `--gpu-keep-warm-ms N` | bounded idle GPU warming window after real work; `0` disables it | `0` |
 | `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
+| `--prefill-stall-budget-ms N` | estimated text-prefill step budget beside a generating request, in milliseconds; `0` disables; maximum `60000`; Qwen3.5 family only | `0` |
+| `--decode-rounds-per-prefill N` | completed decode rounds per full prefill chunk; proportionally fewer for shorter steps; `0` keeps legacy alternation; maximum `4096` | `0` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
@@ -962,6 +972,31 @@ the hardware and a signature derived from the actual Text/Vision configuration, 
 A new representation without a matching measurement uses generic prefill coefficients. A malformed
 file aborts startup; the operational context-cost record and JSONL `server_start` identify the
 selected source.
+
+### Opt-in prefill pacing
+
+By default, the worker runs one decode round and one ready prefill/replay unit per cycle.
+Fresh requests can already be admitted while another request prefills, subject to free lanes,
+resource availability and the admitted-request pressure/recovery gate. Pacing does not bypass
+that gate or promise admission when all lanes are occupied.
+
+`--prefill-stall-budget-ms 250` keeps full chunks for solo prompts, but caps text steps while
+another resident request generates. The existing prefill cost model, corrected by observed
+text-step times, selects the largest 128-token multiple expected to fit. This is a latency
+target, **not a hard deadline**: minimum-sized steps, prediction error and indivisible media work
+can exceed it. Media prompts retain their planned steps. Pressure owners, protected recovery
+and replay are exempt. Full-chunk resource reservations and capture boundaries remain intact.
+
+`--decode-rounds-per-prefill 16` grants sixteen completed decode rounds per full chunk while
+decode can run. A shorter prefill step receives proportionally fewer rounds (rounded up, at
+least one); a short arrival need not wait a full chunk's cadence. If decode cannot execute,
+prefill proceeds immediately. Higher values improve streaming service at the cost of prompt
+completion time. Neither flag changes the other flag's default.
+
+Both options default to zero, retaining the existing execution schedule and chunk geometry.
+When enabled, different chunk boundaries or batch membership can change floating-point results;
+measure output parity and latency on the intended profile before enabling them. There is no
+recommended enabled profile default without that measurement.
 
 Engine selects sampling defaults from the loaded architecture and the request's resolved thinking mode.
 Qwen3.6-27B and Qwen3.8-27B use `1.0/0.95/20/0/0` for
@@ -1015,8 +1050,11 @@ Missing or conflicting capabilities cannot access another namespace.
 Automatic saves run on one bounded worker and honor
 `--session-checkpoint-min-tokens`. Pressure checkpoints and graceful final saves
 also save shorter sessions. The stop path drains HTTP workers and accepted automatic
-work, then synchronously saves every relevant live session. A queued write is never
-an acknowledgement. When `--shutdown-report` is set, the schema-1
+work, then synchronously saves every relevant live session. SIGINT/SIGTERM are handled by a control
+thread; managed Windows stop events use the same stop path. Generation is stopped before HTTP
+workers join: live requests receive a shutdown error, while the checkpoint worker and completed
+catalog remain alive through final saves. Only Engine destruction stops and joins that worker.
+A queued write is never an acknowledgement. When `--shutdown-report` is set, the schema-1
 `ninfer_serve_shutdown_report` contains the managed launch ID and
 `saved`/`skipped`/`refused` counts; `complete=true` requires no refused final save.
 Publication or shutdown-report I/O failure makes the process exit unsuccessfully.
@@ -1031,6 +1069,12 @@ but Serve throughput is always a persistent record. Redirected stderr contains n
 sequences. Pretty values use readable units and rounded rates; use the independent request JSONL for
 complete fields and full precision. Operational records never contain prompts, generated text,
 request bodies, credentials, or arbitrary client error messages.
+Internal failures include their single-line diagnostic detail. An Engine worker failure also
+writes its first cause and pre-cleanup request membership to stderr before failing requests;
+ordinary shutdown does not emit that failure diagnostic.
+Non-finite sampled logits or out-of-vocabulary generated tokens fail only the affected request with
+HTTP 500 `numerical_failure` (or a stream error after headers). Other rows and subsequent requests
+continue on the same Engine. Internal row-metadata or CUDA execution failures remain Engine-wide.
 If a tool marker is returned to text because its structure or tool identity cannot be represented,
 Serve emits one warning with only the failure classification, never the generated markup.
 
@@ -1051,6 +1095,8 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_requests_running`, `waiting`, `paused`, `prefilling`, `decode_ready`, `replaying`, `materializing` | Current Engine gauges; prefill/decode/replay are subsets of resident requests |
 | `ninfer_prompt_tokens_total`, `ninfer_prompt_tokens_cached_total` | Full input and reused tokens counted once on initial binding |
 | `ninfer_prefill_tokens_total`, `ninfer_replayed_tokens_total` | Actual initial prefill and separate recovery recomputation |
+| `ninfer_paced_prefill_steps_total`, `ninfer_paced_prefill_deferred_tokens_total` | Steps executed with a shortened budget cap, and nominal tokens left for later by those steps (including earlier capture boundaries) |
+| `ninfer_prefill_cadence_deferrals_total`, `ninfer_prefill_budget_overruns_total` | Ready prefill units deferred for decode cadence; text steps beside a generating request exceeding the enabled budget |
 | `ninfer_generation_tokens_total`, `ninfer_decode_tokens_total` | All committed outputs, or decode/control outputs excluding the first token; include thinking and injected control tokens |
 | `ninfer_spec_decode_{rounds,draft_tokens,accepted_tokens,fallback_steps}_total` | Live native speculative work, including MTP and DFlash/DFlash2 |
 | `ninfer_{preemptions,snapshot_restores,replay_restores}_total` | Pressure pauses and recovery routes |

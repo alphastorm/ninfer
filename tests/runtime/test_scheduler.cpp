@@ -96,12 +96,12 @@ void test_fifo_bypass_survives_pressure() {
     fresh.erase(fresh.begin() + 1);
     require(head->admission_bypasses == 1, "successful younger admission was not charged");
 
-    scheduler.preempted();
+    scheduler.require_progress(11);
+    scheduler.served(11, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(false, false, false) && !scheduler.progress_owner(),
+            "resolved pressure retained the service owner");
     require(!scheduler.fresh_candidates(fresh, 2).empty(),
-            "one paused request blocked spare capacity from fresh work");
-    scheduler.capacity_released();
-    scheduler.restoration_blocked();
-    scheduler.paused_queue_empty();
+            "resolved pressure did not reopen fresh candidate scanning");
     require(head->admission_bypasses == 1, "pressure recovery reset a waiting request's credit");
 
     scheduler.begin_admission_scan();
@@ -112,7 +112,6 @@ void test_fifo_bypass_survives_pressure() {
     fresh.erase(fresh.begin() + 1);
     for (std::uint64_t id = 14; id < 20; ++id) {
         fresh.push_back(request(id));
-        scheduler.capacity_released();
         scheduler.begin_admission_scan();
         const auto blocked = scheduler.fresh_candidates(fresh, 2);
         require(blocked.size() == 1 && blocked.front() == head,
@@ -216,70 +215,190 @@ void test_scan_keeps_unexamined_candidates() {
             "a later capacity event did not retry a previously failed request");
 }
 
-void test_pressure_victims_and_first_unit() {
-    Scheduler scheduler;
-    Slots slots{};
-    slots[0] = request(30, Request::Phase::Decode);
-    slots[1] = request(10, Request::Phase::Decode);
-    slots[2] = request(40, Request::Phase::Decode);
-    slots[3] = request(20, Request::Phase::Decode);
-
-    require(scheduler.youngest_victim(slots, 4) == 2,
-            "victim selection followed lane order instead of request age");
-    // Releasing this request may free no physical page because another request shares them.
-    // There is deliberately no synthetic capacity credit: continue with the remaining members.
-    slots[2].reset();
-    require(scheduler.youngest_victim(slots, 4) == 0,
-            "zero page recovery prevented the next younger victim from being selected");
-    slots[0].reset();
-    require(scheduler.youngest_victim(slots, 4) == 3,
-            "victim reduction did not preserve the oldest request");
-    slots[3].reset();
-    require(!scheduler.youngest_victim(slots, 4), "the last and oldest resident was preempted");
-
-    slots[0]                   = request(30, Request::Phase::Decode);
-    slots[0]->recovery_pending = true;
-    slots[2]                   = request(40, Request::Phase::Materializing);
-    slots[3]                   = request(20, Request::Phase::Decode);
-    require(scheduler.youngest_victim(slots, 4) == 3,
-            "restoration destination or unserved first unit was chosen as a victim");
-    slots[3].reset();
-    require(!scheduler.youngest_victim(slots, 4),
-            "first-unit protection displaced the oldest resident");
-    slots[0]->recovery_pending = false;
-    require(scheduler.youngest_victim(slots, 4) == 0,
-            "a served resumed request remained permanently unpreemptible");
-    slots[0].reset();
-    slots[2].reset();
-    require(scheduler.youngest_victim(slots, 4, 5) == 1,
-            "an older paused request could not reclaim its lane from the last younger borrower");
-    require(!scheduler.youngest_victim(slots, 4, 15),
-            "a paused request displaced an older resident");
-    slots[1]->recovery_pending = true;
-    require(!scheduler.youngest_victim(slots, 4, 5),
-            "another request preempted the protected complete recovery");
+void admit(Scheduler& scheduler, const RequestPtr& value) {
+    scheduler.admitted(std::deque<RequestPtr>{value}, *value, 4);
 }
 
-void test_restore_events() {
+void test_pressure_admission_requires_a_fresh_window() {
     Scheduler scheduler;
-    scheduler.preempted();
-    require(!scheduler.should_restore(true, false),
-            "preemption immediately reopened the same failed resident set");
+    admit(scheduler, request(10));
+    admit(scheduler, request(20));
+    scheduler.require_progress(10);
+    bool rejected = false;
+    try {
+        admit(scheduler, request(30));
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    require(rejected, "fresh admission entered pressure outside its bounded window");
+    require(scheduler.progress_owner() == 10, "rejected admission changed the pressure owner");
+}
 
+void test_fresh_windows_follow_complete_pressure_cycles() {
+    Scheduler scheduler;
+    const auto a = request(10), b = request(20), fresh = request(30);
+    admit(scheduler, a);
+    admit(scheduler, b);
+    require(!scheduler.take_fresh_window(), "ordinary admission opened a pressure window");
+    scheduler.require_progress(a->id);
+    require(!scheduler.advance_service(true, false, true) && !scheduler.take_fresh_window(),
+            "a fresh arrival stole an unserved pressure turn");
+    scheduler.served(a->id, Scheduler::service_quantum_ns);
+    require(!scheduler.advance_service(true, true, true) && !scheduler.take_fresh_window(),
+            "fresh admission consumed protected recovery capacity");
+    require(scheduler.advance_service(true, false, false) && !scheduler.take_fresh_window(),
+            "a rotation opened a window without pending requests");
+    scheduler.served(b->id, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, true) && scheduler.take_fresh_window(),
+            "contended service did not offer its bounded fresh window");
+    require(!scheduler.take_fresh_window(), "the same rotation offered two fresh windows");
+    admit(scheduler, fresh);
+    scheduler.end_fresh_window();
+    require(scheduler.progress_owner() == fresh->id,
+            "admitted fresh request did not become the bounded pressure owner");
+
+    for (const auto owner : {fresh, a, b}) {
+        require(scheduler.progress_owner() == owner->id,
+                "fresh insertion skipped an existing admitted service turn");
+        scheduler.served(owner->id, Scheduler::service_quantum_ns);
+        require(scheduler.advance_service(true, false, true),
+                "fresh insertion prevented finite service rotation");
+        const bool window = scheduler.take_fresh_window();
+        require(window == (owner == b), "fresh insertion opened twice in a resident cycle");
+        if (window) scheduler.end_fresh_window();
+    }
+}
+
+void test_unsuccessful_fresh_window_consumes_a_complete_rotation() {
+    Scheduler scheduler;
+    for (const auto id : {10U, 20U, 30U}) { admit(scheduler, request(id)); }
+    scheduler.require_progress(10);
+    scheduler.served(10, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, true) && scheduler.take_fresh_window(),
+            "the first useful pressure quantum did not open a fresh window");
+    // No candidate fits, or the Engine skips admission because no lane is free.
+    scheduler.end_fresh_window();
+
+    for (const auto owner : {20U, 30U, 10U}) {
+        require(scheduler.progress_owner() == owner,
+                "unsuccessful fresh admission changed the service order");
+        scheduler.served(owner, Scheduler::service_quantum_ns);
+        require(scheduler.advance_service(true, false, true),
+                "unsuccessful fresh admission prevented service rotation");
+        const bool window = scheduler.take_fresh_window();
+        require(window == (owner == 10U),
+                "unsuccessful fresh window reopened before a complete service rotation");
+        if (window) { scheduler.end_fresh_window(); }
+    }
+}
+
+void test_fresh_windows_reset_when_pressure_ends() {
+    Scheduler scheduler;
+    const auto a = request(10), b = request(20), c = request(30);
+    admit(scheduler, a);
+    admit(scheduler, b);
+    admit(scheduler, c);
+    scheduler.require_progress(a->id);
+    scheduler.served(a->id, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false) &&
+                scheduler.progress_owner() == b->id,
+            "ordinary admission did not append in ticket order");
+    scheduler.finished(a->id);
+    scheduler.finished(b->id);
+    scheduler.served(c->id, 1);
+    require(scheduler.advance_service(false, false, true) && !scheduler.progress_owner() &&
+                !scheduler.take_fresh_window(),
+            "cleared pressure retained a fresh window");
+    scheduler.finished(c->id);
+    require(!scheduler.take_fresh_window(), "empty membership retained a fresh window");
+    admit(scheduler, request(40));
+}
+
+void test_pressure_handoff_and_fair_service() {
+    Scheduler scheduler;
     Slots slots{};
-    slots[0] = request(1, Request::Phase::Decode);
-    (void)scheduler.build_round_membership(slots, 1);
-    require(!scheduler.should_restore(true, false),
-            "ordinary work without a permanent capacity event triggered restoration");
-    scheduler.capacity_released();
-    require(scheduler.should_restore(true, false) && !scheduler.should_restore(false, false),
-            "permanent capacity event did not wake a paused request");
-    scheduler.restoration_blocked();
-    require(!scheduler.should_restore(true, false), "failed restore retried without a new event");
-    require(scheduler.should_restore(true, true), "empty residents failed to wake paused work");
-    scheduler.paused_queue_empty();
-    require(!scheduler.should_restore(true, false),
-            "drained paused queue kept a stale restoration event");
+    auto a = slots[0] = request(10, Request::Phase::Decode);
+    auto b = slots[1] = request(20, Request::Phase::Decode);
+    auto c = slots[2] = request(30, Request::Phase::Decode);
+    for (const auto& value : {a, b, c}) admit(scheduler, value);
+
+    scheduler.require_progress(a->id);
+    require(scheduler.preemption_victim(slots, 4) == 2,
+            "capacity handoff did not exclude its beneficiary");
+    const std::array excluded{2U};
+    require(scheduler.preemption_victim(slots, 4, excluded) == 1,
+            "noncontributing victim prevented another release candidate");
+    slots[2].reset(); // c paused; the same capacity is still owed to a.
+    scheduler.require_progress(c->id);
+    require(scheduler.progress_owner() == a->id && !scheduler.advance_service(true, false, false),
+            "a paused victim stole an unfinished capacity handoff");
+    scheduler.served(b->id, Scheduler::service_quantum_ns);
+    require(!scheduler.advance_service(true, false, false), "another row's work expired the owner");
+    scheduler.served(a->id, Scheduler::service_quantum_ns - 1);
+    require(!scheduler.advance_service(true, false, false), "an incomplete service slice expired");
+    scheduler.served(a->id, 1);
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == b->id,
+            "waiting request did not receive the next service turn");
+    scheduler.served(b->id, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == c->id,
+            "suspended request was skipped by service rotation");
+    require(scheduler.preemption_victim(slots, 4) == 1,
+            "a waiting request could not preempt an older served resident");
+    b->recovery_pending = true;
+    require(scheduler.preemption_victim(slots, 4) == 0,
+            "protected Native recovery was selected as a victim");
+    b->recovery_pending = false;
+    // Arbitrarily many resource polls/replay boundaries cannot consume c's service turn.
+    for (int i = 0; i < 100; ++i)
+        require(!scheduler.advance_service(true, true, false) && scheduler.progress_owner() == c->id,
+                "replay exhausted a turn without new progress");
+    scheduler.served(c->id, Scheduler::service_quantum_ns);
+    require(!scheduler.advance_service(true, true, false), "Native recovery protection was bypassed");
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == a->id,
+            "fair rotation failed to return to the earlier request");
+    scheduler.finished(a->id);
+    require(scheduler.progress_owner() == b->id, "cancelled owner retained the handoff");
+    scheduler.finished(b->id);
+    require(scheduler.progress_owner() == c->id, "terminal owner blocked remaining work");
+    scheduler.served(c->id, 1);
+    require(scheduler.advance_service(false, false, false) && !scheduler.progress_owner(),
+            "resolved pressure did not reopen fresh admission");
+    scheduler.finished(c->id);
+}
+
+void test_recovery_cost_has_a_bounded_service_allowance() {
+    Scheduler scheduler;
+    auto a = request(1), b = request(2);
+    admit(scheduler, a);
+    admit(scheduler, b);
+    scheduler.require_progress(a->id);
+    scheduler.recovery_work(a->id, 10 * Scheduler::maximum_service_ns);
+    require(!scheduler.advance_service(true, false, false), "replay was counted as new progress");
+    scheduler.served(a->id, Scheduler::service_quantum_ns);
+    require(!scheduler.advance_service(true, false, false), "expensive replay earned no useful service");
+    scheduler.served(a->id, Scheduler::maximum_service_ns - Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == b->id,
+            "recovery cost allowed unbounded service");
+    scheduler.served(b->id, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false), "recovery cost leaked into another turn");
+}
+
+void test_bounded_service_under_continuous_contention() {
+    Scheduler scheduler;
+    std::array<RequestPtr, 4> requests{request(1), request(2), request(3), request(4)};
+    for (const auto& value : requests) admit(scheduler, value);
+    scheduler.require_progress(1);
+    std::array<unsigned, 4> grants{};
+    for (unsigned turn = 0; turn < 40; ++turn) {
+        const auto owner = scheduler.progress_owner();
+        require(owner && *owner == turn % 4 + 1, "an admitted waiter was bypassed");
+        ++grants[*owner - 1];
+        for (const auto& value : requests) scheduler.require_progress(value->id);
+        scheduler.served(*owner, Scheduler::service_quantum_ns);
+        require(scheduler.advance_service(true, false, false), "contended service failed to rotate");
+    }
+    require(std::all_of(grants.begin(), grants.end(), [](auto n) { return n == 10; }),
+            "continuous contention starved a request");
 }
 
 void test_prefill_replay_round_robin() {
@@ -367,18 +486,77 @@ void test_two_request_compaction_after_cancellation() {
             "short-request prefill displaced an unrelated sibling's decode");
 }
 
+// This test uses each revision's real pressure-victim API, so it runs on both sides of
+// the port rather than treating a renamed-method compile failure as red evidence.
+template <class Policy = Scheduler>
+void test_younger_blocked_request_can_preempt_older_resident() {
+    Policy scheduler;
+    Slots slots{};
+    slots[0] = request(10, Request::Phase::Decode);
+    slots[1] = request(20, Request::Phase::Decode);
+    std::deque<RequestPtr> fresh{slots[0], slots[1]};
+    scheduler.admitted(fresh, *slots[0], 2);
+    fresh.pop_front();
+    scheduler.admitted(fresh, *slots[1], 2);
+    std::optional<std::uint32_t> victim;
+    if constexpr (requires { scheduler.require_progress(slots[1]->id); }) {
+        scheduler.require_progress(slots[1]->id);
+        victim = scheduler.preemption_victim(slots, 2);
+    } else {
+        victim = scheduler.youngest_victim(slots, 2, slots[1]->id);
+    }
+    require(victim == 0, "younger blocked request could not preempt an older resident");
+}
+
+void test_c2_pressure_alternation() {
+    Scheduler scheduler;
+    Slots slots{};
+    slots[0] = request(10, Request::Phase::Decode);
+    slots[1] = request(20, Request::Phase::Decode);
+    std::deque<RequestPtr> fresh{slots[0], slots[1]};
+    scheduler.admitted(fresh, *slots[0], 2);
+    fresh.pop_front();
+    scheduler.admitted(fresh, *slots[1], 2);
+    scheduler.require_progress(20);
+    require(scheduler.preemption_victim(slots, 2) == 0,
+            "C2 younger pressure owner failed to acquire the older lane");
+    scheduler.served(20, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == 10,
+            "C2 first useful quantum did not hand service to the paused request");
+    scheduler.recovery_work(10, 2 * Scheduler::service_quantum_ns);
+    scheduler.served(10, Scheduler::service_quantum_ns);
+    require(!scheduler.advance_service(true, false, false),
+            "C2 recovery was not amortized before handoff");
+    scheduler.served(10, Scheduler::service_quantum_ns);
+    require(scheduler.advance_service(true, false, false) && scheduler.progress_owner() == 20,
+            "C2 recovered owner retained an unbounded service turn");
+    scheduler.finished(20);
+    require(scheduler.progress_owner() == 10, "finished owner stranded its admitted sibling");
+    scheduler.served(10, 1);
+    require(scheduler.advance_service(false, false, false) && !scheduler.progress_owner() &&
+                scheduler.admission_scan_pending(),
+            "completed contention did not resume bounded fresh admission");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_pressure_admission_requires_a_fresh_window();
+        test_fresh_windows_follow_complete_pressure_cycles();
+        test_unsuccessful_fresh_window_consumes_a_complete_rotation();
+        test_fresh_windows_reset_when_pressure_ends();
+        test_younger_blocked_request_can_preempt_older_resident();
+        test_c2_pressure_alternation();
+        test_two_request_compaction_after_cancellation();
         test_fifo_bypass_survives_pressure();
         test_scan_progress_and_waiter_barrier();
         test_scan_keeps_unexamined_candidates();
-        test_pressure_victims_and_first_unit();
-        test_restore_events();
+        test_pressure_handoff_and_fair_service();
+        test_bounded_service_under_continuous_contention();
+        test_recovery_cost_has_a_bounded_service_allowance();
         test_prefill_replay_round_robin();
         test_decode_and_control_membership();
-        test_two_request_compaction_after_cancellation();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

@@ -171,6 +171,12 @@ struct EngineOptions {
     std::uint32_t gpu_keep_warm_ms     = 0;
     // Zero uses 1024 tokens, or 4096 with CPU expert offload.
     std::uint32_t prefill_chunk = 0;
+    // Opt-in text-prefill pacing beside a generating request. Zero keeps the planned chunk.
+    // Estimated milliseconds, not a hard deadline; a minimum 128-token step is indivisible.
+    std::uint32_t prefill_stall_budget_ms = 0;
+    // Decode rounds per full prefill chunk, scaled down for shorter steps. Zero keeps the
+    // legacy one-round alternation. Pressure/recovery work is never delayed by this option.
+    std::uint32_t decode_rounds_per_prefill = 0;
     MoeOptions moe;
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
@@ -576,6 +582,7 @@ enum class RequestErrorKind : std::uint8_t {
     QueueTimeout,
     Cancelled,
     Unavailable,
+    NumericalFailure,
 };
 
 enum class RequestErrorSource : std::uint8_t { OutputConstraint, Tools };
@@ -1111,6 +1118,11 @@ struct RuntimeStats {
     // Decode batch executions and the sum of their batch sizes.
     std::uint64_t decode_rounds             = 0;
     std::uint64_t decode_row_rounds         = 0;
+    std::uint64_t numerical_failures        = 0;
+    std::uint64_t paced_prefill_steps       = 0;
+    std::uint64_t paced_prefill_deferred_tokens = 0;
+    std::uint64_t prefill_cadence_deferrals = 0;
+    std::uint64_t prefill_budget_overruns   = 0;
     std::uint32_t running_requests          = 0;
     std::uint32_t prefilling_requests       = 0;
     std::uint32_t decode_ready_requests     = 0;
