@@ -45,12 +45,20 @@ void append_utf8proc_nfc(std::string& out, std::string_view text) {
 } // namespace
 
 std::string normalize_nfc(std::string_view text) {
+    // Keep the fast path for entirely ASCII input; start segmentation at the first non-ASCII
+    // byte without scanning the prefix twice.
+    std::size_t offset = 0;
+    for (const char byte : text) {
+        if (static_cast<unsigned char>(byte) >= 0x80u) { break; }
+        ++offset;
+    }
+    if (offset == text.size()) { return std::string(text); }
+
     // Normalize only spans containing a non-boundary code point, from its preceding boundary
     // (a starter a following mark may compose with) to the next one; copy the rest unchanged.
     std::string normalized;
     std::size_t copied   = 0;
-    std::size_t boundary = 0;
-    std::size_t offset   = 0;
+    std::size_t boundary = offset == 0 ? 0 : offset - 1;
     while (offset < text.size()) {
         if (static_cast<unsigned char>(text[offset]) < 0x80u) {
             boundary = offset++;
