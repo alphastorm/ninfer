@@ -1993,7 +1993,7 @@ void shared_capture_alignment(DeviceContext& device, const q35::execution::Param
             {{sequence, q35::ExecutionUnitKind::Prefill}}};
         require(static_cast<bool>(program.reserve_units(units)),
                 "aligned capture could not reserve its prefill unit");
-        auto step = program.advance_prefill(sequence, nullptr, nullptr);
+        auto step = program.advance_prefill(sequence, nullptr, nullptr, 0);
         if (step.pending) {
             const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
             const auto committed = program.commit(std::move(*step.pending), accepted, {}, nullptr);
@@ -2149,7 +2149,7 @@ void replay_sampling_counts(DeviceContext& device, const q35::execution::Paramet
 
     const auto initial = bind(0, nullptr);
     reserve(initial, q35::ExecutionUnitKind::Prefill);
-    auto begin = program.advance_prefill(initial, nullptr, nullptr);
+    auto begin = program.advance_prefill(initial, nullptr, nullptr, 0);
     require(begin.complete && begin.pending && begin.pending->tokens().size() == 1,
             "sampling-count fixture did not produce exactly one Begin token");
     const TokenId first = begin.pending->tokens().front();
