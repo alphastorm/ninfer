@@ -219,6 +219,21 @@ void admit(Scheduler& scheduler, const RequestPtr& value) {
     scheduler.admitted(std::deque<RequestPtr>{value}, *value, 4);
 }
 
+void test_pressure_admission_requires_a_fresh_window() {
+    Scheduler scheduler;
+    admit(scheduler, request(10));
+    admit(scheduler, request(20));
+    scheduler.require_progress(10);
+    bool rejected = false;
+    try {
+        admit(scheduler, request(30));
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    require(rejected, "fresh admission entered pressure outside its bounded window");
+    require(scheduler.progress_owner() == 10, "rejected admission changed the pressure owner");
+}
+
 void test_pressure_handoff_and_fair_service() {
     Scheduler scheduler;
     Slots slots{};
@@ -447,6 +462,7 @@ void test_c2_pressure_alternation() {
 
 int main() {
     try {
+        test_pressure_admission_requires_a_fresh_window();
         test_younger_blocked_request_can_preempt_older_resident();
         test_c2_pressure_alternation();
         test_two_request_compaction_after_cancellation();

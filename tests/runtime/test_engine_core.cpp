@@ -676,6 +676,10 @@ public:
         auto& lane = live(sequence);
         require(lane.permit, "prefill consumed a released unit permit");
         if (lane.script == Script::PressureProgress && !lane.partial_progress) {
+            if (!events_.snapshot().paused) return {};
+            // Service is charged from real wall time. One bounded unit crosses the real
+            // Scheduler quantum; later polls make no progress until the test releases them.
+            std::this_thread::sleep_for(1100ms);
             lane.partial_progress = true;
             events_.record([](Events::State& state) { state.pressure_progress = true; });
             return {.summary = {.prompt_tokens = lane.prompt_tokens},
@@ -1634,14 +1638,9 @@ void fresh_deadline_after_pressure_progress() {
     Harness harness(2);
     auto owner = harness.submit(Script::PressureProgress, 1);
     auto paused = harness.submit(Script::VictimResume, 1);
-    harness.events().await([](const Events::State& state) {
-        return state.pressure_progress && state.paused;
-    },
-                           "pressure owner's first committed prefill unit");
-    const auto before = harness.observed_stats();
-    require(before.paused_requests == 1 && before.computed_prefill_tokens == 1,
-            "deadline fixture did not retain a paused peer after admitted progress");
-    auto fresh = harness.submit(Script::Complete, 1, false, Clock::now() + 400ms);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "paused peer before the pressure owner's useful quantum");
+    auto fresh = harness.submit(Script::Complete, 1, false, Clock::now() + 2s);
     const auto outcome = harness.await(fresh);
     // Settle held requests before asserting the regression, so predecessor RED is bounded.
     require_finished(harness.await(paused, true), FinishReason::Cancelled, "deadline paused cleanup");
@@ -1649,6 +1648,8 @@ void fresh_deadline_after_pressure_progress() {
     require_finished(harness.await(owner), FinishReason::OutputLimit, "deadline owner cleanup");
     require_finished(outcome, FinishReason::OutputLimit,
                      "fresh deadline after pressure owner's committed progress");
+    require(outcome.stats.preemptions == 1,
+            "fresh admission paused a resident instead of using the free lane");
     require_membership(harness.observed_stats(), {}, "deadline admission cleanup");
 }
 
