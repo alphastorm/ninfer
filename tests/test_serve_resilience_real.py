@@ -74,7 +74,7 @@ def main() -> int:
                 "--binary-sha256", binary_sha, "--artifact-sha256", args.artifact_sha256,
                 "--deployment-profile", "serve-resilience", "--max-context", "8192",
                 "--kv-capacity", "8192", "--max-concurrency", "2", "--prefill-chunk", "1024",
-                "--spec", "none", "--no-cuda-graph", "--no-thinking", "--host-context-mib", "8192",
+                "--no-cuda-graph", "--no-thinking", "--host-context-mib", "8192",
                 "--session-checkpoint-dir", str(checkpoints), "--session-checkpoint-require-origin-auth",
                 "--session-checkpoint-min-tokens", "4294967295", "--session-checkpoint-quota-mib", "8192",
                 "--shutdown-report", str(report), "--log-stats-interval-ms", "0"]
@@ -131,9 +131,14 @@ def main() -> int:
                 {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             response = client.getresponse()
             require(response.status == 200, "live stream did not start")
-            code, metrics = request("GET", "/metrics", text=True)
-            require(code == 200 and re.search(r"^ninfer_requests_running [1-9]", metrics, re.M) is not None,
-                    "shutdown request was not resident")
+            deadline = time.monotonic() + 5
+            while True:
+                code, metrics = request("GET", "/metrics", text=True)
+                if code == 200 and re.search(r"^ninfer_requests_running [1-9]", metrics, re.M) is not None:
+                    break
+                require(time.monotonic() < deadline, "shutdown request was not resident")
+                time.sleep(0.01)
+            receipt["resident_at_stop"] = True
             started = time.monotonic()
             require(process.stop(timeout=10) == 0, "connected-stream Stop failed")
             elapsed = time.monotonic() - started
