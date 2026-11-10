@@ -487,7 +487,9 @@ backend coverage. The full fixture runs both, plus nonempty Replay/Snapshot reco
 frontier/completion assertions use native control state without an observability schema change.
 The real preemption fixture requests 512 output tokens and selects page geometry that requires
 preemption even if only one request grows while its peer remains at the initial frontier; either
-complete request still fits alone.
+complete request still fits alone. Cancellation follows the target request's own scheduling
+observations and preserves work observed before delivery; bounded pressure rotation may preempt
+either request.
 `ninfer_qwen3_5_checkpoint_reclaim_real_test` requires the DFlash2 artifact and checks a Host-only
 victim import under capacity pressure. Its release callback must observe exactly one complete
 native validation and two pins; pressure settlement independently validates and re-pins before
