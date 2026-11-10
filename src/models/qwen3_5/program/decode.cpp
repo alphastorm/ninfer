@@ -99,6 +99,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .draft_window           = draft_window,
         .attempted_per_position = std::vector<std::uint64_t>(draft_window, 0),
         .accepted_per_position  = std::vector<std::uint64_t>(draft_window, 0),
+        .ngram_enabled          = ngram_window != 0,
     };
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;

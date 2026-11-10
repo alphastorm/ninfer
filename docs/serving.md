@@ -1140,7 +1140,7 @@ counts native verification attempts and accepts at the commit decision, includin
 output is truncated or discarded. All proposed positions count as attempted even when
 position zero rejects. A zero-draft fallback increments only `fallback_steps`. Each array has
 `draft_window` entries; its sum equals the corresponding total minus copied-token work.
-Copy counters are subsets of verification totals and remain zero when copy drafting is disabled.
+Copy counters are subsets of verification totals and are emitted only when copy drafting is enabled.
 The non-speculative backend uses empty arrays. The live Prometheus counter
 `ninfer_spec_decode_position_tokens_total` (labels `position="0"`, `kind="attempted"` or
 `kind="accepted"`) exposes the same neural work across requests, excluding startup warmup like

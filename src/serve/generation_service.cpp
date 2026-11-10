@@ -596,6 +596,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.ngram_rounds = result.speculative.ngram_rounds;
     outcome.metrics.ngram_drafted_tokens = result.speculative.ngram_drafted_tokens;
     outcome.metrics.ngram_accepted_tokens = result.speculative.ngram_accepted_tokens;
+    outcome.metrics.ngram_enabled = result.speculative.ngram_enabled;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
 

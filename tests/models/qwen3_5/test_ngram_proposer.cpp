@@ -50,6 +50,21 @@ bool backed_by_prefix(std::span<const TokenId> ledger, const NgramProposal& prop
 
 int main() {
     {
+        ninfer::SpeculativeStats stats;
+        stats.attempted_per_position.resize(7);
+        stats.accepted_per_position.resize(7);
+        stats.observe_copy_round(15, 15);
+        expect(stats.rounds == 1 && stats.drafted_tokens == 15 && stats.accepted_tokens == 15 &&
+                   stats.ngram_rounds == 1 && stats.ngram_drafted_tokens == 15 &&
+                   stats.ngram_accepted_tokens == 15,
+               "wide copy verification is counted once at commit");
+        expect(std::all_of(stats.attempted_per_position.begin(), stats.attempted_per_position.end(),
+                           [](auto count) { return count == 0; }) &&
+                   std::all_of(stats.accepted_per_position.begin(), stats.accepted_per_position.end(),
+                               [](auto count) { return count == 0; }),
+               "fifteen copied drafts never index the seven-position neural histogram");
+    }
+    {
         NgramProposer proposer(128);
         const auto ledger = fixture();
         const auto copy = proposer.propose(ledger, 15, 7);

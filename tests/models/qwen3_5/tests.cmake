@@ -20,6 +20,7 @@ ninfer_add_test(ninfer_qwen3_5_head_logits_test
   LIBRARIES ninfer_core ninfer::json)
 
 ninfer_add_test(ninfer_qwen3_5_ngram_proposer_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_ngram_proposer.cpp")
 
 ninfer_add_test(ninfer_qwen3_5_runtime_mechanisms_test

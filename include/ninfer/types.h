@@ -882,11 +882,12 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> attempted_per_position;
+    std::vector<std::uint64_t> accepted_per_position;
     // Subsets of verification work above, not necessarily published output tokens.
     std::uint64_t ngram_rounds          = 0;
     std::uint64_t ngram_drafted_tokens  = 0;
     std::uint64_t ngram_accepted_tokens = 0;
-    std::vector<std::uint64_t> accepted_per_position;
+    bool ngram_enabled = false;
 
     // Native verification facts, recorded once at the commit decision even if publication
     // truncates or discards the output. Position storage is fixed at request installation.

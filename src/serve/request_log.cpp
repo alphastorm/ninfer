@@ -370,17 +370,20 @@ Json moe_memory_json(const std::optional<ninfer::MoeMemorySummary>& moe) {
 }
 
 Json speculative_json(const GenerationMetrics& metrics) {
-    return Json{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
+    Json result{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
                 {"draft_window", metrics.speculative_draft_window},
                 {"rounds", metrics.speculative_rounds},
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
                 {"attempted_per_position", metrics.speculative_attempted_per_position},
-                {"ngram_rounds", metrics.ngram_rounds},
-                {"ngram_drafted_tokens", metrics.ngram_drafted_tokens},
-                {"ngram_accepted_tokens", metrics.ngram_accepted_tokens},
                 {"accepted_per_position", metrics.speculative_accepted_per_position}};
+    if (metrics.ngram_enabled) {
+        result["ngram_rounds"] = metrics.ngram_rounds;
+        result["ngram_drafted_tokens"] = metrics.ngram_drafted_tokens;
+        result["ngram_accepted_tokens"] = metrics.ngram_accepted_tokens;
+    }
+    return result;
 }
 
 Json scheduling_json(const ninfer::GenerationSchedulingStats& stats) {

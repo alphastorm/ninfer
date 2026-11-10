@@ -572,6 +572,7 @@ int main() {
     outcome.metrics.ngram_rounds                      = 5;
     outcome.metrics.ngram_drafted_tokens               = 75;
     outcome.metrics.ngram_accepted_tokens              = 60;
+    outcome.metrics.ngram_enabled                     = true;
     outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
     outcome.metrics.engine_request_id                 = 991;
     outcome.metrics.scheduling                        = {
@@ -652,6 +653,17 @@ int main() {
                           done.at("speculative").at("ngram_drafted_tokens") == 75 &&
                           done.at("speculative").at("ngram_accepted_tokens") == 60,
                       "copy verification counters missing");
+    auto copy_disabled = outcome;
+    copy_disabled.metrics.ngram_enabled = false;
+    const auto disabled_speculative =
+        Json::parse(format_request_done_json("serve-test", 3000, context, copy_disabled))
+            .at("speculative");
+    auto enabled_without_copy_fields = done.at("speculative");
+    for (const auto* field : {"ngram_rounds", "ngram_drafted_tokens", "ngram_accepted_tokens"}) {
+        enabled_without_copy_fields.erase(field);
+    }
+    failures += check(disabled_speculative == enabled_without_copy_fields,
+                      "disabled copy drafting changed the speculative log schema");
     failures +=
         check(done.at("speculative").at("attempted_per_position") == Json::array({300, 300, 300}),
               "speculative attempted position counts missing");
