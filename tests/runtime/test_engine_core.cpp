@@ -723,7 +723,11 @@ public:
         }
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
-        progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
+        progress.summary = {.prompt_tokens = lane.prompt_tokens,
+                            .reused_prompt_tokens = lane.reused_tokens,
+                            .prefix_reuse_path = lane.reused_tokens
+                                                     ? ninfer::PrefixReusePath::PrivateEndpoint
+                                                     : ninfer::PrefixReusePath::Root};
         progress.processed_prompt_tokens = lane.prompt_tokens - lane.reused_tokens -
                                             lane.prefill_progress -
                                             (lane.partial_progress ? 1U : 0U);
