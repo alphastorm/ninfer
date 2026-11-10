@@ -2,6 +2,7 @@
 
 #include <utf8proc/utf8proc.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -47,12 +48,11 @@ void append_utf8proc_nfc(std::string& out, std::string_view text) {
 std::string normalize_nfc(std::string_view text) {
     // Keep the fast path for entirely ASCII input; start segmentation at the first non-ASCII
     // byte without scanning the prefix twice.
-    std::size_t offset = 0;
-    for (const char byte : text) {
-        if (static_cast<unsigned char>(byte) >= 0x80u) { break; }
-        ++offset;
-    }
-    if (offset == text.size()) { return std::string(text); }
+    const auto first_non_ascii = std::find_if(text.begin(), text.end(), [](unsigned char byte) {
+        return byte >= 0x80u;
+    });
+    if (first_non_ascii == text.end()) { return std::string(text); }
+    std::size_t offset = static_cast<std::size_t>(first_non_ascii - text.begin());
 
     // Normalize only spans containing a non-boundary code point, from its preceding boundary
     // (a starter a following mark may compose with) to the next one; copy the rest unchanged.
