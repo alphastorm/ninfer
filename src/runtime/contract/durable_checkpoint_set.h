@@ -56,6 +56,7 @@ struct DurableIdentity {
     std::vector<std::int32_t> ledger;
     std::vector<std::uint8_t> token_types;
     std::array<std::vector<std::int32_t>, 3> positions;
+    // Reserved schema-3 key; qwen-identity/2 always writes and requires an empty array.
     std::vector<std::uint32_t> execution_frontiers;
     std::vector<DurableVisionIdentity> vision_items;
     // Derived accelerator only; importer MUST reconstruct and compare, never trust it as identity.

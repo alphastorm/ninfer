@@ -345,7 +345,7 @@ public:
                                       runtime::ExecutionTiming*, runtime::TokenMaskProvider*);
     [[nodiscard]] runtime::ExecutionTiming
     append_forced_tokens(std::span<const SequenceHandle>, std::span<const TokenId>, std::uint32_t,
-                         std::span<const std::optional<std::uint32_t>>, runtime::ExecutionTiming*);
+                         runtime::ExecutionTiming*);
     [[nodiscard]] CommitResult commit(PendingBatch&&, std::span<const runtime::CommitDecision>,
                                       runtime::CommitObservation, runtime::ExecutionTiming*);
     [[nodiscard]] DiscardResult abort_pending(PendingBatch&&) noexcept;
@@ -582,7 +582,7 @@ public:
     [[nodiscard]] runtime::ExecutionTiming
     resolve_pending_raw(std::span<const std::uint32_t>, std::span<const std::uint32_t>,
                         std::span<const std::uint8_t>, std::span<const std::uint8_t>,
-                        std::span<const std::optional<std::uint32_t>>, runtime::ExecutionTiming*);
+                        runtime::ExecutionTiming*);
     [[nodiscard]] runtime::BatchedGeneratedRound decode_raw(std::span<const std::uint32_t>,
                                                             std::span<const runtime::RoundBudget>,
                                                             runtime::ExecutionTiming*,
@@ -595,12 +595,10 @@ public:
     void copy_round_token();
     void
     commit_generated_prefix_identity(SequenceState& sequence, std::uint32_t base_ledger_frontier,
-                                     std::span<const TokenId> accepted_tokens,
-                                     std::optional<std::uint32_t> prefix_execution_split_after);
+                                     std::span<const TokenId> accepted_tokens);
     [[nodiscard]] runtime::ExecutionTiming
     resolve_non_speculative_pending(SequenceState& sequence, RequestControl& request,
                                     std::uint32_t accepted_tokens, bool terminal,
-                                    std::optional<std::uint32_t> prefix_execution_split_after,
                                     runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] runtime::PrefillStepResult
     advance_prefill(SequenceState& sequence, RequestControl& request,

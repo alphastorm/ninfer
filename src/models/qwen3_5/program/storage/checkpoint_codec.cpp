@@ -171,11 +171,8 @@ void validate(const DurableCheckpointSet& set, const DurableLimits& limits) {
                 "native identity has inconsistent ledger");
         for (const auto& axis : identity.positions)
             require(axis.size() == count, "native identity has inconsistent positions");
-        std::uint32_t previous = 0;
-        for (auto frontier : identity.execution_frontiers) {
-            require(frontier > previous && frontier <= count, "invalid rewrite execution frontier");
-            previous = frontier;
-        }
+        require(identity.execution_frontiers.empty(),
+                "qwen-identity/2 requires empty execution frontiers");
         std::uint64_t previous_end = 0;
         std::uint64_t patch_cursor = 0;
         for (const auto& vision : identity.vision_items) {

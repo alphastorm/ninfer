@@ -300,6 +300,42 @@ public:
         expect_empty("consecutive decode and terminal append leaked context");
     }
 
+    void chat_markers_share_prefill_unit() {
+        PromptInput input;
+        ChatMessage user;
+        user.role = ChatRole::User;
+        user.parts.push_back({.kind = MessagePartKind::Text, .text = "Say hello."});
+        input.messages.push_back(std::move(user));
+        auto prompt = frontend_.prepare(std::move(input));
+        const auto tokens = static_cast<std::uint32_t>(
+            models::qwen::PreparedPromptAccess::view(prompt).token_ids.size());
+        require(tokens > 2 && tokens <= kChunk, "chat fixture exceeds one prefill chunk");
+        runtime::ResolvedExecutionOptions options;
+        options.requested_output_tokens = 1;
+        options.allow_prefix_reuse = false;
+        auto base = program_.plan_request(std::move(prompt), options);
+        const auto sequence = bind(base);
+        reserve(sequence, q35::ExecutionUnitKind::Prefill);
+        require(!program_.prepare_capture(sequence),
+                "history-disabled chat requested a physical capture");
+        auto step = program_.advance_prefill(sequence);
+        require(step.complete && step.pending && !step.capture_ready &&
+                    step.processed_prompt_tokens == tokens,
+                "chat markers interrupted the prefill unit");
+        const std::array<runtime::CommitDecision, 1> decision{
+            {{.accepted_tokens = 1, .terminal = true}}};
+        const auto committed = program_.commit(std::move(*step.pending), decision);
+        require(committed.rows[0].disposition == runtime::CommitDisposition::Finishable,
+                "chat prefill did not commit its first output");
+        const auto finished = program_.finish(sequence);
+        require(finished.status == runtime::ConsumeStatus::Consumed && !finished.checkpoint,
+                "history-disabled chat retained a checkpoint");
+        expect_empty("chat prefill leaked context");
+        // The dedicated scenario permits an NVTX trace to assert exactly one prefill.chunk
+        // with this payload; scheduler-unit completion alone cannot count mathematical passes.
+        std::cout << "CHAT_PREFILL_TOKENS=" << tokens << '\n';
+    }
+
     q35::CheckpointHandle checkpoint(const q35::RequestBasePlan& base) {
         const auto sequence = bind(base);
         finish_prefill(sequence, base.summary().prompt_tokens, true);
@@ -682,9 +718,8 @@ public:
         const std::array<q35::SequenceHandle, 1> members{active};
         std::array<TokenId, kChunk> forced;
         forced.fill(198);
-        const std::array<std::optional<std::uint32_t>, 1> splits{std::nullopt};
         reserve(active, q35::ExecutionUnitKind::Control, forced.size());
-        (void)program_.append_forced_tokens(members, forced, forced.size(), splits);
+        (void)program_.append_forced_tokens(members, forced, forced.size());
         endpoint_input.insert(endpoint_input.end(), forced.begin(), forced.end());
         reserve(active, q35::ExecutionUnitKind::Decode, 1);
         const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
@@ -1243,9 +1278,8 @@ public:
             if (releases_suffix) {
                 std::array<TokenId, kChunk> forced;
                 forced.fill(198);
-                const std::array<std::optional<std::uint32_t>, 1> splits{std::nullopt};
                 reserve(active, q35::ExecutionUnitKind::Control, forced.size());
-                (void)program_.append_forced_tokens(members, forced, forced.size(), splits);
+                (void)program_.append_forced_tokens(members, forced, forced.size());
             }
             reserve(active, q35::ExecutionUnitKind::Decode, 1);
             const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
@@ -2161,9 +2195,8 @@ void replay_sampling_counts(DeviceContext& device, const q35::execution::Paramet
 
     const std::array<TokenId, 3> forced{198, 198, 199};
     const std::array<q35::SequenceHandle, 1> members{initial};
-    const std::array<std::optional<std::uint32_t>, 1> splits{2U};
     reserve(initial, q35::ExecutionUnitKind::Control, forced.size());
-    (void)program.append_forced_tokens(members, forced, forced.size(), splits, nullptr);
+    (void)program.append_forced_tokens(members, forced, forced.size(), nullptr);
 
     const auto vocabulary =
         static_cast<std::int32_t>(parameters.model.resources().public_token_count);
@@ -2174,8 +2207,6 @@ void replay_sampling_counts(DeviceContext& device, const q35::execution::Paramet
     expected_ledger.push_back(first);
     expected_ledger.insert(expected_ledger.end(), forced.begin(), forced.end());
     const std::uint32_t expected_frontier = static_cast<std::uint32_t>(expected_ledger.size() - 1U);
-    const std::array<std::uint32_t, 1> expected_splits{
-        static_cast<std::uint32_t>(prompt.size() + 1U + *splits.front())};
 
     const auto check = [&](std::uint32_t lane, std::uint32_t state_frontier,
                            std::string_view phase) {
@@ -2186,17 +2217,13 @@ void replay_sampling_counts(DeviceContext& device, const q35::execution::Paramet
         CUDA_CHECK(cudaMemcpy(counts.data(), source.data, source.bytes(), cudaMemcpyDeviceToHost));
         require(counts == expected_counts,
                 std::string(phase) + ": sampling counts differ from committed output occurrences");
-        const auto& sequence     = program.sequences[lane];
-        const auto actual_splits = sequence.prefix_identity.execution_frontiers();
+        const auto& sequence = program.sequences[lane];
         require(sequence.ledger == expected_ledger &&
                     sequence.continuation.metadata.execution_frontier == state_frontier &&
                     sequence.continuation.metadata.text_kv_valid == state_frontier &&
                     sequence.ledger_frontier == expected_frontier + 1U &&
-                    sequence.prefix_identity.size() == expected_ledger.size() &&
-                    actual_splits.size() == expected_splits.size() &&
-                    std::equal(actual_splits.begin(), actual_splits.end(), expected_splits.begin()),
-                std::string(phase) +
-                    ": replay changed committed ledger, E/S or forced execution split");
+                    sequence.prefix_identity.size() == expected_ledger.size(),
+                std::string(phase) + ": replay changed committed ledger or State/KV frontiers");
     };
     check(0, expected_frontier, "after forced control");
     require(program.start_pause(initial, false, nullptr), "sampling-count fixture could not pause");
@@ -2272,7 +2299,9 @@ int main(int argc, char** argv) {
         auto program = q35::create_program(parameters, std::move(plan), device, {});
         if (const char* scenario = std::getenv("NINFER_NATIVE_TRANSACTION_SCENARIO")) {
             Fixture fixture(device, *program, frontend);
-            if (std::string_view(scenario) == "admitted-tail-reader") {
+            if (std::string_view(scenario) == "chat-markers") {
+                fixture.chat_markers_share_prefill_unit();
+            } else if (std::string_view(scenario) == "admitted-tail-reader") {
                 fixture.admitted_unit_acquires_tail_reader();
                 std::cout << "OK admitted_unit_acquires_tail_reader\n";
             } else if (std::string_view(scenario) == "prefix-replay-page") {
@@ -2295,6 +2324,7 @@ int main(int argc, char** argv) {
             fixture.input_replay_lifecycle();
             fixture.active_input_zero_growth_binding();
             fixture.consecutive_decode_terminal();
+            fixture.chat_markers_share_prefill_unit();
             fixture.admitted_unit_acquires_tail_reader();
             fixture.replay_carries_independent_input();
             fixture.retained_input_host_suffix();

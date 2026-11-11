@@ -557,7 +557,6 @@ public:
     [[nodiscard]] runtime::ExecutionTiming
     append_forced_tokens(std::span<const SequenceHandle> sequences,
                          std::span<const TokenId> row_major_tokens, std::uint32_t row_stride,
-                         std::span<const std::optional<std::uint32_t>> prefix_execution_splits,
                          runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] CommitResult
     commit(PendingBatch&& pending, std::span<const runtime::CommitDecision> decisions,
