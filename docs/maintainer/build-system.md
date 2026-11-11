@@ -40,7 +40,7 @@ materialized-intermediate route where that route was selected. Model workspace a
 depend on the complete planner; the formula is not a measured VRAM delta. OFF omits these CUDA
 translation units. Keep this option OFF for qualified profiles until matched throughput,
 independent Op-oracle, exact long-retrieval and powered output-quality gates pass; ON binaries
-must use a distinct `NINFER_BUILD_PROFILE` identity.
+must use a distinct `NINFER_BUILD_PROFILE` identity with a hyphen-delimited `a8` component; OFF builds reject that component.
 
 Independently of the A8 option, native INT8 causal attention specializes fully visible key
 blocks for unmasked rows of widths 1024 and 2048. Ragged rows and other widths retain the

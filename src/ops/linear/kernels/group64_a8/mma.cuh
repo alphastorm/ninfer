@@ -4,6 +4,7 @@
 // (Apache-2.0), commit 4a178c4b1fd78555b5efd9b07d10d5b1946ca3ad.
 // Adapted for NInfer's explicit workspace, group64 Use policy and partial-column contract.
 // License: https://www.apache.org/licenses/LICENSE-2.0 (see repository LICENSE).
+// See THIRD_PARTY_NOTICES.md.
 // Stored Q4/Q5 scales remain per group; only transient activations are quantized.
 #include "ops/common/cuda/mma.cuh"
 #include "ops/common/cuda/pipeline.cuh"
