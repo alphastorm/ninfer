@@ -185,7 +185,7 @@ There are 1–64 points, at least one identity/state and no unreferenced table r
 | Table | Required fields and semantics |
 |---|---|
 | `points` | `role` (`continuation`, `input_replay`, `long_anchor`), `origin` (`semantic`, `intermediate`), `frontier`, `text_kv_frontier`, `backend_frontier`, `rope_delta`, `tail_hidden_valid`, `dflash_context_frontier`, `identity`, `state`, `histories` |
-| `identities` | `ledger` (int32 token IDs), `token_types` (uint8), `positions` (three int32 arrays), `execution_frontiers` (ordered uint32), `vision_items`, `shortlist_tag` (two uint64 values) |
+| `identities` | `ledger` (int32 token IDs), `token_types` (uint8), `positions` (three int32 arrays), `execution_frontiers` (reserved empty array), `vision_items`, `shortlist_tag` (two uint64 values) |
 | `histories` | `pool` (pool-array index), `pages` (ordered indices into that pool's page table), `committed_tokens` (uint32) |
 | `states` | `layout_sha256`, `payload` (payload-array index), `offset`, `bytes` |
 | `pools` | `layout` (K2 pool layout object), `pages` (descriptors `{bytes,committed_tokens,offset,payload}`) |
@@ -204,7 +204,18 @@ MTP/DFlash payload presence follows their native pool inventory.
 Identity array lengths agree with the committed ledger. Reconstruct native identity
 and derive regular-prefix/position-origin accelerators after import. Recompute
 shortlist digests from exact identity and reject disagreement; digests alone never
-prove token/position identity. Preserve rewrite execution-frontier boundaries.
+prove token/position identity. `qwen-identity/2` removes chat-marker execution splits and
+their digest contribution; `execution_frontiers` remains a required empty schema-3 key.
+Nonempty values are invalid for this identity version.
+
+The frontend identity codec participates in the effective runtime fingerprint. A checkpoint
+written under `qwen-identity/1` is refused as `Incompatible/fingerprint_mismatch` before native
+import, without quarantine; origin authentication still precedes compatibility. Rewriting its
+digest cannot migrate physical State/KV produced with different pass geometry. Clients must
+resend full conversation history for a cold first turn after upgrade; server-only
+`previous_response_id` lineage is not restored from the incompatible generation. Subsequent
+checkpoints use `/2`. The old generation remains valid for rollback until normal replacement
+or GC; there is no automatic migration.
 
 Vision inventory is explicit, not C++ memory: `modality` is `image` or `video`;
 `temporal`, `height`, `width` are positive int32; `patch_begin`, `patch_count` are

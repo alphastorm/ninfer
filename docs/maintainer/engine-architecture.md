@@ -401,14 +401,14 @@ terminal    -> accepted_tokens 可以是 produced prefix
 
 ```text
 Frontend preview
-  -> Program 提交 accepted model state 与 prefix execution provenance
+  -> Program 提交 accepted model state 与 token/position/media prefix identity
   -> generation budget 与调度记账
   -> OutputSession 提交 preview
   -> 发布输出事件
 ```
 
-Frontend 的 boundary metadata 只描述 accepted span 内的相对位置；Engine 验证范围并随 row 搬运。
-Program 根据 base frontier 转为绝对位置，与 accepted token、State/KV 和 prefix digest 原子提交。
+Program atomically commits accepted tokens, State/KV and prefix identity/digests.
+Frontend reasoning markers do not introduce execution splits or prefix provenance.
 Program commit 失败时，OutputSession preview 也不提交。
 
 推测 round 的 commit 在 compute stream 上排入 replay fold、hidden 修正和 token count 后不等待

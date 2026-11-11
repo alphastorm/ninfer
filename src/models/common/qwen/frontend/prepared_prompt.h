@@ -85,10 +85,6 @@ struct RewriteCheckpointSpec {
 struct PromptIdentity {
     bool reusable = true;
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
-    // Exact token frontiers at which this serialization can agree with a typed rewrite captured
-    // by an earlier turn. Prefill splits at these frontiers so resumed and root execution use the
-    // same chunk decomposition; they are not capture requests by themselves.
-    std::vector<std::uint32_t> rewrite_execution_frontiers;
 };
 
 inline constexpr std::size_t kPreparedSessionKeyCapacity = kMaximumContextCacheSessionKeyBytes;

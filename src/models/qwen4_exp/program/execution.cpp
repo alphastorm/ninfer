@@ -41,11 +41,6 @@ void ProgramImpl::complete_write(Sequence& s) {
 std::uint32_t ProgramImpl::window_end(const Sequence& s, std::uint32_t begin,
                                       std::uint32_t end) const {
     end = std::min(end, begin + resources.plan.shape.prefill_chunk);
-    for (const auto f : s.identity.positions.execution_frontiers())
-        if (f > begin) {
-            end = std::min(end, f);
-            break;
-        }
     if (s.capture && s.next_capture < s.request->captures.size())
         end = std::min(end, s.request->captures[s.next_capture].frontier);
     if (s.request->vision && begin < s.request->summary.prompt_tokens)

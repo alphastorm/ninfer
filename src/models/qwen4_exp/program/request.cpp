@@ -74,11 +74,6 @@ RequestBasePlan Program::plan_request(qwen::PreparedPrompt&& prompt,
     for (const auto id : input.token_ids)
         if (id < 0 || std::uint32_t(id) >= p.parameters.profile->public_tokens)
             throw std::invalid_argument("prompt token is outside the public vocabulary");
-    std::uint32_t previous = 0;
-    for (const auto f : input.identity.rewrite_execution_frontiers) {
-        if (f <= previous || f > count) throw std::invalid_argument("invalid execution frontier");
-        previous = f;
-    }
     if (const auto& r = input.identity.rewrite_checkpoint;
         r && (!r->recovery_frontier || r->recovery_frontier > r->frontier || r->frontier > count))
         throw std::invalid_argument("invalid input recovery point");

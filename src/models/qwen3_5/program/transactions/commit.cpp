@@ -117,16 +117,12 @@ PendingBatch ProgramImpl::decode(std::span<const SequenceHandle> members,
 // states, and this is their single accepted-prefix identity commit.
 void ProgramImpl::commit_generated_prefix_identity(
     SequenceState& sequence, std::uint32_t base_ledger_frontier,
-    std::span<const TokenId> accepted_tokens,
-    std::optional<std::uint32_t> prefix_execution_split_after) {
+    std::span<const TokenId> accepted_tokens) {
     if (base_ledger_frontier > sequence.ledger.size() ||
         accepted_tokens.size() > sequence.ledger.size() - base_ledger_frontier ||
         sequence.ledger.size() != base_ledger_frontier + accepted_tokens.size() ||
         !std::equal(accepted_tokens.begin(), accepted_tokens.end(),
-                    sequence.ledger.begin() + static_cast<std::ptrdiff_t>(base_ledger_frontier)) ||
-        (prefix_execution_split_after &&
-         (*prefix_execution_split_after == 0 ||
-          *prefix_execution_split_after > accepted_tokens.size()))) {
+                    sequence.ledger.begin() + static_cast<std::ptrdiff_t>(base_ledger_frontier))) {
         throw std::logic_error("committed generated-prefix identity has an invalid span");
     }
     const bool already_appended = sequence.prefix_identity.size() == sequence.ledger.size() &&
@@ -136,14 +132,11 @@ void ProgramImpl::commit_generated_prefix_identity(
     if (!already_appended && !awaits_append) {
         throw std::logic_error("generated-prefix identity is not at its base or committed extent");
     }
-    if (already_appended && !prefix_execution_split_after) { return; }
-    sequence.prefix_identity.truncate(base_ledger_frontier);
-    sequence.prefix_digests.truncate(base_ledger_frontier);
+    if (already_appended) { return; }
     sequence.prefix_identity.append_generated(accepted_tokens.size(),
-                                              sequence.continuation.metadata.rope_delta,
-                                              prefix_execution_split_after);
+                                              sequence.continuation.metadata.rope_delta);
     sequence.prefix_digests.append_generated(
-        accepted_tokens, sequence.continuation.metadata.rope_delta, prefix_execution_split_after);
+        accepted_tokens, sequence.continuation.metadata.rope_delta);
     if (sequence.prefix_identity.size() != sequence.ledger.size() ||
         sequence.prefix_digests.size() != sequence.ledger.size()) {
         throw std::logic_error("committed generated-prefix identity changed the ledger shape");
@@ -152,11 +145,11 @@ void ProgramImpl::commit_generated_prefix_identity(
 
 runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
     std::span<const SequenceHandle> members, std::span<const TokenId> row_major_tokens,
-    std::uint32_t row_stride, std::span<const std::optional<std::uint32_t>> prefix_execution_splits,
+    std::uint32_t row_stride,
     runtime::ExecutionTiming* failed_timing) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
     if (pending_transaction_ || members.empty() || members.size() > max_concurrency ||
-        row_stride == 0 || prefix_execution_splits.size() != members.size() ||
+        row_stride == 0 ||
         row_major_tokens.size() != static_cast<std::size_t>(row_stride) * members.size()) {
         throw std::invalid_argument("forced-token membership is invalid");
     }
@@ -193,10 +186,6 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             throw std::logic_error("forced-token sequence frontier is invalid");
         }
         validate_licensed_tokens(row_major_tokens.subspan(row * row_stride, row_stride));
-        if (prefix_execution_splits[row] &&
-            (*prefix_execution_splits[row] == 0 || *prefix_execution_splits[row] > row_stride)) {
-            throw std::logic_error("forced-token execution split is outside its row");
-        }
         require_unit(lane, ExecutionUnitKind::Control, row_stride);
         lanes[row] = lane;
     }
@@ -333,8 +322,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             timing.end_wait();
             work.reset();
 
-            commit_generated_prefix_identity(sequence, base_ledger_frontier, forced,
-                                             prefix_execution_splits[row]);
+            commit_generated_prefix_identity(sequence, base_ledger_frontier, forced);
             sequence.continuation.metadata.execution_frontier = end;
             sequence.ledger_frontier                          = end + 1U;
             sequence.mtp_draft_count                          = 0;
@@ -406,7 +394,6 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
         std::array<std::uint32_t, kMaximumConcurrency> accepted{};
         std::array<std::uint8_t, kMaximumConcurrency> terminal{};
         std::array<std::uint8_t, kMaximumConcurrency> discarded{};
-        std::array<std::optional<std::uint32_t>, kMaximumConcurrency> prefix_execution_splits{};
         for (std::size_t row = 0; row < row_count; ++row) {
             const std::uint32_t lane                = ContractAccess::lane(members[row]).value;
             lanes[row]                              = lane;
@@ -419,17 +406,12 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                  (decision.accepted_tokens != 0 || !decision.terminal)) ||
                 (!(decision.cancelled || decision.failed) &&
                  (decision.accepted_tokens == 0 || decision.accepted_tokens > candidate.produced ||
-                  (!decision.terminal && decision.accepted_tokens != candidate.produced))) ||
-                (decision.prefix_execution_split_after &&
-                 ((decision.cancelled || decision.failed) ||
-                  *decision.prefix_execution_split_after == 0 ||
-                  *decision.prefix_execution_split_after > decision.accepted_tokens))) {
+                  (!decision.terminal && decision.accepted_tokens != candidate.produced)))) {
                 throw std::logic_error("pending transaction decision is invalid");
             }
             accepted[row]                = decision.accepted_tokens;
             terminal[row]                = decision.terminal ? 1U : 0U;
             discarded[row]               = (decision.cancelled || decision.failed) ? 1U : 0U;
-            prefix_execution_splits[row] = decision.prefix_execution_split_after;
         }
         for (std::size_t row = 0; row < row_count; ++row) {
             const std::uint32_t lane = lanes[row];
@@ -450,8 +432,6 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                                 std::span<const std::uint32_t>(accepted.data(), row_count),
                                 std::span<const std::uint8_t>(terminal.data(), row_count),
                                 std::span<const std::uint8_t>(discarded.data(), row_count),
-                                std::span<const std::optional<std::uint32_t>>(
-                                    prefix_execution_splits.data(), row_count),
                                 failed_timing));
         timing.resume_post();
         pending_transaction_.reset();
