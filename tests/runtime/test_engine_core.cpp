@@ -99,6 +99,14 @@ constexpr std::uint32_t kPageGroups   = 64;
 constexpr std::size_t kCheckpointHostBytes = 4096;
 constexpr std::size_t kHostCapacityBytes   = 1U << 20;
 constexpr std::uint32_t kDurableFrontier   = 4;
+// Fork #102 fixtures: a short reusable prefix, a resident prompt long enough never to finish
+// before the test releases it, the page groups one arrival's binding needs, and the bounded
+// priority attempts each fresh request may receive.
+constexpr std::uint32_t kSourceFrontier    = 3;
+constexpr std::uint32_t kLongPrompt        = 8192;
+constexpr std::uint32_t kLongContext       = 16384;
+constexpr std::uint32_t kArrivalPageGroups = 2;
+constexpr std::uint32_t kPriorityAttempts  = 4;
 constexpr auto kSession                    = "session";
 // A publication that correctly precedes its result is held this long, while no observer can
 // return; a result delivered first is read by its observer within this interval.
@@ -207,6 +215,11 @@ public:
         bool decode_released = false;
         std::uint32_t decode_rounds = 0;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> prefill_steps;
+        // Context-operation boundary fixtures (fork #102).
+        std::uint32_t demotes          = 0;
+        std::uint32_t demoting_steps   = 0;
+        std::uint32_t state_binds      = 0;
+        std::uint32_t credit_shortages = 0;
     };
 
     template <class Update>
@@ -232,6 +245,8 @@ public:
 
     // Stalled prefills make no progress until released.
     std::atomic<bool> stall_released{false};
+    // A LaneHold prefill makes no progress until released.
+    std::atomic<bool> hold_released{false};
 
 private:
     std::mutex mutex_;
@@ -260,6 +275,13 @@ enum class Script : std::uint8_t {
     ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
     PacingDecode,   // Hold the first decode until the test has submitted its neighbour.
     PacingPrefill,  // Chunked text work, recording executed caps and intervening decode rounds.
+    HistorySeed,     // Publishes a catalog checkpoint whose KV pages can always be demoted.
+    DemotingPrefill, // One token per step; each unit needs a page group that a demotion frees.
+    CreditArrival,   // Binding needs two freed page groups, so its own demotion must run.
+    StateArrival,    // Binding needs a Device state that no reclaim can supply.
+    SourceSeed,      // Publishes the short reusable prefix.
+    SourceArrival,   // Prefers the SourceSeed prefix.
+    LaneHold,        // Occupies its lane without progress until hold_released.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
@@ -321,7 +343,9 @@ public:
 
     [[nodiscard]] std::vector<std::uint32_t> capture_frontiers() const { return {}; }
 
-    [[nodiscard]] std::optional<std::uint64_t> prefix_shortlist_key(std::uint32_t) const noexcept {
+    [[nodiscard]] std::optional<std::uint64_t>
+    prefix_shortlist_key(std::uint32_t frontier) const noexcept {
+        if (script_ == Script::SourceArrival && frontier == kSourceFrontier) { return frontier; }
         return std::nullopt;
     }
 
@@ -605,10 +629,15 @@ public:
                                                        bool = false,
                                                        std::span<const Checkpoint> = {},
                                                        std::span<const Checkpoint> = {}) const {
-        if (checkpoint) { return std::nullopt; }
-        Source source;
-        source.remaining_work =
-            rt::make_prefill_work(0, base.summary().prompt_tokens, 0, 0, kPrefillChunk);
+        if (checkpoint && (!valid_checkpoint(*checkpoint) || base.script() != Script::SourceArrival ||
+                           !live_record(*checkpoint).source_prefix)) {
+            return std::nullopt;
+        }
+        Source source{.checkpoint    = checkpoint,
+                      .reused_tokens = checkpoint ? live_record(*checkpoint).frontier : 0};
+        source.remaining_work = rt::make_prefill_work(
+            source.reused_tokens, base.summary().prompt_tokens - source.reused_tokens, 0, 0,
+            kPrefillChunk);
         return source;
     }
 
@@ -616,7 +645,8 @@ public:
                                                    const Source& source, Resume* resume = nullptr,
                                                    UnitKind = UnitKind::Decode,
                                                    std::uint32_t = 1) {
-        require(!operation_ && !lanes_.at(lane.value).active && !source.checkpoint,
+        require(!operation_ && !lanes_.at(lane.value).active &&
+                    (!source.checkpoint || base.script() == Script::SourceArrival),
                 "scripted binding overlaps native ownership");
         if (base.script() == Script::IsolatedMiss ||
             (resume != nullptr && base.script() == Script::VictimPause)) {
@@ -625,10 +655,23 @@ public:
         if (base.script() == Script::StateSlotMiss) {
             return {.capacity_possible = true, .shortage = {.state_slots = 1}};
         }
+        if (base.script() == Script::StateArrival) {
+            events_.record([](Events::State& state) { ++state.state_binds; });
+            return {.capacity_possible = true, .shortage = {.state_slots = 1}};
+        }
+        if (base.script() == Script::CreditArrival) {
+            if (credits_ < kArrivalPageGroups) {
+                events_.record([](Events::State& state) { ++state.credit_shortages; });
+                return {.capacity_possible = true,
+                        .shortage = {.kv_page_groups = {kArrivalPageGroups - credits_}}};
+            }
+            credits_ -= kArrivalPageGroups;
+        }
         operation_ = Operation{.kind          = ContextKind::Bind,
                                .lane          = lane.value,
                                .script        = base.script(),
                                .prompt_tokens = base.summary().prompt_tokens,
+                               .reused_tokens = source.reused_tokens,
                                .publish       = base.summary().publish_continuation};
         if (base.script() == Script::HoldBinding) {
             events_.record([](Events::State& state) { state.binding_held = true; });
@@ -654,6 +697,12 @@ public:
         operation_.reset();
         operation_completed(operation.kind);
         progress.complete = true;
+        if (operation.kind == ContextKind::Demote) {
+            // The demoted history keeps its catalog entry; one Device page group is now free.
+            ++credits_;
+            progress.published = true;
+            return progress;
+        }
         auto& lane        = lanes_.at(operation.lane);
         if (operation.kind == ContextKind::Bind) {
             if (held) { return progress; }
@@ -661,6 +710,7 @@ public:
                         .script        = operation.script,
                         .epoch         = next_epoch_++,
                         .prompt_tokens = operation.prompt_tokens,
+                        .reused_tokens = operation.reused_tokens,
                         .publish       = operation.publish};
             progress.published = true;
             if (operation.script != Script::InvalidBinding) {
@@ -700,6 +750,13 @@ public:
                         [](const Lane& lane) { return lane.active && victim(lane.script); })) {
             return {.shortage = {.kv_page_groups = {1}}};
         }
+        if (auto& lane = live(units.front().sequence);
+            lane.script == Script::DemotingPrefill && !lane.permit &&
+            !events_.stall_released.load()) {
+            // Each prefill unit needs one Device page group that only a demotion frees.
+            if (credits_ == 0) { return {.shortage = {.kv_page_groups = {1}}}; }
+            --credits_;
+        }
         live(units.front().sequence).permit = true;
         return {.reserved = true};
     }
@@ -719,6 +776,17 @@ public:
                                                   std::uint32_t max_tokens = 0) {
         auto& lane = live(sequence);
         require(lane.permit, "prefill consumed a released unit permit");
+        if (lane.script == Script::DemotingPrefill && !events_.stall_released.load()) {
+            // Never reaches its prompt end before release, so every step needs a new unit.
+            if (lane.prefilled + 1 >= lane.prompt_tokens) { return {}; }
+            std::this_thread::sleep_for(1ms);
+            ++lane.prefilled;
+            lane.permit = false;
+            events_.record([](Events::State& state) { ++state.demoting_steps; });
+            return {.summary = {.prompt_tokens = lane.prompt_tokens},
+                    .processed_prompt_tokens = 1};
+        }
+        if (lane.script == Script::LaneHold && !events_.hold_released.load()) { return {}; }
         if (lane.script == Script::PressureProgress && !lane.partial_progress) {
             if (!events_.snapshot().paused) return {};
             // Service is charged from real wall time. One bounded unit crosses the real
@@ -731,8 +799,13 @@ public:
         }
         if (stalls(lane.script) && !events_.stall_released.load()) { return {}; }
         PrefillProgress progress;
-        progress.summary                 = {.prompt_tokens = lane.prompt_tokens};
-        progress.processed_prompt_tokens = lane.prompt_tokens - (lane.partial_progress ? 1U : 0U);
+        progress.summary = {.prompt_tokens        = lane.prompt_tokens,
+                            .reused_prompt_tokens = lane.reused_tokens,
+                            .prefix_reuse_path    = lane.reused_tokens
+                                                        ? ninfer::PrefixReusePath::Checkpoint
+                                                        : ninfer::PrefixReusePath::Root};
+        progress.processed_prompt_tokens = lane.prompt_tokens - lane.reused_tokens -
+                                           lane.prefilled - (lane.partial_progress ? 1U : 0U);
         if (lane.script == Script::PacingPrefill) {
             const auto prefix = lane.prefilled;
             progress.processed_prompt_tokens = std::min(
@@ -838,6 +911,9 @@ public:
         if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
             lanes_[sequence.lane].epoch == sequence.epoch && lanes_[sequence.lane].publish) {
             result.checkpoint = publish_checkpoint(lanes_[sequence.lane].prompt_tokens);
+            auto& record         = records_[result.checkpoint->index];
+            record.history       = lanes_[sequence.lane].script == Script::HistorySeed;
+            record.source_prefix = lanes_[sequence.lane].script == Script::SourceSeed;
         }
         result.status = release(sequence);
         return result;
@@ -942,10 +1018,11 @@ public:
         return {.frontier = record.frontier, .leased = record.pins != 0};
     }
 
-    // Distinct checkpoints never share a prefix key, so no request reuses another's checkpoint.
+    // Distinct checkpoints never share a prefix key, so no request reuses another's checkpoint;
+    // only the SourceSeed prefix is keyed by position, where the SourceArrival plan finds it.
     [[nodiscard]] std::uint64_t checkpoint_key(Checkpoint checkpoint,
                                                std::uint32_t position) const {
-        (void)live_record(checkpoint);
+        if (live_record(checkpoint).source_prefix) { return position; }
         return (std::uint64_t{checkpoint.index} << 32U) | position;
     }
 
@@ -970,9 +1047,28 @@ public:
         return bytes;
     }
 
-    [[nodiscard]] ReclaimPlan plan_reclaim(std::span<const Checkpoint>, std::span<const Checkpoint>,
-                                           Resources) const {
-        return {};
+    // A KV shortage may demote one page group of the seeded history, which keeps its catalog
+    // entry, so every resident unit can start a demotion (fork #102). In release mode only
+    // ordinary releases of other checkpoints are offered, as when Host takes no more demotions.
+    [[nodiscard]] ReclaimPlan plan_reclaim(std::span<const Checkpoint> allowed,
+                                           std::span<const Checkpoint> excluded,
+                                           Resources shortage) const {
+        ReclaimPlan plan;
+        if (!shortage.kv_page_groups[0]) { return plan; }
+        for (const auto point : allowed) {
+            if (!valid_checkpoint(point) ||
+                std::find(excluded.begin(), excluded.end(), point) != excluded.end()) {
+                continue;
+            }
+            const bool history = records_[point.index].history;
+            if (history && !release_named_victim) {
+                plan.demotions.push_back(
+                    {.handle = point, .sources = {point}, .released = {.kv_page_groups = {1}}});
+            } else if (!history && release_named_victim) {
+                plan.releases.push_back({.sources = {point}, .released = {.kv_page_groups = {1}}});
+            }
+        }
+        return plan;
     }
 
     [[nodiscard]] std::vector<Release> plan_releases(std::span<const Checkpoint> allowed,
@@ -988,7 +1084,12 @@ public:
         return plans;
     }
 
-    [[nodiscard]] bool start_demote(const Demotion&) { return false; }
+    [[nodiscard]] bool start_demote(const Demotion& plan) {
+        require(!operation_ && valid_checkpoint(plan.handle), "demotion overlaps native ownership");
+        operation_ = Operation{.kind = ContextKind::Demote};
+        events_.record([](Events::State& state) { ++state.demotes; });
+        return true;
+    }
 
     [[nodiscard]] ninfer::MemorySummary memory_summary() const { return {}; }
 
@@ -1159,6 +1260,7 @@ public:
     }
 
     bool pause_needs_host = false;
+    bool release_named_victim = false;
     bool busy_during_context  = false;
 
 private:
@@ -1167,6 +1269,7 @@ private:
         Script script               = Script::Complete;
         std::uint64_t epoch         = 0;
         std::uint32_t prompt_tokens = 0;
+        std::uint32_t reused_tokens = 0;
         bool publish                = false;
         bool permit                 = false;
         bool partial_progress       = false;
@@ -1178,6 +1281,7 @@ private:
         std::uint32_t lane          = 0;
         Script script               = Script::Complete;
         std::uint32_t prompt_tokens = 0;
+        std::uint32_t reused_tokens = 0;
         bool publish                = false;
     };
 
@@ -1185,6 +1289,8 @@ private:
         std::uint32_t frontier = 0;
         std::uint32_t pins     = 0;
         bool valid             = false;
+        bool history           = false;
+        bool source_prefix     = false;
         std::size_t host_bytes = kCheckpointHostBytes;
     };
 
@@ -1262,6 +1368,8 @@ private:
         rt::KvPoolDescriptor{.id = {0}, .label = "main", .device_page_groups = kPageGroups}};
     std::array<Lane, ninfer::kMaximumConcurrency> lanes_{};
     std::optional<Operation> operation_;
+    // Device page groups freed by completed demotions and not yet reserved.
+    std::uint32_t credits_ = 0;
     std::uint64_t next_epoch_ = 1;
     // Index 0 never names a checkpoint.
     std::vector<Record> records_{Record{}};
@@ -1534,6 +1642,16 @@ public:
                              ninfer::OutputConsumerMode::Aggregate, {}, {}, std::string(session), tag);
     }
 
+    // An unnamed request whose completed continuation stays an ordinary catalog checkpoint.
+    [[nodiscard]] Submission submit_published(Script script, std::uint32_t prompt_tokens) {
+        Prompt prompt{.script = script, .tokens = prompt_tokens, .publish_continuation = true};
+        const ninfer::PromptSummary summary{.prompt_tokens = prompt.tokens};
+        rt::ResolvedRequestOptions options;
+        options.execution.requested_output_tokens = 1;
+        return core_->submit(std::move(prompt), summary, 0.0, std::move(options),
+                             ninfer::OutputConsumerMode::Aggregate, {});
+    }
+
     // Waits as an HTTP handler would, then reads runtime statistics before anything else runs.
     [[nodiscard]] Outcome await(Submission& submission, bool cancel = false,
                                 Clock::time_point cancel_at = {}) {
@@ -1580,6 +1698,7 @@ public:
         core_->checkpoint_call([&] { action(*instance_.program); });
     }
     void release_stalls() { events_.stall_released.store(true); }
+    void release_hold() { events_.hold_released.store(true); }
 
     [[nodiscard]] Events& events() noexcept { return events_; }
 
@@ -2192,6 +2311,181 @@ void pending_pressure_save(bool have_older_resident) {
 void resident_waits_for_pending_pressure_save() { pending_pressure_save(false); }
 
 void pending_pressure_save_preserves_older_resident() { pending_pressure_save(true); }
+
+// --- Fork #102: bounded fresh admission at context-operation boundaries -----------------------
+// A resident whose every unit needs a page group demotes catalog history each turn, so Native's
+// single context slot is occupied whenever the ordinary fresh scan follows the resident
+// reservation. Seeds that history, starts the resident and returns once it is progressing
+// through its own demotions.
+[[nodiscard]] Submission start_demoting_resident(Harness& harness) {
+    auto history = harness.submit_published(Script::HistorySeed, 4);
+    require_finished(harness.await(history), FinishReason::OutputLimit, "history seed");
+    auto resident = harness.submit(Script::DemotingPrefill, 1, false, {}, kLongPrompt);
+    harness.events().await(
+        [](const Events::State& state) { return state.demotes >= 2 && state.demoting_steps >= 2; },
+        "the resident progressing through its own demotions");
+    return resident;
+}
+
+// The resident still progresses through its own demotions after the arrival settled; it is then
+// released and finishes. Callers run this before asserting, so a regression stays bounded.
+void finish_demoting_resident(Harness& harness, Submission& resident,
+                              const Events::State& settled) {
+    harness.events().await(
+        [&](const Events::State& state) {
+            return state.demoting_steps >= settled.demoting_steps + 2 &&
+                   state.demotes >= settled.demotes + 2;
+        },
+        "resident demotions after the arrival settled");
+    harness.release_stalls();
+    require_finished(harness.await(resident), FinishReason::OutputLimit, "demoting resident");
+}
+
+void fresh_arrival_during_resident_demotion() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    auto resident = start_demoting_resident(harness);
+    auto arrival  = harness.submit(Script::Complete, 1, false, Clock::now() + 1s);
+    const auto outcome = harness.await(arrival);
+    finish_demoting_resident(harness, resident, harness.events().snapshot());
+    require_finished(outcome, FinishReason::OutputLimit,
+                     "fresh arrival while every resident unit starts a demotion");
+    require(outcome.result->scheduling.preemptions == 0 && outcome.stats.preemptions == 0 &&
+                outcome.stats.running_requests == 1 && outcome.stats.prefilling_requests == 1,
+            "the arrival's admission paused or displaced the prefilling resident");
+    require_membership(harness.observed_stats(), {}, "resident demotion cleanup");
+}
+
+// The arrival's first binding is a page group short, so its own demotion runs. It must bind at
+// that demotion's completion boundary, before the resident's next reservation takes the page.
+void fresh_arrival_rebinds_after_its_own_demotion() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    auto resident = start_demoting_resident(harness);
+    auto arrival  = harness.submit(Script::CreditArrival, 1, false, Clock::now() + 1s);
+    const auto outcome = harness.await(arrival);
+    const auto settled = harness.events().snapshot();
+    finish_demoting_resident(harness, resident, settled);
+    require_finished(outcome, FinishReason::OutputLimit, "arrival that needs its own demotion");
+    require(settled.credit_shortages == 1,
+            "the resident took the page group the arrival's own demotion freed");
+    require(outcome.stats.preemptions == 0 && outcome.stats.running_requests == 1 &&
+                outcome.stats.prefilling_requests == 1,
+            "the arrival's own demotion paused or displaced the prefilling resident");
+    require_membership(harness.observed_stats(), {}, "own demotion cleanup");
+}
+
+void fresh_arrival_keeps_its_preferred_source() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    auto seed = harness.submit_published(Script::SourceSeed, kSourceFrontier);
+    require_finished(harness.await(seed), FinishReason::OutputLimit, "source seed");
+    auto resident = start_demoting_resident(harness);
+    auto arrival  = harness.submit(Script::SourceArrival, 1, false, Clock::now() + 1s);
+    const auto outcome = harness.await(arrival);
+    finish_demoting_resident(harness, resident, harness.events().snapshot());
+    require_finished(outcome, FinishReason::OutputLimit, "arrival preferring a retained prefix");
+    require(outcome.result->admission.preferred_reused_tokens == kSourceFrontier &&
+                outcome.result->reused_prompt_tokens == kSourceFrontier &&
+                outcome.result->computed_prefill_tokens == 1 &&
+                outcome.result->admission.fallback_reason == ninfer::AdmissionFallbackReason::None,
+            "the arrival did not bind its preferred source");
+    require_membership(harness.observed_stats(), {}, "preferred source cleanup");
+}
+
+// The resident's own reclaim leaves a named victim's pressure save Pending. Every fresh request
+// waits while it is Pending, the resident does not progress, and nothing is released or paused.
+void pending_pressure_save_blocks_fresh_arrival() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    acknowledged_turn(harness, "victim", "saved");
+    auto handler = std::make_shared<DeferredPressureHandler>(harness.events());
+    harness.core().set_pressure_checkpoint_handler(handler);
+    auto resident = start_demoting_resident(harness);
+    harness.configure([](Program& p) { p.release_named_victim = true; });
+    harness.events().await([](const Events::State& state) { return state.pressure_saves != 0; },
+                           "the resident's Pending pressure save");
+    const auto pending = harness.events().snapshot();
+    auto arrival = harness.submit(Script::Complete, 1, false, Clock::now() + 300ms);
+    const auto outcome = harness.await(arrival);
+    const auto settled = harness.events().snapshot();
+    harness.configure([](Program& p) {
+        require(p.valid_checkpoint({1}), "a Pending pressure save released its named checkpoint");
+        p.release_named_victim = false;
+    });
+    harness.core().notify_checkpoint_progress();
+    finish_demoting_resident(harness, resident, settled);
+    require_request_error(outcome, RequestErrorKind::QueueTimeout,
+                          "fresh arrival during a Pending pressure save");
+    require(settled.bound == pending.bound && settled.demoting_steps == pending.demoting_steps &&
+                settled.pressure_save_named && settled.pause_lanes.empty(),
+            "a Pending pressure save admitted the arrival, ran the resident or paused it");
+    require_membership(harness.observed_stats(), {}, "pending pressure save cleanup");
+}
+
+// An arrival that can never bind receives a bounded number of attempts while the resident keeps
+// progressing, then expires at its own deadline.
+void fresh_priority_attempts_are_bounded() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    auto resident = start_demoting_resident(harness);
+    const auto before = harness.events().snapshot();
+    auto arrival = harness.submit(Script::StateArrival, 1, false, Clock::now() + 500ms);
+    const auto outcome = harness.await(arrival);
+    const auto settled = harness.events().snapshot();
+    finish_demoting_resident(harness, resident, settled);
+    require_request_error(outcome, RequestErrorKind::QueueTimeout, "arrival that can never bind");
+    require(settled.state_binds <= kPriorityAttempts &&
+                settled.demoting_steps > before.demoting_steps,
+            "arrival attempts exceeded their bound or stopped the resident");
+    require_membership(harness.observed_stats(), {}, "bounded attempts cleanup");
+}
+
+// While a holder occupies the other lane, the first arrival waits without an attempt. It expires
+// or is cancelled; the next arrival is then admitted on its own attempt once the lane frees.
+void departed_priority_request_spares_the_next_arrival() {
+    for (const bool cancel : {false, true}) {
+        Harness harness(2, true, 0, 0, kLongContext);
+        auto holder = harness.submit(Script::LaneHold, 1);
+        harness.events().await([](const Events::State& state) { return state.bound == 1; },
+                               "the lane holder");
+        auto resident = start_demoting_resident(harness);
+        const auto now = Clock::now();
+        auto first = harness.submit(Script::Complete, 1, false,
+                                    cancel ? Clock::time_point{} : now + 300ms);
+        const auto departed =
+            harness.await(first, false, cancel ? now + 300ms : Clock::time_point{});
+        auto next = harness.submit(Script::Complete, 1, false, Clock::now() + 1s);
+        harness.release_hold();
+        const auto admitted = harness.await(next);
+        const auto held     = harness.await(holder);
+        finish_demoting_resident(harness, resident, harness.events().snapshot());
+        if (cancel) {
+            require_finished(departed, FinishReason::Cancelled, "cancelled waiting arrival");
+        } else {
+            require_request_error(departed, RequestErrorKind::QueueTimeout, "expired waiting arrival");
+        }
+        require_finished(held, FinishReason::OutputLimit, "lane holder");
+        require_finished(admitted, FinishReason::OutputLimit,
+                         "arrival after the earlier waiting arrival departed");
+        require_membership(harness.observed_stats(), {}, "departed arrival cleanup");
+    }
+}
+
+// An arrival that exhausted its attempts and expired leaves the next arrival its full bound: the
+// next one needs its own demotion and a second attempt to bind.
+void exhausted_priority_request_spares_the_next_arrival() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    auto resident = start_demoting_resident(harness);
+    auto first    = harness.submit(Script::StateArrival, 1, false, Clock::now() + 500ms);
+    const auto expired = harness.await(first);
+    auto next = harness.submit(Script::CreditArrival, 1, false, Clock::now() + 1s);
+    const auto admitted = harness.await(next);
+    const auto settled  = harness.events().snapshot();
+    finish_demoting_resident(harness, resident, settled);
+    require_request_error(expired, RequestErrorKind::QueueTimeout, "arrival that can never bind");
+    require_finished(admitted, FinishReason::OutputLimit,
+                     "arrival after an exhausted arrival expired");
+    require(settled.state_binds <= kPriorityAttempts && settled.credit_shortages == 1,
+            "attempts leaked between arrivals or the resident took the freed page group");
+    require_membership(harness.observed_stats(), {}, "exhausted arrival cleanup");
+}
+// --- End fork #102 ------------------------------------------------------------------------------
 
 void export_proven_victim() {
     Harness h(1, true);
@@ -3004,6 +3298,17 @@ int main() {
         Case{"resident_waits_for_pending_pressure_save", resident_waits_for_pending_pressure_save},
         Case{"pending_pressure_save_preserves_older_resident",
              pending_pressure_save_preserves_older_resident},
+        Case{"fresh_arrival_during_resident_demotion", fresh_arrival_during_resident_demotion},
+        Case{"fresh_arrival_rebinds_after_its_own_demotion",
+             fresh_arrival_rebinds_after_its_own_demotion},
+        Case{"fresh_arrival_keeps_its_preferred_source", fresh_arrival_keeps_its_preferred_source},
+        Case{"pending_pressure_save_blocks_fresh_arrival",
+             pending_pressure_save_blocks_fresh_arrival},
+        Case{"fresh_priority_attempts_are_bounded", fresh_priority_attempts_are_bounded},
+        Case{"departed_priority_request_spares_the_next_arrival",
+             departed_priority_request_spares_the_next_arrival},
+        Case{"exhausted_priority_request_spares_the_next_arrival",
+             exhausted_priority_request_spares_the_next_arrival},
         Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
         Case{"export_proven_victim", export_proven_victim},
         Case{"export_proof_failures_and_intents", export_proof_failures_and_intents},
