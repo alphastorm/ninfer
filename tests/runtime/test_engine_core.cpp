@@ -2439,7 +2439,15 @@ public:
         : harness_(harness),
           coordinator_(
               [this](std::string_view session, std::optional<std::string_view> tag) {
-                  NullWriter writer;
+                  // A hook set by the test runs once inside the write, while the export is in flight.
+                  CallbackWriter writer([this] {
+                      std::function<void()> hook;
+                      {
+                          std::lock_guard lock(mutex_);
+                          hook = std::exchange(on_write_, nullptr);
+                      }
+                      if (hook) { hook(); }
+                  });
                   const auto result =
                       harness_.core().export_session(session, tag.value_or(""), writer, {});
                   record([&](Counts& counts) {
@@ -2500,6 +2508,12 @@ public:
 
     void drain() noexcept { coordinator_.drain(); }
 
+    // Runs once inside the next export's write, on the coordinator thread.
+    void on_write(std::function<void()> hook) {
+        std::lock_guard lock(mutex_);
+        on_write_ = std::move(hook);
+    }
+
 private:
     template <class Update>
     void record(Update update) noexcept {
@@ -2515,6 +2529,7 @@ private:
     std::condition_variable changed_;
     Counts counts_;
     std::function<std::uint64_t()> probe_;
+    std::function<void()> on_write_;
     // Last: its worker uses every member above, and it is destroyed (drained) first.
     ninfer::serve::AutomaticCheckpointCoordinator coordinator_;
 };
@@ -2651,8 +2666,11 @@ void esave_pressure_save_outlasts_busy_operation() {
 // A pressure owner that would start an operation at every reservation (it pauses a victim) and a
 // pressure save requested while an operation is in flight. While the save is held no reservation
 // starts an operation, no reservation asks for the victim before the save has prepared, and the
-// victim is released after at most one Pending answer (the race with the coordinator recording
-// the finished save).
+// victim is released after at most one Pending answer: the worker may ask between the export's
+// retirement and the coordinator recording the finished save; the next progress change is that
+// recording itself (stalled residents, no waiting requests). The export stages a Host copy, so
+// Host has room for it; the room is taken away during its write, so the next pause must release
+// the named victim.
 void esave_pressure_save_prepared_before_resident_reserves() {
     Harness h(3, true);
     acknowledged_turn(h, "victim", "saved");
@@ -2669,7 +2687,7 @@ void esave_pressure_save_prepared_before_resident_reserves() {
     } stop{h, *handler};
     h.configure([](Program& p) {
         p.busy_during_context = true;
-        p.host_capacity       = kCheckpointHostBytes;
+        p.host_capacity       = 2 * kCheckpointHostBytes;
         p.pause_needs_host    = true;
     });
     // The older victim needs the named checkpoint's Host room to pause; the younger one's pause,
@@ -2681,6 +2699,7 @@ void esave_pressure_save_prepared_before_resident_reserves() {
                      "the held victim pause");
     std::uint64_t before = 0;
     h.configure([&](Program& p) { before = p.prepare_calls; });
+    handler->on_write([&h] { h.configure([](Program& p) { p.host_capacity = kCheckpointHostBytes; }); });
     rt::PressureCheckpointVictim request{"victim", "saved"};
     handler->save_before_eviction({&request, 1});
     const bool held = !handler->wait([](const auto& counts) { return counts.completed != 0; }, 300ms);
