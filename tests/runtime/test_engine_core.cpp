@@ -196,6 +196,11 @@ public:
         bool pressure_save_named = false;
         std::vector<std::uint32_t> pause_lanes;
         bool host_pause_saved = false;
+        // ESAVE per-site cases: a held operation started; the worker-side order, while traced, of
+        // decode rounds (D), operation starts (b binding, p pause) and completions (B, P), durable
+        // prepares (E export, I import) and markers the test records.
+        bool held_operation = false;
+        std::string trace;
         bool victim_finished  = false;
         bool pressure_finished_before_victim = false;
         bool decode_held = false;
@@ -628,6 +633,7 @@ public:
         if (base.script() == Script::HoldBinding) {
             events_.record([](Events::State& state) { state.binding_held = true; });
         }
+        operation_started('b');
         return {.reserved = true};
     }
 
@@ -640,8 +646,13 @@ public:
                            operation.script == Script::VictimHold);
         ContextProgress progress;
         progress.kind = operation.kind;
+        // ESAVE: a released hold completes at the first poll after a decode round (mid-turn).
+        if (held_until_release_ && !decoded_after_release_ && !cancellation.requested()) {
+            return progress;
+        }
         if (held && !cancellation.requested()) { return progress; }
         operation_.reset();
+        operation_completed(operation.kind);
         progress.complete = true;
         auto& lane        = lanes_.at(operation.lane);
         if (operation.kind == ContextKind::Bind) {
@@ -756,6 +767,8 @@ public:
                                       std::span<const rt::RoundBudget>,
                                       rt::ExecutionTiming* = nullptr,
                                       rt::TokenMaskProvider* = nullptr) {
+        if (held_until_release_ && release_held_operation) { decoded_after_release_ = true; }
+        trace('D');
         for (const auto sequence : sequences) {
             require(live(sequence).permit, "decode consumed a released unit permit");
             if (live(sequence).script == Script::PacingDecode) {
@@ -891,6 +904,7 @@ public:
             state.pause_lanes.push_back(sequence.lane);
             state.host_pause_saved = save_snapshot;
         });
+        operation_started('p');
         return true;
     }
 
@@ -1019,6 +1033,12 @@ public:
     std::size_t host_capacity = kHostCapacityBytes;
     std::size_t redundant_bytes = 0;
     bool zero_arena_gain = false;
+    // ESAVE per-site cases. The next context operation started while armed stays in flight until
+    // released; released, it completes at the first poll after a decode round, i.e. mid-turn at
+    // the post-decode poll and never at a turn's first poll. Tracing fills Events::State::trace.
+    bool hold_next_operation    = false;
+    bool release_held_operation = false;
+    bool trace_operations       = false;
     std::optional<HostKind> forced_refusal;
     rt::DurableReason refusal_reason = rt::DurableReason::Capacity;
     std::uint64_t prepare_calls = 0;
@@ -1031,6 +1051,7 @@ public:
         ExportLease(Program& program, std::span<const Checkpoint> points)
             : program_(&program), points_(points.begin(), points.end()) {
             ++program.prepare_calls;
+            program.trace('E');
             // Like native preparation, a busy context transaction refuses retryably.
             if (program.busy_during_context && program.operation_) {
                 kind_   = HostKind::Busy;
@@ -1111,6 +1132,7 @@ public:
     [[nodiscard]] ImportReservation prepare_checkpoint_import(const rt::DurableCheckpointSet& set,
                                                               const rt::ContinuationCheckpointReader&,
                                                               const rt::DurableLimits&) {
+        trace('I');
         // Like native preparation, a busy context transaction refuses retryably.
         if (busy_during_context && operation_) { return ImportReservation(rt::DurableReason::TransactionBusy); }
         const auto points = static_cast<std::uint32_t>(set.points.size());
@@ -1211,6 +1233,28 @@ private:
         return rt::ConsumeStatus::Consumed;
     }
 
+    // ESAVE per-site cases: arm the hold of an operation started while armed; record order.
+    void operation_started(char event) {
+        if (std::exchange(hold_next_operation, false)) {
+            held_until_release_ = true;
+            events_.record([](Events::State& state) { state.held_operation = true; });
+        }
+        trace(event);
+    }
+
+    void operation_completed(ContextKind kind) {
+        if (std::exchange(held_until_release_, false)) { release_held_operation = false; }
+        decoded_after_release_ = false;
+        trace(kind == ContextKind::Bind ? 'B' : 'P');
+    }
+
+    void trace(char event) {
+        if (!trace_operations) { return; }
+        events_.record([event](Events::State& state) {
+            if (state.trace.size() < kTraceLimit) { state.trace.push_back(event); }
+        });
+    }
+
     Events& events_;
     std::size_t retained_extent_bytes_ = 0;
     std::shared_ptr<PublicationGate> gate_;
@@ -1223,6 +1267,11 @@ private:
     std::vector<Record> records_{Record{}};
     std::size_t reserved_points_ = 0;
     std::size_t staged_exports_  = 0;
+    // ESAVE per-site cases: the trace bound; the current operation is held, and a decode round
+    // followed its release.
+    static constexpr std::size_t kTraceLimit = 64;
+    bool held_until_release_    = false;
+    bool decoded_after_release_ = false;
 };
 
 using Published = std::vector<ninfer::OutputDelta>;
@@ -2798,6 +2847,120 @@ void esave_held_export_returns_after_engine_failure() {
                 " result=" + esave_state(saved.state) + "/" + esave_reason(saved.reason));
 }
 
+// Per-site bound of a hold. The fixture holds one context operation until the test releases it;
+// released, it completes at the first poll after a decode round (a decoding resident supplies
+// the round): mid-turn, never at a turn's first poll. After the release marker `w` the trace must
+// read: decode rounds, that operation's completion, the held prepare, the starter's operation,
+// with nothing in between. So the prepare waited for exactly the one operation in flight when it
+// arrived, ran at the next turn's runner, and the starter started in that same turn. Captures
+// have no fixture support; their two start sites are guarded in code only.
+constexpr std::uint32_t kESaveDecodeTokens = 1U << 22;
+
+// Releases the held operation and starts the trace, in one worker command.
+void esave_release_held(Harness& h) {
+    h.configure([&h](Program& p) {
+        p.trace_operations       = true;
+        p.release_held_operation = true;
+        h.events().record([](Events::State& state) { state.trace.push_back('w'); });
+    });
+}
+
+[[nodiscard]] bool esave_mid_turn_shape(const std::string& trace, char prepared, char started) {
+    const auto completed = trace.find('B');
+    return completed != std::string::npos && completed >= 2 && trace.size() > completed + 2 &&
+           trace.front() == 'w' && trace.find_first_not_of('D', 1) == completed &&
+           trace[completed + 1] == prepared && trace[completed + 2] == started;
+}
+
+// Resident reclaim. A restore is held behind a pressure owner's own binding; the binding
+// completes mid-turn and the owner's reservation right after that poll needs a victim paused.
+// The restore prepares at the next turn's runner, before any pause or demotion starts, and the
+// pause starts in that turn. Before, the restore met the binding and was refused as a busy
+// transaction. A restore rather than an export: an export lease in flight would itself defer the
+// reclaim until it retired.
+void esave_held_prepare_bounds_resident_reclaim() {
+    Harness h(3, true);
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto decoding = h.submit(Script::Complete, kESaveDecodeTokens);
+    h.events().await([](const Events::State& state) { return state.bound == 1; },
+                     "the decoding resident's binding");
+    auto victim = h.submit(Script::VictimHold, 1);
+    h.events().await([](const Events::State& state) { return state.bound == 2; },
+                     "the victim's binding");
+    h.configure([](Program& p) { p.hold_next_operation = true; });
+    auto owner = h.submit(Script::Pressure, 1);
+    h.events().await([](const Events::State& state) { return state.held_operation; },
+                     "the pressure owner's held binding");
+    auto restoring = std::async(std::launch::async, [&h] {
+        auto restore = h.prepare_restore();
+        return std::pair{restore.prepared.state, restore.prepared.reason};
+    });
+    const bool waited = restoring.wait_for(300ms) == std::future_status::timeout;
+    esave_release_held(h);
+    // A restore held again behind the pause would wait until the victim ends.
+    std::optional<Outcome> cancelled;
+    const bool prepared = restoring.wait_for(5s) == std::future_status::ready;
+    if (!prepared) { cancelled = h.await(victim, true); }
+    const auto [prepare_state, prepare_reason] = restoring.get();
+    h.events().await(
+        [](const Events::State& state) { return state.trace.find('p') != std::string::npos; },
+        "the victim's pause");
+    const auto trace = h.events().snapshot().trace;
+    if (!cancelled) { cancelled = h.await(victim, true); }
+    h.release_stalls();
+    const auto owner_outcome = h.await(owner);
+    (void)h.await(decoding, true);
+    require(waited && prepared && prepare_state == rt::DurablePrepareState::Prepared &&
+                prepare_reason == rt::DurableReason::None && esave_mid_turn_shape(trace, 'I', 'p') &&
+                esave_outcome(owner_outcome) == "OutputLimit",
+            "restore held behind a mid-turn completion, resident reclaim ready: waited=" +
+                std::to_string(waited) + " prepared before the victim ended=" +
+                std::to_string(prepared) + " reason=" + esave_reason(prepare_reason) +
+                " trace=" + trace + " owner=" + esave_outcome(owner_outcome));
+}
+
+// Admission. An export is held behind a binding; the binding completes mid-turn while a fresh
+// arrival waits in the queue behind it. The export prepares at the next turn's runner and
+// returns before the arrival binds, and the arrival binds in that turn. Before, the export met
+// the binding and was refused as a busy transaction.
+void esave_held_prepare_bounds_admission() {
+    Harness h(3, true);
+    acknowledged_turn(h, kSession, "saved");
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto decoding = h.submit(Script::Complete, kESaveDecodeTokens);
+    h.events().await([](const Events::State& state) { return state.bound == 2; },
+                     "the decoding resident's binding");
+    h.configure([](Program& p) { p.hold_next_operation = true; });
+    auto held = h.submit(Script::Complete, 1);
+    h.events().await([](const Events::State& state) { return state.held_operation; },
+                     "the held binding");
+    auto arrival = h.submit(Script::Complete, 1);
+    std::uint64_t before = 0, after = 0;
+    h.configure([&](Program& p) { before = p.prepare_calls; });
+    auto saving = std::async(std::launch::async, [&h] { return h.save("saved"); });
+    const bool waited = saving.wait_for(300ms) == std::future_status::timeout;
+    esave_release_held(h);
+    h.events().await(
+        [](const Events::State& state) { return state.trace.find('b') != std::string::npos; },
+        "the arrival's binding");
+    const auto trace = h.events().snapshot().trace;
+    (void)h.await(decoding, true);
+    const auto saved = saving.get();
+    h.configure([&](Program& p) { after = p.prepare_calls; });
+    const auto arrival_outcome = h.await(arrival);
+    const auto held_outcome    = h.await(held);
+    require(waited && saved.state == rt::DurableExportState::Exported &&
+                saved.reason == rt::DurableReason::None && after == before + 1 &&
+                esave_mid_turn_shape(trace, 'E', 'b') &&
+                esave_outcome(arrival_outcome) == "OutputLimit" &&
+                esave_outcome(held_outcome) == "OutputLimit",
+            "export held behind a mid-turn completion, arrival queued: waited=" +
+                std::to_string(waited) + " result=" + esave_state(saved.state) + "/" +
+                esave_reason(saved.reason) + " prepares=" + std::to_string(after - before) +
+                " trace=" + trace + " arrival=" + esave_outcome(arrival_outcome) +
+                " held=" + esave_outcome(held_outcome));
+}
+
 // ---- end ESAVE block ----
 
 } // namespace
@@ -2863,6 +3026,9 @@ int main() {
              esave_restore_waits_for_operation_free_boundary},
         Case{"esave_held_export_returns_after_engine_failure",
              esave_held_export_returns_after_engine_failure},
+        Case{"esave_held_prepare_bounds_resident_reclaim",
+             esave_held_prepare_bounds_resident_reclaim},
+        Case{"esave_held_prepare_bounds_admission", esave_held_prepare_bounds_admission},
     };
     int failures = 0;
     for (const auto& test : cases) {
