@@ -62,12 +62,18 @@ GPU-free `ninfer_checkpoint_owner_test` 使用真实 `CheckpointStore::Lease` �
 supersession、兄弟分叉、取消和 reader 退休；此规则与 DFlash2、MTP 或具体 GPU 架构无关。
 
 Qwen3.5 durable export 在取得长期 State reader 之前，先把完整不可变 State 镜像复制到已计费的
-Host arena，并归还 Device 副本。所有 Host 目的先预约、复制完成后才发布；容量不足或仍有
-Device reader 时拒绝本次 export，不拆除所有权保护。已有 Host 副本不重复复制。随后磁盘写入只
+Host arena，并归还 Device 副本。所有 Host 目的先预约、复制完成后才发布；仍有 Device reader
+时拒绝本次 export（Busy），不拆除所有权保护。已有 Host 副本不重复复制。随后磁盘写入只
 持有 Host State reader，分叉可恢复到独立 Device 槽，不必等待整个 KV/State 文件写完。
+Host arena 容纳不下（字节不足或无连续区间）且引擎回收已用尽时，同一命令只再做一次 Device
+暂存准备：不预约、不复制，已有 Host 副本的镜像照常归还 Device 副本，仅有 Device 副本的镜像
+由 export reader 钉在原 Device 槽，写入时与 Device KV 页一样经同一块 pinned staging 逐行
+复制，载荷字节与 Host 路径完全相同。钉住期间该槽不可释放、降级或零拷贝接管，但可以作为
+分叉源；另一个 export 遇到它返回 Busy，等前者退休后重试。
 DFlash2 的 local ring、hidden 和 recurrent state 一起逐字节保存；没有新 frontier、重算或
 舍弃检查点。GPU-free `ninfer_export_state_test` 用真实 State store 覆盖三槽全满、export reader
-存活时恢复、输出副本独立性、容量拒绝和复制失败后的恢复。它不替代 GPU 输出一致性和 TTFT 验收。
+存活时恢复、输出副本独立性、容量与连续性不足时的 Device 暂存、两条路径载荷一致和复制失败
+后的恢复。它不替代 GPU 输出一致性和 TTFT 验收。
 
 <a id="capacity"></a>
 ## 3. 容量与执行许可

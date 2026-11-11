@@ -2357,6 +2357,20 @@ void e89_pending_capacity_save_defers_fresh_request() {
     require_membership(h.observed_stats(), {}, "pending capacity save cleanup");
 }
 
+// E89 review condition (c): an export's native pins retire even when the Engine is stopped
+// while its off-lock writer runs. Host-route and Device-staged leases share this retirement.
+void e89_export_pins_retire_when_stopped_mid_write() {
+    Harness h(1, true);
+    acknowledged_turn(h, kSession, "stopping");
+    CallbackWriter writer([&] { h.core().request_stop(); });
+    const auto saved = h.core().export_session(kSession, "stopping", writer, {});
+    require(saved.state == rt::DurableExportState::Exported, "export stopped mid-write did not complete");
+    require(!h.core().is_available(), "stop during the export write did not take effect");
+    require_durable(h.observed_stats(), {.catalog = 1, .host = 1}, "export pins after a stop mid-write");
+    require(h.save("stopping", kSession, rt::DurableSaveIntent::Final).state == rt::DurableExportState::Exported,
+            "final save after a stop mid-write met leftover pins or a stopped checkpoint worker");
+}
+
 // ---- end E89 block ----
 
 } // namespace
@@ -2408,6 +2422,7 @@ int main() {
         Case{"export_exception_and_writer_epoch", export_exception_and_writer_epoch},
         // E89 block cases.
         Case{"e89_pending_capacity_save_defers_fresh_request", e89_pending_capacity_save_defers_fresh_request},
+        Case{"e89_export_pins_retire_when_stopped_mid_write", e89_export_pins_retire_when_stopped_mid_write},
     };
     int failures = 0;
     for (const auto& test : cases) {

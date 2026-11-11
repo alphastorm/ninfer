@@ -96,6 +96,17 @@ Json operation(std::string_view kind, std::string_view state, Reason reason, boo
 }
 
 void reclaim_fields(Json& value, const runtime::DurableExportReclaim& reclaim) {
+    // Additive diagnostics: the native Capacity site, the Host-route shortage, and a Device-staged
+    // attempt with the State images it streamed and its exports-in-flight gate hold.
+    if (reclaim.capacity_site != runtime::DurableCapacitySite::None)
+        value["capacity_site"] = runtime::durable_capacity_site_name(reclaim.capacity_site);
+    if (reclaim.host_shortage != runtime::DurableHostShortage::None)
+        value["host_shortage"] = runtime::durable_host_shortage_name(reclaim.host_shortage);
+    if (reclaim.device_staging_attempted) value["device_staging_attempted"] = true;
+    if (reclaim.device_staged_states) {
+        value["device_staged_states"] = reclaim.device_staged_states;
+        value["device_staged_hold_ms"] = reclaim.device_staged_hold_ms;
+    }
     if (!reclaim.considered) return;
     value["prepare_attempts"] = reclaim.prepare_attempts;
     value["reclaimed_owners"] = reclaim.reclaimed_owners;
@@ -258,7 +269,9 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
         } else {
             outcome.saved = store_.save(*snapshot, fingerprint_json_,
             [&](runtime::ContinuationCheckpointWriter& writer) {
-                auto result = Access::export_session(engine_, session, tag, writer, limits_, intent);
+                // The sink keeps the reclaim summary for the refusal receipt if the writer throws.
+                auto result = Access::export_session(engine_, session, tag, writer, limits_, intent,
+                                                     &outcome.reclaim);
                 outcome.reclaim = result.reclaim;
                 proof_pins = std::move(result.proof_pins);
                 return result;
@@ -369,7 +382,8 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                     : store_.save(*survivors, fingerprint_json_,
                     [&](runtime::ContinuationCheckpointWriter& writer) {
                         auto result = Access::export_session(
-                            engine_, session, tag, writer, limits_, runtime::DurableSaveIntent::Survivor);
+                            engine_, session, tag, writer, limits_, runtime::DurableSaveIntent::Survivor,
+                            &reclaim);
                         reclaim = result.reclaim;
                         proof_pins = std::move(result.proof_pins);
                         return result;

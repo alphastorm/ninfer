@@ -642,11 +642,12 @@ std::shared_ptr<ContinuationCheckpointReadQueue> CheckpointEngineAccess::make_re
 
 DurableExportResult CheckpointEngineAccess::export_session(
     Engine& engine, std::string_view digest, std::string_view tag,
-    ContinuationCheckpointWriter& writer, const DurableLimits& limits, DurableSaveIntent intent) {
+    ContinuationCheckpointWriter& writer, const DurableLimits& limits, DurableSaveIntent intent,
+    DurableExportReclaim* summary) {
     if (!engine.impl_) { return {.reason = DurableReason::IoUnavailable}; }
     const auto keep_alive = engine.impl_;
     return generation_core(keep_alive->core, [&](auto& core) {
-        return core.export_session(digest, tag, writer, limits, intent);
+        return core.export_session(digest, tag, writer, limits, intent, summary);
     });
 }
 

@@ -23,6 +23,7 @@ namespace codec = detail::checkpoint_codec;
 struct Refusal {
     DurablePrepareState state;
     DurableReason reason;
+    DurableCapacitySite site = DurableCapacitySite::None;
 };
 void check(bool value, DurableReason reason = DurableReason::InvalidIndex) {
     if (!value) throw Refusal{DurablePrepareState::Corrupt, reason};
@@ -36,8 +37,8 @@ void check_read(bool value, const ContinuationCheckpointReader& reader) {
         throw std::logic_error("checkpoint reader failed without a reason");
     throw Refusal{DurablePrepareState::Corrupt, reason};
 }
-void capacity(bool value) {
-    if (!value) throw Refusal{DurablePrepareState::CapacityRefused, DurableReason::Capacity};
+void capacity(bool value, DurableCapacitySite site = DurableCapacitySite::None) {
+    if (!value) throw Refusal{DurablePrepareState::CapacityRefused, DurableReason::Capacity, site};
 }
 std::string digest(std::string_view value) {
     return crypto::sha256_hex(crypto::sha256(std::as_bytes(std::span(value.data(), value.size()))));
@@ -270,7 +271,9 @@ struct Stream {
 struct ExportLease::Impl {
     DurablePrepareState state = DurablePrepareState::Prepared;
     DurableReason reason = DurableReason::None;
+    DurableCapacitySite site = DurableCapacitySite::None;
     context::StateImageStore::HostPreparation host;
+    std::size_t device_staged_states = 0;
     DurableCheckpointStats stats;
     DurableCheckpointSet index;
     DurableLimits limits;
@@ -295,6 +298,12 @@ context::StateImageStore::HostPreparation::Kind ExportLease::host_shortage_kind(
 }
 std::size_t ExportLease::host_shortage_bytes() const noexcept {
     return impl_ ? impl_->host.shortage_bytes : 0;
+}
+DurableCapacitySite ExportLease::capacity_site() const noexcept {
+    return impl_ ? impl_->site : DurableCapacitySite::None;
+}
+std::size_t ExportLease::device_staged_states() const noexcept {
+    return impl_ ? impl_->device_staged_states : 0;
 }
 const DurableCheckpointSet& ExportLease::index() const {
     if (!impl_ || !impl_->written) throw std::logic_error("checkpoint index requires completed export");
@@ -356,7 +365,7 @@ DurableCheckpointSet Program::decode_checkpoint_index(std::span<const std::byte>
 }
 
 ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle> handles,
-                                               const DurableLimits& limits) {
+                                               const DurableLimits& limits, bool device_staging) {
     auto out = std::make_unique<ExportLease::Impl>();
     out->limits = limits;
     auto& p = *impl_;
@@ -420,7 +429,7 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
         std::uint64_t metadata_bytes = 0;
         for (std::size_t i = 0; i < identities.size(); ++i) {
             metadata_bytes += static_cast<std::uint64_t>(identity_frontiers[i]) * 24;
-            capacity(metadata_bytes <= limits.staging_bytes);
+            capacity(metadata_bytes <= limits.staging_bytes, DurableCapacitySite::StagingLimit);
             out->index.identities.push_back(identity(*identities[i], identity_frontiers[i]));
         }
         std::array<std::vector<context::LogicalKVPageHandle>, 2> page_handles;
@@ -449,8 +458,8 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
         // Reject deterministic limits before materializing Host replicas or evicting cache.
         std::uint64_t resident_bytes = 0;
         const auto add_payload = [&](std::uint64_t count, std::uint64_t bytes) {
-            capacity(bytes <= limits.staging_bytes);
-            capacity(!count || bytes <= (UINT64_MAX - resident_bytes) / count);
+            capacity(bytes <= limits.staging_bytes, DurableCapacitySite::StagingLimit);
+            capacity(!count || bytes <= (UINT64_MAX - resident_bytes) / count, DurableCapacitySite::EmptyArena);
             resident_bytes += count * bytes;
         };
         add_payload(images.size(), native.state_bytes);
@@ -465,14 +474,21 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
         }
         capacity(p.host_context_arena && resident_bytes <= p.host_context_arena->capacity_bytes() &&
                  images.size() <= p.state_store->capacity() && histories.size() <=
-                     p.text_kv_histories->capacity() + (p.backend_kv_histories ? p.backend_kv_histories->capacity() : 0));
+                     p.text_kv_histories->capacity() + (p.backend_kv_histories ? p.backend_kv_histories->capacity() : 0),
+                 DurableCapacitySite::EmptyArena);
         // Retire native producers once. Off-lock copies never resolve a live handle again.
         p.device.synchronize();
         CUDA_CHECK(cudaStreamSynchronize(p.device.transfer_stream()));
         // Disk serialization can outlive many requests. Pin Host State replicas, not every
         // execution slot: forks must be able to restore while this export still owns readers.
+        // Only a staged attempt whose Host route has no room keeps Device-only images pinned on
+        // Device and streams them through the staging buffer, as Device KV pages already export.
+        using HostKind = context::StateImageStore::HostPreparation::Kind;
         out->host = p.state_store->prepare_host_export(images, p.device.transfer_view());
-        capacity(out->host.kind == context::StateImageStore::HostPreparation::Kind::Prepared);
+        if (device_staging &&
+            (out->host.kind == HostKind::HostCapacity || out->host.kind == HostKind::HostContiguity))
+            out->host = p.state_store->prepare_device_export(images);
+        capacity(out->host.kind == HostKind::Prepared, DurableCapacitySite::HostPreparation);
         for (std::size_t pool = 0; pool < out->index.pools.size(); ++pool) {
             auto& saved = out->index.pools[pool];
             if (saved.pages.empty()) continue;
@@ -521,12 +537,16 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
                                           native.state_bytes, std::string(64, '0'), 256});
             out->index.states.push_back({native.state_layout_sha256, payload, 0, native.state_bytes});
             out->states.push_back(p.state_store->read(image));
-            const auto source = out->states.back().host_view();
+            // Host replica, or the retained Device slot of a Device-staged image: one layout, so
+            // the same field rows serialize identical payload bytes on either route.
+            const auto source = out->states.back().export_view();
+            const bool device = source.device != Device::cpu();
+            out->device_staged_states += device;
             ExportRecord record{payload, 0, static_cast<std::size_t>(native.state_bytes)};
             for (const auto& field : schema.fields)
                 record.copies.push_back({static_cast<const std::byte*>(source.data) + field.tensor.region.offset,
                     field.tensor.region.offset, field.layer_stride, field.layer_stride,
-                    field.tensor.region.bytes, field.layers, false});
+                    field.tensor.region.bytes, field.layers, device});
             out->staging = std::max(out->staging, record.bytes);
             out->records.push_back(std::move(record));
         }
@@ -557,11 +577,13 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
     } catch (const Refusal& failure) {
         const auto host = out->host;
         out = std::make_unique<ExportLease::Impl>(); out->state = failure.state; out->reason = failure.reason;
+        out->site = failure.site;
         out->host = host;
     } catch (const std::invalid_argument&) {
         out = std::make_unique<ExportLease::Impl>(); out->state = DurablePrepareState::Corrupt; out->reason = DurableReason::InvalidIndex;
     } catch (const std::bad_alloc&) {
         out = std::make_unique<ExportLease::Impl>(); out->state = DurablePrepareState::CapacityRefused; out->reason = DurableReason::Capacity;
+        out->site = DurableCapacitySite::Allocation;
     }
     return ExportLease(std::move(out));
 }

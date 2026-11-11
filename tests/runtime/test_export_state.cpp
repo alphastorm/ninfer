@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace {
-std::size_t copies = 0, synchronizations = 0, fail_copy = 0, error_strings = 0;
+std::size_t copies = 0, synchronizations = 0, fail_copy = 0, error_strings = 0, rows_2d = 0;
 }
 
 // Expand CUDA's versioned API aliases before the Linux linker-wrap token is formed.
@@ -58,6 +58,16 @@ cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaMemcpyAsync)(void* to, const 
     std::size_t bytes, cudaMemcpyKind, cudaStream_t) {
     if (++copies == fail_copy) return cudaErrorInvalidValue;
     std::memcpy(to, from, bytes);
+    return cudaSuccess;
+}
+// Device-staged export rows: the exporter's D2H pitched copies, emulated over host backing.
+cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaMemcpy2DAsync)(void* to, std::size_t to_pitch,
+    const void* from, std::size_t from_pitch, std::size_t width, std::size_t rows, cudaMemcpyKind,
+    cudaStream_t) {
+    ++rows_2d;
+    for (std::size_t row = 0; row < rows; ++row)
+        std::memcpy(static_cast<std::byte*>(to) + row * to_pitch,
+                    static_cast<const std::byte*>(from) + row * from_pitch, width);
     return cudaSuccess;
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaStreamSynchronize)(cudaStream_t) {
@@ -324,6 +334,138 @@ void unavailable_and_fragmented(DeviceContext& device) {
     require(unavailable.kind == HostKind::NoHostArena && unavailable.shortage_bytes == 0,
             "no arena is not contended capacity");
 }
+
+// Serializes one exported image as ExportLease::write does for a State record: a zeroed
+// record, then each field's layer rows at its image offset. Device sources use the D2H
+// pitched copy and Host sources use memcpy rows, exactly as the record's copy flag selects.
+std::vector<std::byte> serialize(const StateImageLayout& schema, ConstMemorySpan source) {
+    std::vector<std::byte> record(schema.image_stride);
+    const bool device = source.device != Device::cpu();
+    for (const auto& field : schema.fields) {
+        const auto* from = static_cast<const std::byte*>(source.data) + field.tensor.region.offset;
+        auto* to = record.data() + field.tensor.region.offset;
+        if (device) {
+            CUDA_CHECK(cudaMemcpy2DAsync(to, field.layer_stride, from, field.layer_stride,
+                                         field.tensor.region.bytes, field.layers,
+                                         cudaMemcpyDeviceToHost, nullptr));
+        } else {
+            for (std::uint32_t layer = 0; layer < field.layers; ++layer)
+                std::memcpy(to + layer * field.layer_stride, from + layer * field.layer_stride,
+                            field.tensor.region.bytes);
+        }
+    }
+    return record;
+}
+
+// The payload a source filled with `value` must produce: field bytes, every hole zero.
+std::vector<std::byte> expected_payload(const StateImageLayout& schema, std::byte value) {
+    std::vector<std::byte> record(schema.image_stride);
+    for (const auto& field : schema.fields)
+        for (std::uint32_t layer = 0; layer < field.layers; ++layer)
+            std::fill_n(record.begin() + static_cast<std::ptrdiff_t>(field.tensor.region.offset +
+                                                                       layer * field.layer_stride),
+                        field.tensor.region.bytes, value);
+    return record;
+}
+
+// E89: a mixed export set (one image with both replicas, two Device-only) serializes the same
+// bytes through the Device-staged route as through the Host route, with zero-filled holes.
+void staged_payload_identity(DeviceContext& device) {
+    using Residency = models::context::StateReplicaResidency;
+    Fixture f(device.device(), 3);
+    auto backup = f.images.reserve_device_to_host(f.sources[0]);
+    require(backup.has_value(), "mixed-set Host backup");
+    backup->enqueue(device.transfer_view());
+    CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
+    backup->publish(true);
+    auto hog = f.host.allocate(2 * f.schema.image_stride);
+    require(hog.has_value(), "the rest of the Host arena is held");
+    const auto host_copies = copies;
+    const auto device_rows = rows_2d;
+    require(f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::HostCapacity &&
+                copies == host_copies, "held arena refuses the Host route without copies");
+    const auto staged = f.images.prepare_device_export(f.sources);
+    require(staged.kind == HostKind::Prepared && staged.device_images == 2 && copies == host_copies &&
+                f.images.residency(f.sources[0]) == Residency::HostOnly &&
+                f.images.residency(f.sources[1]) == Residency::DeviceOnly &&
+                f.images.residency(f.sources[2]) == Residency::DeviceOnly,
+            "mixed set: the Both image releases its Device replica, Device-only images stay");
+    std::vector<std::vector<std::byte>> via_device;
+    {
+        std::vector<Store::ReadLease> readers;
+        for (const auto source : f.sources) readers.push_back(f.images.read(source));
+        for (const auto& reader : readers) via_device.push_back(serialize(f.schema, reader.export_view()));
+    }
+    require(rows_2d == device_rows + 2 * f.schema.fields.size(),
+            "only the two Device-only images were read with Device rows");
+    hog.reset();
+    const auto room_copies = copies;
+    const auto prepared = f.images.prepare_host_export(f.sources, device.transfer_view());
+    require(prepared.kind == HostKind::Prepared && prepared.device_images == 0 &&
+                copies == room_copies + 2 && f.images.device_occupied() == 0 && f.images.host_occupied() == 3,
+            "once Host room exists the Host route copies exactly the two missing images");
+    const auto host_rows = rows_2d;
+    for (std::size_t i = 0; i < f.sources.size(); ++i) {
+        const auto reader = f.images.read(f.sources[i]);
+        const auto via_host = serialize(f.schema, reader.export_view());
+        require(via_host == via_device[i], "Host and Device-staged routes serialized different payload bytes");
+        require(via_host == expected_payload(f.schema, std::byte(i + 1)),
+                "payload is not exactly the field bytes with zero-filled holes");
+    }
+    require(rows_2d == host_rows, "Host route payload used Device rows");
+}
+
+// E89 review condition (a): with exactly enough Host room the Host route takes every image;
+// one image short is the only way to the Device-staged route.
+void host_route_first(DeviceContext& device) {
+    Fixture exact(device.device(), 3);
+    const auto before = copies;
+    const auto prepared = exact.images.prepare_host_export(exact.sources, device.transfer_view());
+    require(prepared.kind == HostKind::Prepared && prepared.device_images == 0 && copies == before + 3 &&
+                exact.images.device_occupied() == 0 && exact.images.host_occupied() == 3,
+            "exact Host room took the Host route");
+    Fixture short_one(device.device(), 2);
+    const auto refused = short_one.images.prepare_host_export(short_one.sources, device.transfer_view());
+    require(refused.kind == HostKind::HostCapacity && refused.shortage_bytes == short_one.schema.image_stride,
+            "one image short refuses the Host route with its exact deficit");
+    require(short_one.images.prepare_device_export(short_one.sources).device_images == 3,
+            "only the refused set is Device-staged");
+}
+
+// E89 review condition (b): a second export never shares a pinned Device image; it is Busy
+// until the first export's readers retire, then prepares.
+void staged_reader_busy_then_retry(DeviceContext& device) {
+    Fixture f(device.device(), 0);
+    require(f.images.prepare_device_export(f.sources).kind == HostKind::Prepared, "first staged export");
+    std::vector<Store::ReadLease> first;
+    for (const auto source : f.sources) first.push_back(f.images.read(source));
+    require(f.images.prepare_device_export(f.sources).kind == HostKind::Busy &&
+                f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::Busy,
+            "a second export met pinned Device images without Busy");
+    first.clear();
+    require(f.images.prepare_device_export(f.sources).kind == HostKind::Prepared,
+            "the second export did not prepare after the first retired");
+    f.unchanged_device_sources();
+}
+
+// E89 (plan correction 2): while a staged reader pins a Device-only image, the predicate every
+// native demotion and release plan applies excludes it, and replica drops refuse; nothing throws.
+void staged_pin_blocks_demotion(DeviceContext& device) {
+    Fixture f(device.device(), 0);
+    require(f.images.prepare_device_export(f.sources).kind == HostKind::Prepared, "staged export");
+    {
+        const auto reader = f.images.read(f.sources[0]);
+        require(!f.images.can_release_after_checkpoint_references(f.sources[0], 1) &&
+                    !f.images.can_release(f.sources[0]) && !f.images.drop_device_replica(f.sources[0]) &&
+                    !f.images.drop_host_replica(f.sources[0]) && f.images.device_resident(f.sources[0]),
+                "a pinned Device-only image was offered to demotion or release");
+        require(f.images.can_release_after_checkpoint_references(f.sources[1], 1),
+                "an unpinned image lost its demotion eligibility");
+    }
+    require(f.images.can_release_after_checkpoint_references(f.sources[0], 1),
+            "the retired reader still blocks demotion");
+    f.unchanged_device_sources();
+}
 } // namespace
 
 int main() {
@@ -336,6 +478,10 @@ int main() {
         Case{"existing_host_replica", existing_host_replica},
         Case{"failure_recovery", failure_recovery},
         Case{"unavailable_and_fragmented", unavailable_and_fragmented},
+        Case{"staged_payload_identity", staged_payload_identity},
+        Case{"host_route_first", host_route_first},
+        Case{"staged_reader_busy_then_retry", staged_reader_busy_then_retry},
+        Case{"staged_pin_blocks_demotion", staged_pin_blocks_demotion},
     };
     try {
         ninfer::DeviceContext device;

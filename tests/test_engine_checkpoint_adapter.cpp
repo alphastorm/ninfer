@@ -88,10 +88,19 @@ DurableCheckpointStats checkpoint_stats() {
 
 struct ExportProgram {
     struct Usage { struct { std::size_t host_bytes = 0; } occupied; };
-    Usage physical_usage() const { return {}; }
+    std::size_t occupied_host = 0;
+    Usage physical_usage() const { return {{occupied_host}}; }
     unsigned redundant_calls = 0;
     unsigned reclaim_calls = 0;
-    std::size_t release_redundant_host(std::span<const int>) { ++redundant_calls; return 0; }
+    // Lossless cleanup that frees this much Host room ends a Host shortage (E89 Host-first tests).
+    std::size_t redundant_room = 0;
+    std::size_t release_redundant_host(std::span<const int>) {
+        ++redundant_calls;
+        if (!redundant_room) { return 0; }
+        occupied_host -= std::exchange(redundant_room, 0);
+        host_refusal = false;
+        return 1;
+    }
     struct Image {
         bool device = false;
         unsigned readers = 0;
@@ -104,6 +113,7 @@ struct ExportProgram {
     unsigned export_acquisitions = 0;
     unsigned export_retirements = 0;
     bool off_worker_retirement = false;
+    unsigned staged_prepares = 0;
     static constexpr unsigned device_capacity = 3;
 
     struct Reservation {
@@ -119,20 +129,35 @@ struct ExportProgram {
         std::thread::id worker;
         bool host_refusal = false;
         bool busy = false;
-        explicit Lease(ExportProgram& program, std::span<const int> points) {
-            host_refusal = program.host_refusal;
+        bool pinned = false;
+        std::size_t staged_states = 0;
+        Lease(ExportProgram& program, std::span<const int> points, bool device_staging = false) {
+            // A Device-staged attempt reads Device-only images from Device: no Host shortage.
+            host_refusal = program.host_refusal && !device_staging;
             busy = program.serialize_exports && program.export_acquisitions != program.export_retirements;
             if (busy) { return; }
             if (program.refuse_export) { return; }
+            if (host_refusal) { return; }
+            // Like StateImageStore, a Device image another export reads is Busy for staging.
+            pinned = device_staging && std::any_of(points.begin(), points.end(), [&](int point) {
+                return program.images.at(point).device && program.images.at(point).readers;
+            });
+            if (pinned) { return; }
             handles.assign(points.begin(), points.end());
             owner = &program;
             worker = std::this_thread::get_id();
             ++owner->export_acquisitions;
             for (const int point : handles) { ++owner->images.at(point).readers; }
+            if (device_staging) {
+                ++owner->staged_prepares;
+                staged_states = static_cast<std::size_t>(std::count_if(handles.begin(), handles.end(),
+                    [&](int point) { return owner->images.at(point).device; }));
+            }
         }
         Lease(Lease&& other) noexcept
             : owner(std::exchange(other.owner, nullptr)), handles(std::move(other.handles)),
-              worker(other.worker), host_refusal(other.host_refusal), busy(other.busy) {}
+              worker(other.worker), host_refusal(other.host_refusal), busy(other.busy),
+              pinned(other.pinned), staged_states(other.staged_states) {}
         ~Lease() {
             if (owner) {
                 owner->off_worker_retirement |= std::this_thread::get_id() != worker;
@@ -146,9 +171,12 @@ struct ExportProgram {
         DurableReason reason() const {
             return owner ? DurableReason::None : busy ? DurableReason::TransactionBusy : DurableReason::Capacity;
         }
-        enum class HostKind { Prepared, HostCapacity, HostContiguity };
-        HostKind host_shortage_kind() const { return host_refusal ? HostKind::HostCapacity : HostKind::Prepared; }
+        enum class HostKind { Prepared, Busy, HostCapacity, HostContiguity };
+        HostKind host_shortage_kind() const {
+            return pinned ? HostKind::Busy : host_refusal ? HostKind::HostCapacity : HostKind::Prepared;
+        }
         std::size_t host_shortage_bytes() const { return host_refusal ? 1 : 0; }
+        std::size_t device_staged_states() const { return staged_states; }
         DurableExportResult write(ContinuationCheckpointWriter& writer) {
             if (!owner) { return {.reason = DurableReason::Capacity}; }
             const std::array<std::byte, 1> bytes{};
@@ -187,8 +215,9 @@ struct ExportProgram {
         }
         return points;
     }
-    Lease prepare_checkpoint_export(std::span<const int> points, const DurableLimits&) {
-        return Lease(*this, points);
+    Lease prepare_checkpoint_export(std::span<const int> points, const DurableLimits&,
+                                    bool device_staging = false) {
+        return Lease(*this, points, device_staging);
     }
     unsigned device_slots() const {
         return static_cast<unsigned>(std::count_if(images.begin(), images.end(),
@@ -453,6 +482,15 @@ public:
         return export_session(session, "turn", writer, {}, intent);
     }
     DurableExportResult save(ContinuationCheckpointWriter& writer) { return save("first", writer); }
+    DurableExportResult save_with_summary(const std::string& session, ContinuationCheckpointWriter& writer,
+                                          DurableExportReclaim& summary) {
+        return export_session(session, "turn", writer, {}, DurableSaveIntent::Automatic, &summary);
+    }
+    std::size_t exports_in_flight() { return on_worker([&] { return checkpoint_exports_in_flight_; }); }
+    // Gives `to` the same native points as `from`, so their exports read one set of images.
+    void share_points(const std::string& from, const std::string& to) {
+        on_worker([&] { resources_.owners[to].points = resources_.owners.at(from).points; });
+    }
     bool isolated_admission() {
         return on_worker([&] {
             if (instance_.program->reserve_after_lossless_reclaim()) { return true; }
@@ -469,6 +507,8 @@ public:
     }
     std::uint64_t observed_progress() const { return checkpoint_progress(); }
     void save_completed() { notify_checkpoint_progress(); }
+    // Observed engine progress, as a completed native context operation or admission reports.
+    void admission_progress() { on_worker([&] { request_admission_check(); }); }
     bool capacity_pending() {
         return on_worker([&] { return admission_capacity_progress_pending(false); });
     }
@@ -818,6 +858,206 @@ void restore_lookup_pins_its_gate_through_sweeps() {
     require(core.restore_captured("quiet", quiet) == DurableReason::None,
             "gate sweeps invalidated a restore with no intervening turn");
 }
+
+// E89 (fork #89): after the unchanged Host route and its reclaim are exhausted with a Host
+// shortage, one Device-staged attempt saves the session.
+void staged_export_after_host_route_exhausted() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.complete_first_resume();
+    core.on_worker([&] { program.host_refusal = true; });
+    const auto before = core.progress();
+    NullWriter writer;
+    DurableExportReclaim summary;
+    const auto result = core.save_with_summary("first", writer, summary);
+    require(result.state == DurableExportState::Exported && result.reason == DurableReason::None,
+            "Host-capacity shortage was not saved through the Device-staged route");
+    require(result.reclaim.considered && result.reclaim.prepare_attempts == 1 &&
+                result.reclaim.device_staging_attempted && result.reclaim.device_staged_states == 3 &&
+                result.reclaim.host_shortage == DurableHostShortage::HostCapacity &&
+                result.reclaim.capacity_site == DurableCapacitySite::None &&
+                program.redundant_calls == 1 && program.reclaim_calls == 1 && program.staged_prepares == 1,
+            "staged attempt was not one attempt after the unchanged Host route and its reclaim");
+    require(summary.device_staging_attempted && summary.device_staged_states == 3,
+            "summary sink missed the staged attempt");
+    require(core.exports_in_flight() == 0 &&
+                core.on_worker([&] { return program.pinned_device_slots() == 0; }) &&
+                core.progress().first == before.first + 1,
+            "staged export retirement leaked Device readers or skipped its observed progress");
+}
+
+// E89 review condition (a): the staged attempt never runs when the Host route succeeds, with
+// or without the reclaim that makes room for it.
+void host_route_first_never_stages() {
+    for (const bool shortage : {false, true}) {
+        ExportProgram program;
+        AdapterFixture<ExportContract> core(program);
+        core.restore("first");
+        core.complete_first_resume();
+        core.on_worker([&] {
+            program.host_refusal = shortage;
+            program.occupied_host = 4;
+            program.redundant_room = shortage ? 4 : 0;
+        });
+        NullWriter writer;
+        const auto result = core.save(writer);
+        require(result.state == DurableExportState::Exported && program.staged_prepares == 0 &&
+                    !result.reclaim.device_staging_attempted && result.reclaim.device_staged_states == 0 &&
+                    result.reclaim.prepare_attempts == (shortage ? 2U : 1U),
+                "Device staging ran although the Host route, after its reclaim, succeeded");
+    }
+}
+
+// E89 review condition (c) and #84: a throwing staged write releases every Device reader and
+// the in-flight gate, and the caller still holds the reclaim and staging summary.
+void staged_pins_retire_on_writer_failure() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.complete_first_resume();
+    core.on_worker([&] { program.host_refusal = true; });
+    BlockingWriter writer(true);
+    DurableExportReclaim summary;
+    auto saving = std::async(std::launch::async, [&] { return core.save_with_summary("first", writer, summary); });
+    ReleaseWriter release{writer};
+    writer.wait_until_blocked();
+    require(core.on_worker([&] { return program.pinned_device_slots() == 3; }) && core.exports_in_flight() == 1,
+            "staged export did not hold its Device readers through the off-lock write");
+    writer.release();
+    bool threw = false;
+    try { (void)saving.get(); } catch (const WriterFailure&) { threw = true; }
+    require(threw, "staged writer failure was swallowed or converted");
+    require(core.on_worker([&] { return program.pinned_device_slots() == 0; }) && core.exports_in_flight() == 0,
+            "throwing staged write left Device readers or the in-flight gate behind");
+    require(summary.considered && summary.prepare_attempts == 1 && summary.device_staging_attempted &&
+                summary.device_staged_states == 3 && summary.host_shortage == DurableHostShortage::HostCapacity,
+            "throwing write lost the reclaim and staging summary");
+}
+
+// E89 review condition (b): a second export that meets Device images pinned by a staged export
+// is a retryable Capacity refusal; the first export's retirement retries and completes it.
+void staged_busy_export_retries_after_first_retires() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.complete_first_resume();
+    core.restore("second");
+    core.share_points("first", "second");
+    core.on_worker([&] { program.host_refusal = true; });
+    BlockingWriter writer;
+    auto saving = std::async(std::launch::async, [&] { return core.save(writer); });
+    ReleaseWriter release{writer};
+    writer.wait_until_blocked();
+    std::mutex mutex;
+    std::condition_variable cv;
+    unsigned calls = 0, completed = 0, probes = 0;
+    DurableReason reason = DurableReason::None;
+    const auto wait = [&](const auto& predicate) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, 2s, predicate);
+    };
+    ninfer::serve::AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            NullWriter output;
+            const auto result = core.save(std::string(session), output);
+            std::lock_guard lock(mutex);
+            ++calls;
+            reason = result.reason;
+            return ninfer::serve::AutomaticCheckpointResult{std::string(*tag), result.reason};
+        },
+        [&] {
+            std::lock_guard lock(mutex);
+            ++probes;
+            cv.notify_all();
+            return ninfer::serve::CheckpointSaveProgress{core.observed_progress()};
+        },
+        [&] {
+            core.save_completed();
+            std::lock_guard lock(mutex);
+            ++completed;
+            cv.notify_all();
+        });
+    PressureCheckpointVictim victim{"second", "turn"};
+    coordinator.save_before_eviction({&victim, 1});
+    require(wait([&] { return completed == 1 && probes >= 4; }),
+            "staged save did not defer while another staged export pinned its Device images");
+    {
+        std::lock_guard lock(mutex);
+        require(calls == 1 && reason == DurableReason::Capacity &&
+                    victim.outcome == PressureCheckpointOutcome::Pending && program.staged_prepares == 1,
+                "pinned Device image did not refuse the second staged export as retryable Capacity");
+    }
+    writer.release();
+    require(saving.get().state == DurableExportState::Exported, "first staged export did not finish");
+    require(wait([&] { return completed == 2; }),
+            "first export's retirement left the Busy staged save Pending without engine activity");
+    coordinator.save_before_eviction({&victim, 1});
+    {
+        std::lock_guard lock(mutex);
+        require(calls == 2 && reason == DurableReason::None &&
+                    victim.outcome == PressureCheckpointOutcome::Settled && program.staged_prepares == 2,
+                "retired staged export did not let the deferred staged save complete exactly once");
+    }
+    coordinator.drain();
+}
+
+// E89 (plan correction 3), characterization of a same-class latch: a pressure save refused with
+// TransactionBusy spends the transient retry budget; once it is spent the victim stays Pending,
+// even after the busy cause clears, until its session completes another turn. Reported, unfixed.
+void transaction_busy_budget_leaves_pressure_save_pending() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.restore("second");
+    core.on_worker([&] { program.serialize_exports = true; });
+    BlockingWriter writer;
+    auto saving = std::async(std::launch::async, [&] { return core.save(writer); });
+    ReleaseWriter release{writer};
+    writer.wait_until_blocked();
+    std::mutex mutex;
+    std::condition_variable cv;
+    unsigned calls = 0, completed = 0, busy = 0;
+    const auto wait = [&](const auto& predicate, auto timeout) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, timeout, predicate);
+    };
+    ninfer::serve::AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            NullWriter output;
+            const auto result = core.save(std::string(session), output);
+            std::lock_guard lock(mutex);
+            ++calls;
+            busy += result.reason == DurableReason::TransactionBusy;
+            return ninfer::serve::AutomaticCheckpointResult{std::string(*tag), result.reason};
+        },
+        [&] { return ninfer::serve::CheckpointSaveProgress{core.observed_progress()}; },
+        [&] {
+            core.save_completed();
+            std::lock_guard lock(mutex);
+            ++completed;
+            cv.notify_all();
+        });
+    PressureCheckpointVictim victim{"second", "turn"};
+    coordinator.save_before_eviction({&victim, 1});
+    constexpr unsigned attempts = ninfer::serve::kTransientCheckpointRetries + 1;
+    for (unsigned attempt = 1; attempt <= attempts; ++attempt) {
+        require(wait([&] { return completed == attempt; }, 2s), "TransactionBusy pressure save attempt did not run");
+        core.admission_progress();
+    }
+    writer.release();
+    require(saving.get().state == DurableExportState::Exported, "busy-causing export did not finish");
+    require(!wait([&] { return completed > attempts; }, 300ms),
+            "an exhausted TransactionBusy pressure save retried without a new turn");
+    coordinator.save_before_eviction({&victim, 1});
+    {
+        std::lock_guard lock(mutex);
+        require(calls == attempts && busy == attempts && victim.outcome == PressureCheckpointOutcome::Pending &&
+                    victim.reason == DurableReason::TransactionBusy,
+                "exhausted TransactionBusy pressure save did not stay Pending after its cause cleared");
+    }
+    coordinator.drain();
+}
 }
 
 int main() {
@@ -842,6 +1082,11 @@ int main() {
         {"unseen_session_gates", unseen_sessions_leave_bounded_gates},
         {"evicted_session_gate", evicted_session_gate_retires_and_resident_one_stays},
         {"restore_gate_pin", restore_lookup_pins_its_gate_through_sweeps},
+        {"e89_staged_export_after_host_route", staged_export_after_host_route_exhausted},
+        {"e89_host_route_first_never_stages", host_route_first_never_stages},
+        {"e89_staged_writer_failure_retires_pins", staged_pins_retire_on_writer_failure},
+        {"e89_staged_busy_retries_after_retirement", staged_busy_export_retries_after_first_retires},
+        {"e89_transaction_busy_budget_latch", transaction_busy_budget_leaves_pressure_save_pending},
     };
     unsigned failures = 0;
     for (const auto& [name, run] : cases) {

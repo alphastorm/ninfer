@@ -84,8 +84,8 @@ if(WIN32)
 else()
   foreach(symbol IN ITEMS cudaGetDeviceCount cudaGetDevice cudaSetDevice cudaSetDeviceFlags
       cudaGetDeviceProperties cudaGetDeviceProperties_v2 cudaStreamCreateWithFlags
-      cudaStreamDestroy cudaMallocHost cudaFreeHost cudaMemcpyAsync cudaStreamSynchronize
-      cudaGetErrorString)
+      cudaStreamDestroy cudaMallocHost cudaFreeHost cudaMemcpyAsync cudaMemcpy2DAsync
+      cudaStreamSynchronize cudaGetErrorString)
     target_link_options(ninfer_export_state_test PRIVATE "LINKER:--wrap=${symbol}")
   endforeach()
 endif()

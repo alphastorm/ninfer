@@ -469,6 +469,20 @@ releases real pins and advances observed progress to wake other sessions' deferr
 Native page quotes are not arena occupancy: receipts count actual per-release arena
 deltas before any re-materialization.
 
+A save must not depend on Host-arena room. When the Host route above ends in a byte
+deficit or contiguity-only miss — reclaim exhausted, not permitted, or skipped inside a
+pressure callback — the same command makes exactly one **Device-staged** prepare of the
+current points and tag. It reserves and copies nothing: images with a Host replica release
+their Device replica as on the Host route, and every Device-only image keeps its Device
+replica under the lease's `StateImageStore::ReadLease`. The writer copies those images'
+field rows from Device through the same bounded pinned staging as Device-resident KV
+pages, so payload paths, bytes, digests and the index are identical on both routes. The
+pin holds that Device slot until the lease retires on the worker (on every writer exit);
+it blocks release, demotion and zero-copy moves of the image but not forks from it, and a
+second export that meets it is Busy (retryable Capacity) until retirement. A staged
+prepare never reclaims, counts in `checkpoint_exports_in_flight_` like any prepared
+export, and is not counted in `prepare_attempts`. Busy and other refusals are unchanged.
+
 The export result returns both proof readers and a reclaim summary. The service holds
 those readers **outside the exporter callback until the full store save returns or
 unwinds**, including staging quota, pointer publication and post-publication quota.

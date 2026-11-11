@@ -73,6 +73,9 @@ public:
 
         [[nodiscard]] std::int32_t device_slot() const;
         [[nodiscard]] ConstMemorySpan host_view() const;
+        // The image an export serializes: its Host replica when present, otherwise its Device
+        // slot. Both replicas share one layout. Resolve under Engine serialization only.
+        [[nodiscard]] ConstMemorySpan export_view() const;
         void reset() noexcept;
     private:
         ReadLease(StateImageStore& store, Handle image, std::uint64_t epoch) noexcept
@@ -143,10 +146,16 @@ public:
         enum class Kind { Prepared, Busy, NoHostArena, HostCapacity, HostContiguity };
         Kind kind = Kind::Prepared;
         std::size_t shortage_bytes = 0;
+        // Images a Device-staged preparation leaves on Device for the exporter to read.
+        std::uint32_t device_images = 0;
     };
     // A refusal leaves residency unchanged. Prepared readers retain no execution slots.
     [[nodiscard]] HostPreparation prepare_host_export(std::span<const Handle> images,
                                                       CudaExecutionView execution);
+    // Fallback when the Host route has no room: reserves and copies nothing. Images with Host
+    // replicas release their Device replicas, as on the Host route; Device-only images stay
+    // resident and the exporter's readers pin them for its off-lock write. Busy as above.
+    [[nodiscard]] HostPreparation prepare_device_export(std::span<const Handle> images);
 
     StateImageStore(StateImageStorage& device, HostContextArena* host,
                     std::uint32_t logical_capacity);

@@ -419,6 +419,10 @@ public:
     [[nodiscard]] runtime::DurableCheckpointStats stats() const noexcept;
     [[nodiscard]] context::StateImageStore::HostPreparation::Kind host_shortage_kind() const noexcept;
     [[nodiscard]] std::size_t host_shortage_bytes() const noexcept;
+    // Native site of a Capacity refusal, for receipts only.
+    [[nodiscard]] runtime::DurableCapacitySite capacity_site() const noexcept;
+    // State images a Device-staged export reads from their Device replicas.
+    [[nodiscard]] std::size_t device_staged_states() const noexcept;
     [[nodiscard]] const runtime::DurableCheckpointSet& index() const;
     // No Program access: immutable views, a dedicated stream, bounded staging and disk I/O only.
     [[nodiscard]] runtime::DurableExportResult write(runtime::ContinuationCheckpointWriter&);
@@ -481,8 +485,11 @@ public:
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle checkpoint) const;
     [[nodiscard]] bool checkpoint_matches(CheckpointHandle checkpoint,
                                           const RequestBasePlan& base) const;
+    // device_staging: when the Host arena cannot take the State images, keep Device-only images
+    // on Device and stream them through the writer's staging buffer instead of refusing.
     [[nodiscard]] ExportLease prepare_checkpoint_export(std::span<const CheckpointHandle>,
-                                                        const runtime::DurableLimits&);
+                                                        const runtime::DurableLimits&,
+                                                        bool device_staging = false);
     [[nodiscard]] ImportReservation prepare_checkpoint_import(
         const runtime::DurableCheckpointSet&, const runtime::ContinuationCheckpointReader&,
         const runtime::DurableLimits&);

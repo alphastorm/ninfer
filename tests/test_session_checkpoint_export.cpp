@@ -43,6 +43,7 @@ struct Script {
     bool stale = false;
     std::map<std::string, unsigned> calls;
     std::vector<DurableSaveIntent> intents;
+    DurableExportReclaim* summary = nullptr;
 } script;
 struct ReadQueue final : ContinuationCheckpointReadQueue {
     struct Done final : ContinuationCheckpointReadCompletion { void wait() override {} };
@@ -295,6 +296,72 @@ void service_proof_pin_lifetime() {
         }
     }
 }
+
+// E89 / #84: the service's summary sink keeps the reclaim and staging summary for the refusal
+// receipt when the native write throws; the exception is not turned into a native refusal.
+void write_failure_keeps_reclaim_receipt() {
+    Fixture f;
+    const std::string session(64, 'e');
+    f.responses.put(response(session, "resp_e", 1));
+    script.export_now = [&](auto, auto&, DurableSaveIntent) -> DurableExportResult {
+        require(script.summary != nullptr, "service passed no reclaim summary sink");
+        *script.summary = summary();
+        script.summary->device_staging_attempted = true;
+        script.summary->device_staged_states = 2;
+        script.summary->host_shortage = DurableHostShortage::HostCapacity;
+        throw std::runtime_error("injected native write failure after reclaim");
+    };
+    const auto saved = f.service->save(session);
+    require(saved.at("committed") == false && saved.at("reason") == "io_unavailable",
+            "throwing native write changed its refusal reason or acknowledged a save");
+    has_summary(saved);
+    require(saved.at("device_staging_attempted") == true && saved.at("device_staged_states") == 2 &&
+                saved.at("host_shortage") == "host_capacity",
+            "throwing native write lost the staging summary");
+    const auto receipts = f.receipts();
+    require(!receipts.empty(), "write failure left no save receipt");
+    has_summary(receipts.back());
+}
+
+// E89: a refused save names its native Capacity site and Host shortage; a Device-staged save
+// reports its staged State images and gate hold. Existing receipt keys are unchanged.
+void capacity_site_and_staging_receipts() {
+    for (const bool staged : {false, true}) {
+        Fixture f;
+        // Session digests must be lowercase SHA-256 hex.
+        const char digit = staged ? '9' : 'f';
+        const std::string session(64, digit);
+        f.responses.put(response(session, "resp_" + std::string(1, digit), 1));
+        script.export_now = [&](auto, auto& writer, DurableSaveIntent) {
+            auto reclaim = summary();
+            reclaim.host_shortage = DurableHostShortage::HostCapacity;
+            reclaim.device_staging_attempted = true;
+            if (!staged) {
+                reclaim.capacity_site = DurableCapacitySite::HostPreparation;
+                return DurableExportResult{.reason = DurableReason::Capacity, .reclaim = reclaim};
+            }
+            auto result = exported(writer);
+            reclaim.device_staged_states = 3;
+            reclaim.device_staged_hold_ms = 7;
+            result.reclaim = reclaim;
+            return result;
+        };
+        const auto saved = f.service->save(session);
+        has_summary(saved);
+        require(saved.at("host_shortage") == "host_capacity" && saved.at("device_staging_attempted") == true,
+                "save receipt dropped its Host shortage or staging attempt");
+        if (staged) {
+            require(saved.at("committed") == true && saved.at("device_staged_states") == 3 &&
+                        saved.at("device_staged_hold_ms") == 7 && !saved.contains("capacity_site"),
+                    "Device-staged save receipt is incomplete");
+        } else {
+            require(saved.at("committed") == false && saved.at("reason") == "capacity" &&
+                        saved.at("capacity_site") == "host_preparation" &&
+                        !saved.contains("device_staged_states"),
+                    "refused save receipt did not name its Capacity site");
+        }
+    }
+}
 }
 
 // Link-time Engine boundary; the test links the real service and store, never ninfer_engine.
@@ -331,9 +398,11 @@ void CheckpointEngineAccess::notify_checkpoint_progress(Engine&) noexcept {}
 void CheckpointEngineAccess::response_stored(Engine&, std::string_view, std::string_view) noexcept {}
 DurableSessionEpoch CheckpointEngineAccess::session_epoch(Engine&, std::string_view) { return {}; }
 DurableExportResult CheckpointEngineAccess::export_session(Engine&, std::string_view session, std::string_view,
-    ContinuationCheckpointWriter& writer, const DurableLimits&, DurableSaveIntent intent) {
+    ContinuationCheckpointWriter& writer, const DurableLimits&, DurableSaveIntent intent,
+    DurableExportReclaim* summary) {
     ++script.calls[std::string(session)];
     script.intents.push_back(intent);
+    script.summary = summary;
     return script.export_now ? script.export_now(session, writer, intent) : exported(writer);
 }
 DurablePublicationResult CheckpointEngineAccess::publish_export(Engine&, std::string_view, std::string_view,
@@ -364,6 +433,8 @@ int main() {
         automatic_receipt();
         service_proof_pin_lifetime();
         final_second_pass_exception_counts_once();
+        write_failure_keeps_reclaim_receipt();
+        capacity_site_and_staging_receipts();
         std::cout << "PASS service export lifecycle\n";
         return 0;
     }

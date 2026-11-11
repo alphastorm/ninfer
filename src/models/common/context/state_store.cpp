@@ -41,6 +41,13 @@ ConstMemorySpan StateImageStore::ReadLease::host_view() const {
     return store_->host_view(image_);
 }
 
+ConstMemorySpan StateImageStore::ReadLease::export_view() const {
+    if (!store_ || store_->content_epoch(image_) != epoch_)
+        throw std::logic_error("StateImage reader has no current content");
+    if (store_->host_resident(image_)) return store_->host_view(image_);
+    return store_->device_->image(store_->physical_slot(image_));
+}
+
 ConstMemorySpan StateImageStore::host_view(Handle handle) const {
     const auto& image = require(handle);
     if (!image.host_slot) throw std::logic_error("StateImage has no Host replica");
@@ -104,6 +111,31 @@ StateImageStore::HostPreparation StateImageStore::prepare_host_export(
             throw std::logic_error("StateImage export could not release its Device replica");
     }
     return {};
+}
+
+StateImageStore::HostPreparation
+StateImageStore::prepare_device_export(std::span<const Handle> images) {
+    using Kind = HostPreparation::Kind;
+    for (const auto image : images) {
+        const auto& object = require(image);
+        if (object.role != StateImageRole::CheckpointImmutable)
+            throw std::logic_error("StateImage export requires immutable content");
+        if (object.destination_pinned || has_pending_replica(object) ||
+            (object.device_slot && object.source_pins != 0))
+            return {Kind::Busy};
+        if (!object.device_slot && !object.host_slot)
+            throw std::logic_error("StateImage export has no replica");
+    }
+    HostPreparation result;
+    for (const auto image : images) {
+        if (!device_resident(image)) continue;
+        if (!host_resident(image)) {
+            ++result.device_images;
+        } else if (!drop_device_replica(image)) {
+            throw std::logic_error("StateImage export could not release its Device replica");
+        }
+    }
+    return result;
 }
 
 StateImageStore::Destination::Destination(StateImageStore& store, Handle image)

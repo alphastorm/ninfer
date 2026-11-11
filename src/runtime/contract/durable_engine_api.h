@@ -130,13 +130,48 @@ struct DurableSessionEpoch {
 
 enum class DurableSaveIntent : std::uint8_t { Automatic, Explicit, Final, Survivor };
 
+// Bounded, never-persisted classification of a native Capacity refusal for receipts.
+enum class DurableCapacitySite : std::uint8_t { None, StagingLimit, EmptyArena, HostPreparation, Allocation };
+enum class DurableHostShortage : std::uint8_t { None, Busy, NoHostArena, HostCapacity, HostContiguity };
+
+[[nodiscard]] constexpr std::string_view durable_capacity_site_name(DurableCapacitySite site) noexcept {
+    switch (site) {
+    case DurableCapacitySite::None: return "none";
+    case DurableCapacitySite::StagingLimit: return "staging_limit";
+    case DurableCapacitySite::EmptyArena: return "empty_arena";
+    case DurableCapacitySite::HostPreparation: return "host_preparation";
+    case DurableCapacitySite::Allocation: return "allocation";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view durable_host_shortage_name(DurableHostShortage kind) noexcept {
+    switch (kind) {
+    case DurableHostShortage::None: return "none";
+    case DurableHostShortage::Busy: return "busy";
+    case DurableHostShortage::NoHostArena: return "no_host_arena";
+    case DurableHostShortage::HostCapacity: return "host_capacity";
+    case DurableHostShortage::HostContiguity: return "host_contiguity";
+    }
+    return "unknown";
+}
+
 struct DurableExportReclaim {
     bool considered = false;
+    // Host-route native attempts; a Device-staged attempt is counted by its own flag.
     std::uint64_t prepare_attempts = 0;
     std::uint64_t reclaimed_owners = 0;
     std::uint64_t reclaim_declined = 0;
     std::uint64_t reclaimed_cache_steps = 0;
     std::uint64_t reclaimed_host_bytes = 0;
+    // After the Host route was exhausted: one Device-staged attempt, the State images it streams
+    // from Device, and how long its prepared export held the exports-in-flight gate.
+    bool device_staging_attempted = false;
+    std::uint64_t device_staged_states = 0;
+    std::uint64_t device_staged_hold_ms = 0;
+    // The Host-route shortage that led to staging or refusal, and a Capacity refusal's site.
+    DurableHostShortage host_shortage = DurableHostShortage::None;
+    DurableCapacitySite capacity_site = DurableCapacitySite::None;
 };
 
 struct DurableExportResult {
@@ -233,10 +268,12 @@ public:
 
     // Stage immutable native content under Engine serialization; hash/write off-lock. Retain
     // leases until copies retire. Recheck expected tag/epoch before caller publishes current.
+    // A non-null summary receives the reclaim summary before the off-lock write, so a caller
+    // still reports it when the writer throws.
     [[nodiscard]] static DurableExportResult export_session(
         Engine&, std::string_view session_sha256, std::string_view expected_tag,
         ContinuationCheckpointWriter&, const DurableLimits&,
-        DurableSaveIntent = DurableSaveIntent::Automatic);
+        DurableSaveIntent = DurableSaveIntent::Automatic, DurableExportReclaim* summary = nullptr);
 
     // Mandatory for live saves: serialize the final tag/epoch check and current-pointer
     // replace+sync with submission/finish epoch changes under the SAME per-session gate.
@@ -261,6 +298,7 @@ public:
 
 // Native Program owns concrete move-only ExportLease and ImportReservation types and methods:
 //   prepare_checkpoint_export(span<const CheckpointHandle>, limits) -> ExportLease
+//   optional prepare_checkpoint_export(span, limits, device_staging) for the Device-staged retry
 //   prepare_checkpoint_import(const DurableCheckpointSet&, const Reader&, limits) -> ImportReservation
 //   commit_import(ImportReservation&&) -> vector<CheckpointHandle>
 // They never accept HTTP session names. ExportLease pins the full reachable immutable set;

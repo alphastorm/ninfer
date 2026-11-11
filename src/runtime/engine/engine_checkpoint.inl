@@ -71,7 +71,8 @@
 
     [[nodiscard]] DurableExportResult export_session(
         std::string_view digest, std::string_view tag, ContinuationCheckpointWriter& writer,
-        const DurableLimits& limits, DurableSaveIntent intent = DurableSaveIntent::Automatic) {
+        const DurableLimits& limits, DurableSaveIntent intent = DurableSaveIntent::Automatic,
+        DurableExportReclaim* summary = nullptr) {
         using Program = typename ModelContract::Program;
         if constexpr (!requires(Program& program, std::span<const Checkpoint> points) {
             program.prepare_checkpoint_export(points, limits);
@@ -84,6 +85,7 @@
                 std::span<const Checkpoint>{}, limits));
             std::optional<Lease> lease;
             bool prepared_export = false;
+            std::optional<std::chrono::steady_clock::time_point> staged_since;
             DurableExportResult result;
             const auto release_export = [&] {
                 checkpoint_change([&] {
@@ -124,6 +126,17 @@
                         notify_checkpoint_progress();
                     }
                 };
+                // The Host route, including its reclaim, stays first. Once it is exhausted with a
+                // Host shortage, one Device-staged attempt reads the current points again.
+                bool device_staging = false;
+                constexpr bool can_stage = requires(Program& staged, std::span<const Checkpoint> points) {
+                    staged.prepare_checkpoint_export(points, limits, true);
+                };
+                const auto fall_back = [&](bool host_shortage) {
+                    if (!can_stage || !host_shortage || device_staging) { return false; }
+                    device_staging = result.reclaim.device_staging_attempted = true;
+                    return true;
+                };
                 try {
                     for (;;) {
                         if (failed_) { result.reason = DurableReason::IoUnavailable; break; }
@@ -143,25 +156,40 @@
                                 result.reason = DurableReason::TagMismatch;
                                 break;
                             }
-                            ++result.reclaim.prepare_attempts;
-                            lease.emplace(program.prepare_checkpoint_export(points, limits));
+                            if (!device_staging) { ++result.reclaim.prepare_attempts; }
+                            if constexpr (can_stage) {
+                                lease.emplace(program.prepare_checkpoint_export(points, limits, device_staging));
+                            } else {
+                                lease.emplace(program.prepare_checkpoint_export(points, limits));
+                            }
                         }
                         result.reason = lease->reason();
                         if (lease->state() == DurablePrepareState::Prepared) {
                             prepared_export = true;
                             ++checkpoint_exports_in_flight_;
+                            result.reclaim.capacity_site = DurableCapacitySite::None;
+                            if (device_staging) {
+                                staged_since = std::chrono::steady_clock::now();
+                                if constexpr (requires { lease->device_staged_states(); }) {
+                                    result.reclaim.device_staged_states = lease->device_staged_states();
+                                }
+                            }
                             break;
                         }
                         const auto state = lease->state();
                         const auto kind = lease->host_shortage_kind();
                         using Kind = decltype(kind);
                         const auto shortage = lease->host_shortage_bytes();
+                        classify_refusal(*lease, !device_staging, result.reclaim);
                         lease.reset();
-                        if (state != DurablePrepareState::CapacityRefused ||
-                            result.reason != DurableReason::Capacity || checkpoint_pressure_depth_ ||
-                            contiguity_retry ||
-                            (kind != Kind::HostContiguity &&
-                             (kind != Kind::HostCapacity || !shortage))) break;
+                        const bool host_shortage = state == DurablePrepareState::CapacityRefused &&
+                            result.reason == DurableReason::Capacity &&
+                            (kind == Kind::HostContiguity || (kind == Kind::HostCapacity && shortage));
+                        if (device_staging || !host_shortage || checkpoint_pressure_depth_ ||
+                            contiguity_retry) {
+                            if (fall_back(host_shortage)) { continue; }
+                            break;
+                        }
                         result.reclaim.considered = true;
                         const auto before = program.physical_usage().occupied.host_bytes;
                         struct AccountProgress {
@@ -183,7 +211,10 @@
                             changed = program.release_redundant_host(lossless_excluded) || changed;
                         }
                         if (kind == Kind::HostContiguity) {
-                            if (!freed()) break;
+                            if (!freed()) {
+                                if (fall_back(true)) { continue; }
+                                break;
+                            }
                             contiguity_retry = true;
                             continue;
                         }
@@ -240,7 +271,10 @@
                             ++ordinary_steps;
                             ++result.reclaim.reclaimed_cache_steps;
                         }
-                        if (!freed()) break;
+                        if (!freed()) {
+                            if (fall_back(true)) { continue; }
+                            break;
+                        }
                     }
                 } catch (const std::bad_alloc&) {
                     // Optional reclaim cannot turn a capacity refusal into an Engine failure.
@@ -256,7 +290,16 @@
                 }
                 notify();
             });
+            if (summary) { *summary = result.reclaim; }
             if (!lease) { return result; }
+            // Gate hold of a Device-staged export, measured once its native pins retire.
+            const auto staged_hold = [&] {
+                if (!staged_since) { return; }
+                result.reclaim.device_staged_hold_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - *staged_since).count());
+                if (summary) { summary->device_staged_hold_ms = result.reclaim.device_staged_hold_ms; }
+            };
             try {
                 // Inline worker saves use the same off-execution-lock writer boundary as an
                 // external control caller. The immutable lease alone owns copied content.
@@ -278,9 +321,11 @@
                 if (execution) { execution->lock(); }
             } catch (...) {
                 retire_export();
+                staged_hold();
                 throw;
             }
             retire_export();
+            staged_hold();
             return result;
         }
     }
@@ -565,6 +610,27 @@ private:
         if (request.checkpoint_session.empty() || request.checkpoint_tag.empty()) { return true; }
         PressureCheckpointVictim victim{request.checkpoint_session, request.checkpoint_tag};
         return checkpoint_pressure({&victim, 1});
+    }
+    // Receipt classification of a refused native attempt: the Host-route shortage (Host-route
+    // attempts only, so a staged refusal keeps the shortage that led to it) and the native site
+    // of a Capacity refusal. Never persisted.
+    template <class Lease>
+    static void classify_refusal(const Lease& lease, bool host_route, DurableExportReclaim& summary) noexcept {
+        if (host_route) {
+            using Kind = decltype(lease.host_shortage_kind());
+            const auto kind = lease.host_shortage_kind();
+            summary.host_shortage = kind == Kind::HostCapacity     ? DurableHostShortage::HostCapacity
+                                    : kind == Kind::HostContiguity ? DurableHostShortage::HostContiguity
+                                                                   : DurableHostShortage::None;
+            if constexpr (requires { Kind::Busy; }) {
+                if (kind == Kind::Busy) { summary.host_shortage = DurableHostShortage::Busy; }
+            }
+            if constexpr (requires { Kind::NoHostArena; }) {
+                if (kind == Kind::NoHostArena) { summary.host_shortage = DurableHostShortage::NoHostArena; }
+            }
+        }
+        summary.capacity_site = DurableCapacitySite::None;
+        if constexpr (requires { lease.capacity_site(); }) { summary.capacity_site = lease.capacity_site(); }
     }
     static typename ModelContract::CacheSessionKey checkpoint_key(std::string_view value) {
         typename ModelContract::CacheSessionKey key;
