@@ -2297,6 +2297,68 @@ void export_exception_and_writer_epoch() {
     }
 }
 
+// ---- E89 block (fork #89, folds #84): durable save without Host-arena room. E89-owned. ----
+
+// A pressure save that stays Pending for Capacity, as the automatic coordinator reports a
+// retryable refusal; settles only when told to.
+class E89CapacityPendingHandler final : public rt::PressureCheckpointHandler {
+public:
+    explicit E89CapacityPendingHandler(Events& events) : events_(events) {}
+
+    std::atomic<bool> settled{false};
+
+    void save_before_eviction(std::span<rt::PressureCheckpointVictim> victims) noexcept override {
+        const bool done = settled.load();
+        for (auto& victim : victims) {
+            victim.outcome = done ? rt::PressureCheckpointOutcome::Settled
+                                  : rt::PressureCheckpointOutcome::Pending;
+            victim.reason = done ? rt::DurableReason::None : rt::DurableReason::Capacity;
+        }
+        events_.record([](Events::State& state) { ++state.pressure_saves; });
+    }
+
+private:
+    Events& events_;
+};
+
+// Characterization of the #89 latch (invariant 1 unchanged): while a pressure save stays
+// Pending for Capacity, a fresh request is deferred until its own queue deadline instead of
+// being admitted or refused, and the unsaved victim stays resident. E89 removes the Host-arena
+// cause of such Capacity refusals; it does not change this rule.
+void e89_pending_capacity_save_defers_fresh_request() {
+    Harness h(3, true);
+    acknowledged_turn(h, "victim", "saved");
+    auto handler = std::make_shared<E89CapacityPendingHandler>(h.events());
+    h.core().set_pressure_checkpoint_handler(handler);
+    h.configure([](Program& p) {
+        p.host_capacity   = kCheckpointHostBytes;
+        p.pause_needs_host = true;
+    });
+    auto owner  = h.submit(Script::Pressure, 1);
+    auto victim = h.submit(Script::VictimResume, 1);
+    h.events().await([](const Events::State& state) { return state.pressure_saves != 0; },
+                     "the victim's Pending Capacity pressure save");
+    auto fresh = h.submit(Script::Complete, 1, false, Clock::now() + 250ms);
+    require_request_error(h.await(fresh), RequestErrorKind::QueueTimeout,
+                          "fresh request behind a Pending Capacity pressure save");
+    h.configure([](Program& p) {
+        require(p.valid_checkpoint({1}), "Pending Capacity save released its unsaved victim");
+    });
+    require(h.core().is_available(), "Pending Capacity save failed the Engine");
+
+    handler->settled.store(true);
+    h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+    h.core().notify_checkpoint_progress();
+    h.events().await([](const Events::State& state) { return state.pause_started; },
+                     "the victim's pause after its save settled");
+    h.release_stalls();
+    require_finished(h.await(owner), FinishReason::OutputLimit, "pressure owner after settlement");
+    require_finished(h.await(victim), FinishReason::OutputLimit, "victim after settlement");
+    require_membership(h.observed_stats(), {}, "pending capacity save cleanup");
+}
+
+// ---- end E89 block ----
+
 } // namespace
 
 int main() {
@@ -2344,6 +2406,8 @@ int main() {
         Case{"export_classification_and_contiguity", export_classification_and_contiguity},
         Case{"export_zero_progress_and_residual", export_zero_progress_and_residual},
         Case{"export_exception_and_writer_epoch", export_exception_and_writer_epoch},
+        // E89 block cases.
+        Case{"e89_pending_capacity_save_defers_fresh_request", e89_pending_capacity_save_defers_fresh_request},
     };
     int failures = 0;
     for (const auto& test : cases) {

@@ -126,7 +126,42 @@ struct Fixture {
                     "refusal retains exact content and owners without leaked readers");
         }
     }
+
+    // A staged export's readers resolve every source from its retained Device replica.
+    void staged_device_readers() {
+        require(images.device_occupied() == 3 && images.host_occupied() == 0,
+                "Device-staged export keeps every Device replica and reserves no Host replica");
+        std::vector<Store::ReadLease> readers;
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            readers.push_back(images.read(sources[i]));
+            require(readers.back().epoch() == epochs[i] &&
+                        readers.back().device_slot() == images.physical_slot(sources[i]) &&
+                        images.source_pins(sources[i]) == 1,
+                    "Device-staged reader pins the original Device content");
+        }
+        readers.clear();
+        unchanged_device_sources();
+    }
 };
+
+// Detected so that the predecessor reports its refusal instead of failing to compile.
+template <class Images>
+Store::HostPreparation staged_after_refusal(Images& images, std::span<const Store::Handle> sources) {
+    if constexpr (requires { images.prepare_device_export(sources); }) {
+        return images.prepare_device_export(sources);
+    } else {
+        throw std::runtime_error("Host shortage stages State images from Device: export refused");
+    }
+}
+
+template <class Preparation>
+std::uint32_t staged_images(const Preparation& preparation) {
+    if constexpr (requires { preparation.device_images; }) {
+        return preparation.device_images;
+    } else {
+        return 0;
+    }
+}
 
 void export_leased_fork(DeviceContext& device) {
     Fixture f(device.device(), 3);
@@ -198,6 +233,13 @@ void failure_recovery(DeviceContext& device) {
                     f.host.reserved_bytes() == 0,
                 "all Host capacity is reserved before any copy");
         f.unchanged_device_sources();
+        // E89: the same shortage still prepares the export through the Device route.
+        const auto host_free = f.host.free_bytes();
+        const auto staged = staged_after_refusal(f.images, f.sources);
+        require(staged.kind == HostKind::Prepared && staged_images(staged) == 3 && copies == before &&
+                    f.host.reserved_bytes() == 0 && f.host.free_bytes() == host_free,
+                "Host capacity shortage prepares a Device-staged export without Host reservation");
+        f.staged_device_readers();
     }
     Fixture f(device.device(), 3);
     {
@@ -259,6 +301,18 @@ void unavailable_and_fragmented(DeviceContext& device) {
     require(result.kind == HostKind::HostContiguity && result.shortage_bytes == 0 &&
                 images.device_resident(*image) && fragmented.reserved_bytes() == 2 * unit,
             "contiguity is not a destructive byte deficit");
+    // E89: a contiguity-only miss also prepares through the Device route, reserving nothing.
+    const auto staged = staged_after_refusal(images, std::span<const Store::Handle>(&*image, 1));
+    require(staged.kind == HostKind::Prepared && staged_images(staged) == 1 &&
+                fragmented.reserved_bytes() == 2 * unit && images.device_resident(*image) &&
+                !images.host_resident(*image),
+            "Host contiguity miss prepares a Device-staged export without Host reservation");
+    {
+        const auto reader = images.read(*image);
+        require(reader.device_slot() == images.physical_slot(*image) && images.source_pins(*image) == 1,
+                "contiguity-staged reader pins the Device replica");
+    }
+    require(images.source_pins(*image) == 0, "contiguity-staged reader released its pin");
 
     StateImageStorage absent_physical({f.backing.data(), f.backing.size(), device.device()}, f.schema);
     Store absent(absent_physical, nullptr, 3);
@@ -273,12 +327,30 @@ void unavailable_and_fragmented(DeviceContext& device) {
 } // namespace
 
 int main() {
+    struct Case {
+        const char* name;
+        void (*run)(ninfer::DeviceContext&);
+    };
+    constexpr std::array cases{
+        Case{"export_leased_fork", export_leased_fork},
+        Case{"existing_host_replica", existing_host_replica},
+        Case{"failure_recovery", failure_recovery},
+        Case{"unavailable_and_fragmented", unavailable_and_fragmented},
+    };
     try {
         ninfer::DeviceContext device;
-        export_leased_fork(device);
-        existing_host_replica(device);
-        failure_recovery(device);
-        unavailable_and_fragmented(device);
+        int failures = 0;
+        // Every case runs, so a red run names each failing case.
+        for (const auto& test : cases) {
+            try {
+                test.run(device);
+                std::cout << "PASS " << test.name << '\n';
+            } catch (const std::exception& error) {
+                ++failures;
+                std::cerr << "FAIL " << test.name << ": " << error.what() << '\n';
+            }
+        }
+        if (failures) return 1;
         std::cout << "PASS export State readers release execution slots without changing bytes\n";
         return 0;
     } catch (const std::exception& error) {
