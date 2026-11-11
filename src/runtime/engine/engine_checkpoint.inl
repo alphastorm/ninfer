@@ -1,7 +1,11 @@
 // Included inside EngineCore: every Program operation, including lease destruction, runs on
 // its device-bound worker. Disk publication uses only CheckpointControl's independent gate.
+    // An operation-free call is a durable prepare that a context operation in flight would refuse
+    // as a busy transaction. Off the worker it waits in the worker for the next operation-free
+    // boundary instead; an inline worker call runs at once.
     template <class Function>
-    auto checkpoint_call(Function&& function) -> std::invoke_result_t<Function> {
+    auto checkpoint_call(Function&& function, bool operation_free = false)
+        -> std::invoke_result_t<Function> {
         if (std::this_thread::get_id() == worker_.get_id()) {
             struct Relock {
                 std::unique_lock<std::mutex>& lock;
@@ -11,7 +15,7 @@
             if (scope.acquired) { scope.lock.lock(); }
             return std::forward<Function>(function)();
         }
-        return reserve_checkpoint_command(std::forward<Function>(function))();
+        return reserve_checkpoint_command(std::forward<Function>(function), operation_free)();
     }
 
     void set_pressure_checkpoint_handler(std::shared_ptr<PressureCheckpointHandler> handler) {
@@ -109,6 +113,8 @@
                 if (retirement) { (*retirement)(); }
                 else { release_export(); }
             };
+            // Prepared only at an operation-free boundary: never refused for an operation in
+            // flight. The retirement above is an ordinary command and is never held back.
             checkpoint_change([&] {
                 const auto gate = checkpoints_.session(digest);
                 auto& program = *instance_.program;
@@ -289,7 +295,7 @@
                     throw;
                 }
                 notify();
-            });
+            }, /*operation_free=*/true);
             if (summary) { *summary = result.reclaim; }
             if (!lease) { return result; }
             // Gate hold of a Device-staged export, measured once its native pins retire.
@@ -358,6 +364,8 @@
             PreparedEngineCheckpoint result;
             const auto oracle = checkpoints_.oracle();
             // Reclaimed victims and a prepared reservation change catalog and Host occupancy.
+            // Like an export, prepared only at an operation-free boundary (a busy refusal here
+            // would drop a restore-on-demand and its continuation's parent response).
             checkpoint_change([&] {
                 if (failed_) {
                     result.state = DurablePrepareState::Unavailable;
@@ -458,7 +466,7 @@
                         return;
                     }
                 }
-            });
+            }, /*operation_free=*/true);
             if (result.state != DurablePrepareState::Prepared) { return result; }
             try {
                 result.abort = [this, pending] {
@@ -513,15 +521,24 @@
     }
 
 private:
+    // One worker command. An operation-free command never meets an in-flight context operation:
+    // the runner holds it, in arrival order, until the next operation-free boundary.
+    struct CheckpointCommand {
+        std::function<void()> run;
+        bool operation_free = false;
+    };
     // Own every fallible part of a worker command before it can become mandatory cleanup.
     template <class Function>
-    auto reserve_checkpoint_command(Function&& function) {
+    auto reserve_checkpoint_command(Function&& function, bool operation_free = false) {
         using Result = std::invoke_result_t<Function>;
         auto command = std::make_shared<std::packaged_task<Result()>>(
             std::forward<Function>(function));
         auto result = command->get_future();
-        std::list<std::function<void()>> commands;
-        commands.emplace_back([command] { (*command)(); });
+        std::list<CheckpointCommand> commands;
+        // Only an off-worker caller's command is ever held: a command the worker itself queued
+        // would wait on its own thread. (Worker calls run inline and do not reserve today.)
+        const bool hold = operation_free && std::this_thread::get_id() != worker_.get_id();
+        commands.push_back(CheckpointCommand{[command] { (*command)(); }, hold});
         return [this, commands = std::move(commands), result = std::move(result)]() mutable -> Result {
             {
                 std::lock_guard lock(queue_mutex_);
@@ -536,7 +553,8 @@ private:
     // terminal response, its result or exception reaches the caller only after the published
     // runtime statistics include that change.
     template <class Function>
-    auto checkpoint_change(Function&& function) -> std::invoke_result_t<Function> {
+    auto checkpoint_change(Function&& function, bool operation_free = false)
+        -> std::invoke_result_t<Function> {
         return checkpoint_call([&]() -> std::invoke_result_t<Function> {
             using Core = std::remove_pointer_t<decltype(this)>;
             const struct Publication {
@@ -544,7 +562,7 @@ private:
                 ~Publication() { core.publish_checkpoint_change(); }
             } publication{*this};
             return std::forward<Function>(function)();
-        });
+        }, operation_free);
     }
     // A committed import or a retired lease cannot be undone, so a failed publication still
     // returns the operation's result. The worker then fails the Engine with that failure, as it
@@ -580,7 +598,9 @@ private:
             std::lock_guard lock(queue_mutex_);
             checkpoint_command_batch_.swap(checkpoint_commands_);
         }
-        for (auto& command : checkpoint_command_batch_) { command(); }
+        // Held commands keep their place ahead of every command that arrived after them.
+        checkpoint_command_batch_.splice(checkpoint_command_batch_.begin(), checkpoint_held_commands_);
+        run_command_batch();
         // Every worker turn starts here. Gates that finished requests, operations and dropped
         // tokens left behind retire once no native owner names their session; native
         // ownership is only stable on this worker.
@@ -588,6 +608,43 @@ private:
             return resources_.holds_durable_session(digest);
         });
         checkpoint_command_batch_.clear();
+    }
+    // The worker calls this right after the turn's first completion poll: a command held behind
+    // the operation that poll completed runs before anything in the turn can start another.
+    void run_held_checkpoint_commands() {
+        if (checkpoint_held_commands_.empty() || hold_for_context_operation()) { return; }
+        checkpoint_command_batch_.splice(checkpoint_command_batch_.end(), checkpoint_held_commands_);
+        run_command_batch();
+        checkpoint_command_batch_.clear();
+    }
+    void run_command_batch() {
+        for (auto it = checkpoint_command_batch_.begin(); it != checkpoint_command_batch_.end();) {
+            if (it->operation_free && hold_for_context_operation()) {
+                checkpoint_held_commands_.splice(checkpoint_held_commands_.end(),
+                                                 checkpoint_command_batch_, it++);
+                continue;
+            }
+            it->run();
+            ++it;
+        }
+    }
+    // A durable prepare refuses with TransactionBusy while a context operation is in flight;
+    // such a command waits for the operation instead. After an Engine failure nothing completes
+    // an operation, so a held command runs at once and refuses with IoUnavailable.
+    [[nodiscard]] bool hold_for_context_operation() const noexcept {
+        if constexpr (requires { instance_.program->has_context_operation(); }) {
+            return !failed_ && instance_.program->has_context_operation();
+        } else {
+            return false;
+        }
+    }
+    // The next operation-free boundary is taken: a Pending pressure save, or a durable prepare
+    // held until the operation in flight completes. Every site about to start a context operation
+    // (admission, resident reclaim, capture preparation and start) waits, so a held prepare waits
+    // for at most the one operation that was in flight when it arrived; held-with-no-operation
+    // ends at the next top-of-turn runner, which runs every held command.
+    [[nodiscard]] bool operation_boundary_taken() const noexcept {
+        return checkpoints_.pending() || !checkpoint_held_commands_.empty();
     }
     bool checkpoint_pressure(std::span<PressureCheckpointVictim> victims) {
         if (victims.empty()) { return true; }

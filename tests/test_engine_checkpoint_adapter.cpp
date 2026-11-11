@@ -391,8 +391,6 @@ class AdapterFixture {
     std::mutex checkpoint_provider_mutex_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    std::list<std::function<void()>> checkpoint_commands_;
-    std::list<std::function<void()>> checkpoint_command_batch_;
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     std::size_t checkpoint_exports_in_flight_ = 0;
@@ -414,6 +412,10 @@ class AdapterFixture {
     // Runtime statistics publication belongs to the EngineCore harness, not this fixture.
     void publish_runtime_stats() {}
 #include "runtime/engine/engine_checkpoint.inl"
+private:
+    std::list<CheckpointCommand> checkpoint_commands_;
+    std::list<CheckpointCommand> checkpoint_command_batch_;
+    std::list<CheckpointCommand> checkpoint_held_commands_;
 public:
     AdapterFixture() = default;
     explicit AdapterFixture(typename ModelContract::Program& program) : instance_{&program} {
@@ -430,6 +432,9 @@ public:
                 checkpoint_execution_lock_ = &lock;
                 if (fail_worker_allocations.load()) { ++injected_worker_drains; }
                 run_checkpoint_commands();
+                // As after the Engine's top-of-turn poll: commands held behind an operation that
+                // this batch ended run now.
+                run_held_checkpoint_commands();
             }
         });
     }

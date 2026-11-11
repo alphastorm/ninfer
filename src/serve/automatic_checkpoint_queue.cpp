@@ -210,10 +210,19 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
             const bool retryable = transient || result.reason == runtime::DurableReason::IoUnavailable ||
                                    result.reason == runtime::DurableReason::Capacity;
             entry.settled = !retryable;
+            // A busy transaction is not an inability to save: a pressure save it refuses waits for
+            // the next progress change without spending the retry budget, so no busy refusal can
+            // leave the victim Pending for good, and at least the busy spacing apart, which bounds
+            // the attempt rate while the blocker lasts. Capacity, I/O and the races keep their budget.
+            const bool busy = entry.pressure && result.reason == runtime::DurableReason::TransactionBusy;
             bool deferred = false;
-            if (retryable && (result.awaiting_publication || retries_.retry(key))) {
+            if (retryable && (result.awaiting_publication || busy || retries_.retry(key))) {
                 const auto reason = result.reason;
-                deferred = queue_.defer(key, [this, before, reason, publication = result.awaiting_publication] {
+                const auto not_before = busy ? std::chrono::steady_clock::now() + kBusyPressureRetrySpacing
+                                             : std::chrono::steady_clock::time_point{};
+                deferred = queue_.defer(key, [this, before, reason, not_before,
+                                              publication = result.awaiting_publication] {
+                    if (std::chrono::steady_clock::now() < not_before) { return false; }
                     const auto now = progress_();
                     if (publication) { return now.publication != before.publication; }
                     if (reason == runtime::DurableReason::IoUnavailable) {

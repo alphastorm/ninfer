@@ -2,6 +2,7 @@
 
 #include "runtime/contract/continuation_checkpoint.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -30,8 +31,16 @@ checkpoint_refusal_is_transient(const runtime::SessionCheckpointSkipDetail& skip
 
 // Retries a save gets per completed turn before a transient refusal counts as final: an automatic
 // save requeues, and save-before-evict keeps its victim resident for another admission pass.
-// Each retry waits for the engine to quiesce again, so this bounds work, not latency.
+// Each retry waits for the engine to quiesce again, so this bounds work, not latency. A pressure
+// save refused as TransactionBusy spends none of it: a busy transaction ends by itself, and an
+// exhausted pressure save would keep its victim (and every request that needs it) waiting for good.
 inline constexpr unsigned kTransientCheckpointRetries = 6;
+
+// A pressure save refused as TransactionBusy is attempted again no sooner than this. Its remaining
+// causes (the session's own active request, the store's single save slot, a publication) can
+// outlast many Engine progress ticks, and an attempt may stage a responses snapshot before the
+// refusal; this caps the retry rate at ten per second without a retry budget.
+inline constexpr std::chrono::milliseconds kBusyPressureRetrySpacing{100};
 
 // Whether a completed turn is worth an automatic checkpoint. A session below the configured minimum
 // is cheaper to prefill again than to write out after every turn, so automatic saves skip it; a

@@ -427,6 +427,16 @@ exactly once, after its native pins retire. This retirement advances observed En
 progress, allowing another session's TransactionBusy or Capacity save to retry without
 unrelated execution.
 
+Export and import preparation run only at an operation-free boundary. Native preparation
+refuses `transaction_busy` while a context operation (binding, capture, demotion, pause) is
+in flight, so an off-worker prepare command that meets one is held in the worker, in arrival
+order, instead of being refused. It runs right after the next top-of-turn completion poll
+that leaves no operation in flight, before anything in that turn can start another one; while
+one is held, a resident reservation that would need reclaim waits as it does for a Pending
+pressure save, so resident work cannot keep a held prepare waiting. Retirements and every
+other worker command are never held; an inline worker prepare and a failed Engine (which
+refuses with `io_unavailable`) are not held either, and a stopping worker drops held commands.
+
 Export preparation distinguishes a contended Host **byte deficit** from Busy, absent
 Host storage, deterministic staging/empty-arena limits and a contiguity-only miss.
 Host preparation reserves every missing image before copying; a refused preparation
@@ -905,7 +915,11 @@ to skip eviction-time victim generation/tag revalidation.
 
 `AutomaticCheckpointCoordinator` uses `TransientRetryBudget` in the production
 automatic-save/pressure path: at most six retry rearms per completed turn, not an
-unconditional retry loop. Each retry waits for observed progress matching its cause:
+unconditional retry loop. A pressure save refused `transaction_busy` spends none of that
+budget: a busy transaction ends by itself, so it rearms on every matching progress
+observation, no sooner than 100 ms after its previous attempt, until it saves or meets a
+final refusal. Each retry waits for observed progress
+matching its cause:
 
 | Refusal or wait | Progress that may rearm it |
 |---|---|
@@ -929,9 +943,10 @@ its own retry. Unrelated or unchanged progress does not rearm the attempt. A new
 completed turn resets the bounded per-session retry budget; entries are retained
 only while their save/retry bookkeeping needs them.
 
-Exhausted retryable pressure remains `Pending` and does not authorize discarding a
-live continuation. Reported nonretryable refusal or an absent/abandoned publication
-retains the existing `Settled` policy with its non-`None` reason. `None`-reason
+Exhausted retryable pressure (`capacity`, `io_unavailable`, the stale/tag races) remains
+`Pending` and does not authorize discarding a live continuation. Reported nonretryable
+refusal or an absent/abandoned publication retains the existing `Settled` policy with its
+non-`None` reason. `None`-reason
 coverage still requires K3's Engine-owned native byte proof. A successful replay-only
 save is not coverage: pressure reports the absence of a native endpoint, rather
 than relabelling replay as a checkpoint hit.

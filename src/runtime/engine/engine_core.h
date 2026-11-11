@@ -1413,7 +1413,7 @@ private:
         request->model_state        = next;
         request->capture_pending    = true;
         request->post_capture_state = next;
-        if (instance_.program->has_context_operation()) { return; }
+        if (instance_.program->has_context_operation() || operation_boundary_taken()) { return; }
         if (const auto owner = scheduler_.progress_owner(); owner && *owner != request->id) {
             instance_.program->skip_capture(*request->sequence);
             request->capture_pending = false;
@@ -1456,7 +1456,7 @@ private:
                     CaptureDecision{*request->sequence, capture->frontier,
                                     resources_.begin_reclaim(*instance_.program, admission)});
             }
-            if (checkpoints_.pending()) { return false; }
+            if (operation_boundary_taken()) { return false; }
             if (capture->host_run.count) {
                 const std::span<const HostAllocationRun> runs(&capture->host_run, 1);
                 if (!instance_.program->host_can_place(runs)) {
@@ -1938,7 +1938,7 @@ private:
     }
 
     bool try_admit_one(bool restoring) {
-        if (instance_.program->has_context_operation()) { return false; }
+        if (instance_.program->has_context_operation() || operation_boundary_taken()) { return false; }
         const auto owner = scheduler_.progress_owner();
         const auto suspended = std::find_if(paused_.begin(), paused_.end(), [&](const auto& r) {
             return owner == r->id;
@@ -2344,7 +2344,9 @@ private:
                     break;
                 }
                 if (!cursor) { cursor.emplace(resources_.begin_reclaim(*instance_.program)); }
-                if (checkpoints_.pending()) {
+                // The next operation-free boundary is taken (Pending pressure save or held prepare):
+                // start nothing before it.
+                if (operation_boundary_taken()) {
                     stop = priority == lane;
                     break;
                 }
@@ -2653,8 +2655,9 @@ private:
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex_);
+                // Held checkpoint commands keep the worker turning after their operation ended.
                 if (!stopping_ && checkpoint_commands_.empty() && pending_.empty() &&
-                    resident_empty() && paused_.empty() &&
+                    resident_empty() && paused_.empty() && checkpoint_held_commands_.empty() &&
                     !instance_.program->has_context_operation()) {
                     idle_wait(lock);
                 }
@@ -2663,6 +2666,8 @@ private:
                     std::scoped_lock execution_lock(execution_mutex_);
                     fail_all_locked(std::make_exception_ptr(RequestError(
                         RequestErrorKind::Unavailable, "inference engine is shutting down")));
+                    // A held prepare's caller must not wait for a worker that has stopped.
+                    checkpoint_held_commands_.clear();
                     return;
                 }
             }
@@ -2714,6 +2719,12 @@ private:
                 }
                 (void)expire_pending_requests();
                 executed = progress_context_operation(boundary);
+                // A durable prepare held behind the operation this poll completed runs first,
+                // before anything below can start another operation.
+                run_held_checkpoint_commands();
+                if (checkpoint_publication_failure_) {
+                    std::rethrow_exception(std::exchange(checkpoint_publication_failure_, nullptr));
+                }
                 if (!instance_.program->has_context_operation()) {
                     for (const auto& request : slots_) {
                         if (request && request->capture_pending) {
@@ -2944,9 +2955,11 @@ private:
     ResourceManagement resources_;
     CheckpointControl checkpoints_;
     std::mutex checkpoint_provider_mutex_;
-    std::list<std::function<void()>> checkpoint_commands_;
+    std::list<CheckpointCommand> checkpoint_commands_;
     // Worker-only batch: construct any allocating sentinel before the worker starts.
-    std::list<std::function<void()>> checkpoint_command_batch_;
+    std::list<CheckpointCommand> checkpoint_command_batch_;
+    // Worker-only: operation-free commands that met an in-flight context operation.
+    std::list<CheckpointCommand> checkpoint_held_commands_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     // Worker-owned: prepared export leases may outlive all resident requests.
     std::size_t checkpoint_exports_in_flight_ = 0;
