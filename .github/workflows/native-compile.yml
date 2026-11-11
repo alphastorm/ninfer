@@ -16,13 +16,14 @@ concurrency:
 
 jobs:
   linux-native:
-    name: Linux CUDA 13.1 / sm_${{ matrix.arch }} / serve and host tests
+    name: Linux CUDA 13.1 / sm_${{ matrix.arch }} / serve and host tests${{ matrix.tc == 'ON' && ' / tc' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         arch: ['89', '86']
+        tc: ['OFF', 'ON']
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -49,8 +50,10 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/ccache
-          key: ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-
+          key: ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-${{ matrix.tc }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-${{ matrix.tc }}-
+            ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-
       - name: Configure current source with verified provenance
         shell: bash
         run: |
@@ -61,7 +64,18 @@ jobs:
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DPython3_EXECUTABLE=/usr/bin/python3 \
             -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF \
-            -DNINFER_BUILD_PROFILE=ci-sm${{ matrix.arch }} -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+            -DNINFER_NATIVE_SMALL_T_TC=${{ matrix.tc }} \
+            -DNINFER_BUILD_PROFILE=ci-sm${{ matrix.arch }}${{ matrix.tc == 'ON' && '-tc' || '' }} \
+            -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+      - name: Check native verify build-option contracts
+        run: python3 tests/ops/linear/test_native_small_t_build.py -v
+      - name: Prove default verify preprocessing is unchanged
+        if: matrix.tc == 'OFF'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: |
+          python3 tests/ops/linear/native_small_t_default_identity.py \
+            --build build --base "$BASE_SHA" --work .agent-tmp/native-small-t-identity
       # The serve dependency closure compiles the complete native runtime, including
       # qwen3_5/load.cpp's SM86/SM89 DFlash2 seam and all linear/small-T kernels.
       # Bound the build to this app and selected regressions, not every test/benchmark.
@@ -75,6 +89,13 @@ jobs:
           set -euo pipefail
           cmake --build build --parallel 2 --target ninfer_core ninfer-serve ninfer_host_native_tests \
             ninfer_rk4v4_test ninfer_linear_split_two_output_test ninfer_fp32_logits_test
+      - name: Compile native verify FP64 oracles and record equivalence
+        if: matrix.tc == 'ON'
+        run: |
+          cmake --build build --parallel 2 --target \
+            ninfer_linear_add_q5_a16_test ninfer_linear_swiglu_q4_a16_test \
+            ninfer_linear_split_multi_output_test \
+            ninfer_gdn_input_proj_conv_snapshot_test ninfer_gdn_input_proj_conv_record_test
       # Do not execute ninfer-serve or the numerical Op test: they require a GPU host.
       - name: Run only GPU-free CTest contracts
         shell: bash

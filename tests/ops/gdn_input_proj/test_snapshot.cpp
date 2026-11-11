@@ -673,15 +673,21 @@ int run_q4_q5() {
     // tails and the per-request history split. The projection is routed once from the aggregate
     // count, not per request, so this is a batched organisation of the aggregate-8 configuration
     // and not a claim about where any single-side band ends.
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    // Both aggregate verify widths, with separate histories and masked tails.
+    for (const std::int32_t kNarrowWidth : {4, 8}) {
+#else
     constexpr std::int32_t kNarrowWidth = 4;
+#endif
     constexpr std::int32_t kNarrowBatch = 2;
-    const std::vector<std::int32_t> narrow_valid{4, 2};
+    const std::vector<std::int32_t> narrow_valid{kNarrowWidth, kNarrowWidth - 2};
     const std::size_t narrow_workspace_bytes =
         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
             ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, kNarrowBatch,
             kNarrowWidth, kNarrowWidth);
     failures += run_batched_case(
-        "Q4/Q5 A16 B=2 W=4 masked", kHidden, kValueRows, kZRows, kNarrowWidth, kNarrowBatch,
+        "Q4/Q5 A16 B=2 W=" + std::to_string(kNarrowWidth) + " masked",
+        kHidden, kValueRows, kZRows, kNarrowWidth, kNarrowBatch,
         narrow_valid, conv_weight, narrow_workspace_bytes, kGdnInputProjConvSnapshotA16Tolerance,
         [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
             const float* column =
@@ -705,6 +711,9 @@ int run_q4_q5() {
                 {state, initial, snapshot_base}, valid, {q, k, v, z}, workspace,
                 ninfer::test::cuda_environment().default_execution);
         });
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    }
+#endif
     // One batched case with mixed valid prefixes whose aggregate column count is 48 (16 x 3). The
     // projection is routed once for the whole call from that aggregate column count - so this case
     // exercises the mixed valid prefixes and the exact-zero invalid tails, not three different

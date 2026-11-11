@@ -14,11 +14,31 @@ void launch_wide_tail(const Tensor& x, const Weight& w, Tensor& residual, cudaSt
     wide_launch(prefix_x, w, prefix_out, stream);
     const auto tail_x = x.slice(1, wide, tail);
     auto tail_out     = residual.slice(1, wide, tail);
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    // A prefill tail is not a verify call; preserve its original arithmetic.
+    if (tail == 8)
+        return launch_q5_add_sliced<q5_instances::SlicedR16T8W4S2>(tail_x, w, tail_out, stream);
+    if (tail == 16)
+        return launch_q5_add_sliced<q5_instances::SlicedR16T16W4S2>(tail_x, w, tail_out, stream);
+#endif
     select_q5_linear_add_n5120_k17408(tail)(tail_x, w, tail_out, stream);
 }
 } // namespace
 
 LinearAddLaunch select_q5_linear_add_n5120_k17408(std::int32_t tokens) {
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+#if defined(NINFER_SM86)
+    if (tokens == 8)
+        return launch_q5_add_native_verify<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 8, 8, 1>>;
+    if (tokens == 16)
+        return launch_q5_add_native_verify<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 16, 4, 2>>;
+#else
+    if (tokens == 8)
+        return launch_q5_add_native_verify<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 8, 8, 2>>;
+    if (tokens == 16)
+        return launch_q5_add_native_verify<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 16, 8, 1>>;
+#endif
+#endif
     if (tokens == 1)
         return launch_q5_add_simt<Q5A16DirectSimtSchedule<1, 1, 2, 8, 16, 17408, true>>;
     if (tokens == 2)

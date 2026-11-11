@@ -12,6 +12,10 @@
 #include "ops/linear/kernels/q5/q5_gemv_launch.cuh"
 #include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
 
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#endif
+
 #include <cuda_bf16.h>
 
 #include <cstdint>
@@ -22,6 +26,31 @@ namespace {
 
 constexpr std::int32_t kSplitRow = 6144;
 constexpr std::int32_t kHidden   = 5120;
+
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+template <int Columns>
+void launch_native_verify(const Tensor& x, const Weight& query_key_weight,
+                           const Weight& gate_value_weight, const Tensor& q, const Tensor& gate,
+                           const Tensor& key, const Tensor& value, cudaStream_t stream) {
+    const auto output = [](const Tensor& first, const Tensor& second) {
+        return LinearBf16SplitOutput2<kSplitRow>{
+            {static_cast<__nv_bfloat16*>(first.data),
+             std::int64_t(first.nb[1] / sizeof(__nv_bfloat16)), 0},
+            {static_cast<__nv_bfloat16*>(second.data),
+             std::int64_t(second.nb[1] / sizeof(__nv_bfloat16)), 0}};
+    };
+    using Q4 = SmallTMmaSchedule<SmallTFormat::Q4, kHidden, Columns, 4, 2>;
+#if defined(NINFER_SM86)
+    using Q5 = SmallTMmaSchedule<SmallTFormat::Q5, kHidden, Columns, Columns == 8 ? 8 : 4, 2>;
+#else
+    using Q5 = SmallTMmaSchedule<SmallTFormat::Q5, kHidden, Columns, 8, Columns == 8 ? 2 : 1>;
+#endif
+    launch_q45_small_t_mma<Q4>(q4_linear_operands(x, query_key_weight), output(q, key),
+                               LinearIdentityEpilogue{}, stream);
+    launch_q45_small_t_mma<Q5>(q5_linear_operands(x, gate_value_weight), output(gate, value),
+                               LinearIdentityEpilogue{}, stream);
+}
+#endif
 
 using SmallR8T4 = Q4A16SimtSchedule<8, 4, 1, 16, 2, Cache::ca, 1>;
 
@@ -241,6 +270,12 @@ void launch_q5(const Tensor& x, const Weight& weight, const Tensor& gate, const 
 void launch_parts(const Tensor& x, const Weight& query_key_weight, const Weight& gate_value_weight,
                   const Tensor& q, const Tensor& gate, const Tensor& k, const Tensor& v,
                   cudaStream_t stream) {
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    if (x.ne[1] == 8)
+        return launch_native_verify<8>(x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
+    if (x.ne[1] == 16)
+        return launch_native_verify<16>(x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
+#endif
     launch_q4(x, query_key_weight, q, k, stream);
     launch_q5(x, gate_value_weight, gate, v, stream);
 }

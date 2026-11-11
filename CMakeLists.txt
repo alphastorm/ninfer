@@ -27,6 +27,19 @@ if(NINFER_NATIVE_PREFILL_GROUP64_A8 AND NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
+option(NINFER_NATIVE_SMALL_T_TC "Tensor-core Q4/Q5 native verify at exactly 8 and 16 columns" OFF)
+if(NINFER_NATIVE_SMALL_T_TC)
+  if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(86|89)$")
+    message(FATAL_ERROR "NINFER_NATIVE_SMALL_T_TC requires CMAKE_CUDA_ARCHITECTURES 86 or 89")
+  endif()
+  if(NOT NINFER_BUILD_PROFILE MATCHES "(^|-)tc(-|$)")
+    message(FATAL_ERROR
+      "NINFER_NATIVE_SMALL_T_TC requires the hyphen-delimited tc build-profile component")
+  endif()
+elseif(NINFER_BUILD_PROFILE MATCHES "(^|-)tc(-|$)")
+  message(FATAL_ERROR "The tc build-profile component requires NINFER_NATIVE_SMALL_T_TC=ON")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)

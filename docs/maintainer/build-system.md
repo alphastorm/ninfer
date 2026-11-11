@@ -20,6 +20,29 @@ The default configuration is Release. Ninja links and archives share the single-
 | `NINFER_BUILD_BENCHMARKS` | OFF | Op, model, Engine and context-cost benchmarks |
 | `NINFER_NATIVE_PREFILL_GROUP64_A8` | OFF | Opt-in sm_86/sm_89 group64 integer-activation prefill |
 
+`NINFER_NATIVE_SMALL_T_TC` defaults OFF and is accepted only for `sm_86` or `sm_89`.
+ON requires a hyphen-delimited `tc` component in `NINFER_BUILD_PROFILE`; OFF
+forbids that component. For example, `native-v0.8.0-beta.3-tc-rtx3090` identifies
+TC-only and `native-v0.8.0-beta.3-tc-a8-rtx3090` identifies TC with Group64 A8.
+The builder supplies the profile; its string does not enable either option.
+
+This option selects BF16 tensor-core products with FP32 group-scaled accumulation
+at exactly 8 and 16 activation columns for Q5 residual projections K=6144/17408,
+the paired 7168-row Q4/Q5 split, Q4 SwiGLU with 34816 weight rows, and GDN's
+4096-row Q4 / 12288-row Q5 input projections, including record execution.
+Other widths, including residual-projection prefill tails, retain their original
+routes. No activation quantization, persistent repacking or extra workspace is
+introduced. The adapted kernel retains its Apache-2.0 attribution.
+
+The changed reduction order is not bitwise equivalent to the default native
+arithmetic. Keep the option OFF in qualified profiles until independent FP64 Op
+oracles, native throughput and the preregistered output-quality gates pass.
+The native compile workflow builds both architectures with the option ON and OFF;
+GPU numerical tests must still run on each card. OFF preprocessing comparisons
+fix diagnostic `__FILE__`/`__LINE__` values on both sides and discard line markers
+and empty lines, so source-location movement is not mistaken for a changed
+arithmetic or dispatch path.
+
 The native group64-A8 profile is a distinct numerical build profile, not a change to the artifact
 or its stored Use records. Loading resolves an effective activation permission identically for
 address-independent planning and bound operands: row-split Q4/Q5 group64 A16-only Uses become

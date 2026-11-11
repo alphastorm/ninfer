@@ -14,6 +14,9 @@ void q4_q5_gdn_input_dispatch(const Tensor& x, const Weight& qk_weight,
                               const Weight& value_z_weight, Tensor& qkv, Tensor& z,
                               cudaStream_t stream) {
     bool independent = x.ne[1] <= 12;
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    independent = independent || x.ne[1] == 16;
+#endif
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     independent = independent || x.ne[1] == 16;
 #endif

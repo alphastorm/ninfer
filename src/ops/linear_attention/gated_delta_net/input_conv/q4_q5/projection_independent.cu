@@ -10,6 +10,9 @@
 #include "ops/linear/kernels/q5/q5_simt_launch.cuh"
 #include "ops/linear/kernels/q5/q5_gemv_launch.cuh"
 #include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#endif
 #include <cuda_bf16.h>
 #include <cstdint>
 #include <stdexcept>
@@ -19,6 +22,33 @@ namespace {
 
 constexpr std::int32_t kValueRows = 6144;
 constexpr std::int32_t kHidden    = 5120;
+
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+template <int Columns>
+void launch_native_verify(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                           Tensor& qk, Tensor& value, Tensor& z, cudaStream_t stream) {
+#if defined(NINFER_SM86)
+    using Q4 = SmallTMmaSchedule<SmallTFormat::Q4, kHidden, Columns, 4, 2>;
+    using Q5 = SmallTMmaSchedule<SmallTFormat::Q5, kHidden, Columns, Columns == 8 ? 8 : 4, 2>;
+#else
+    using Q4 = SmallTMmaSchedule<SmallTFormat::Q4, kHidden, Columns, 8, Columns == 8 ? 2 : 1>;
+    using Q5 = SmallTMmaSchedule<SmallTFormat::Q5, kHidden, Columns, 8, Columns == 8 ? 2 : 1>;
+#endif
+    launch_q45_small_t_mma<Q4>(
+        q4_linear_operands(x, qk_weight),
+        LinearBf16StridedOutput{static_cast<__nv_bfloat16*>(qk.data),
+                                std::int64_t(qk.nb[1] / sizeof(__nv_bfloat16)), 0},
+        LinearIdentityEpilogue{}, stream);
+    launch_q45_small_t_mma<Q5>(
+        q5_linear_operands(x, value_z_weight),
+        LinearBf16SplitOutput2<kValueRows>{
+            {static_cast<__nv_bfloat16*>(value.data),
+             std::int64_t(value.nb[1] / sizeof(__nv_bfloat16)), 0},
+            {static_cast<__nv_bfloat16*>(z.data),
+             std::int64_t(z.nb[1] / sizeof(__nv_bfloat16)), 0}},
+        LinearIdentityEpilogue{}, stream);
+}
+#endif
 
 using Q4GdnSimtR8T4Schedule = Q4A16SimtSchedule<8, 4, 1, 16, 2, Cache::ca, 1>;
 using Q4GdnSimtR8T8Schedule = Q4A16SimtSchedule<8, 8, 1, 16, 2, Cache::ca, 1>;
@@ -189,6 +219,12 @@ void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value
 void launch_q4_q5_gdn_input_independent(const Tensor& x, const Weight& qk_weight,
                                         const Weight& value_z_weight, Tensor& qk, Tensor& value,
                                         Tensor& z, cudaStream_t stream) {
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    if (x.ne[1] == 8)
+        return launch_native_verify<8>(x, qk_weight, value_z_weight, qk, value, z, stream);
+    if (x.ne[1] == 16)
+        return launch_native_verify<16>(x, qk_weight, value_z_weight, qk, value, z, stream);
+#endif
     if (x.ne[1] == 4) {
         launch_t4_pdl(x, qk_weight, value_z_weight, qk, value, z, stream);
         return;
