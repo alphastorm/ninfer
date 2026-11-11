@@ -50,7 +50,8 @@ must use a distinct `NINFER_BUILD_PROFILE` identity containing the hyphen-delimi
 -DNINFER_BUILD_PROFILE=a8-rtx5090`.
 Only ON builds add the effective activation policy and minimum width to the prefill-cost
 signature; OFF signatures and stored artifact Uses remain unchanged. This does not change
-the persisted context identity codec.
+the persisted context identity codec. Policy resolution and its temporary are compiled only
+into ON builds; the OFF serializer uses the original stored Use policy directly.
 
 The Q5 residual, Q4 SwiGLU and Q4/Q5 multi-output split Op benchmarks accept
 `--policy a16|a8` (default `a16`). The two-output split benchmark accepts

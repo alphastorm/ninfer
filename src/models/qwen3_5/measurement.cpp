@@ -93,15 +93,18 @@ std::string prefill_signature(const Model& model, const moe::Plan* moe, std::uin
         }
         for (const auto& use : weight->uses) {
             if (!use.input.starts_with("text/") && !use.input.starts_with("vision/")) { continue; }
-            auto policy = use.policy;
 #if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+            auto policy = use.policy;
             policy = ops::effective_weight_input(
                          {weight->view, use.policy, use.activation_input_divisor},
                          model.options().native_prefill_policy)
                          .policy;
-#endif
             item["uses"].push_back(
                 {use.input, policy, use.activation_input_divisor.has_value()});
+#else
+            item["uses"].push_back(
+                {use.input, use.policy, use.activation_input_divisor.has_value()});
+#endif
         }
         inventory.push_back(std::move(item));
     }
