@@ -123,7 +123,8 @@ PROTECTED_STATE_STUB = """function Initialize-NInferProtectedStateRoot([string]$
 }
 function Assert-NInferProtectedStateRoot([string]$Path) { }
 function Assert-NInferProtectedStateTree([string]$Path) { }
-"""
+""" + ps_function((WINDOWS / "Protect-StateRoot.ps1").read_text(encoding="utf-8"),
+                  "Resolve-NInferFinalPath")
 
 
 def committed_bytes(commit: str, path: str) -> bytes:
@@ -137,7 +138,11 @@ def ps_assignments(**values: object) -> str:
 
 def ps_definitions(path: Path) -> str:
     """PowerShell that defines every top-level function of one script without running its body."""
-    return (
+    shared = (
+        ps_function((WINDOWS / "Protect-StateRoot.ps1").read_text(encoding="utf-8"), "Resolve-NInferFinalPath") + "\n"
+        if path.name in ("Control-Release.ps1", "Install-Release.ps1") else ""
+    )
+    return shared + (
         "foreach($definition in [Management.Automation.Language.Parser]::ParseFile("
         f"{qualify_native.ps_quote(str(path))},[ref]$null,[ref]$null).FindAll("
         "{param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))"
@@ -2332,16 +2337,20 @@ class PackagedStatusTests(unittest.TestCase):
             qualify_native.host_context_mib(broken)
 
 
-POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
+POWERSHELL = (
+    (shutil.which("powershell") or shutil.which("pwsh"))
+    if sys.platform == "win32"
+    else (shutil.which("pwsh") or shutil.which("powershell"))
+)
 
 
 @unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for executable script contracts")
 class PowerShellContractTests(unittest.TestCase):
     def invoke(self, script: str) -> object:
         result = subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
              "$ErrorActionPreference='Stop';\n" + script],
-            text=True, capture_output=True,
+            text=True, encoding="utf-8", capture_output=True,
         )
         if result.returncode != 0:
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
@@ -3507,6 +3516,250 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                     + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + FAILED_START)
                 self.assertEqual(observed, expected)
 
+
+    # P21 ECTRL: lease restoration, verified removals, and resolved containment.
+    def test_incomplete_stop_restores_owner_once_and_keeps_rollback_refused(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        dispatch = controller[controller.index("\nswitch ($Action)"):]
+        for first_action in ("Stop", "Restart"):
+            for complete, refused in ((False, 0), (True, 1)):
+                with self.subTest(first_action=first_action, complete=complete, refused=refused), \
+                        tempfile.TemporaryDirectory() as directory:
+                    lane = installed_release(Path(directory))
+                    owner = lane.root / "gpu-owner" / "Control-GpuOwner.ps1"
+                    owner.parent.mkdir()
+                    owner.write_text(OWNER_CONTROLLER_STUB, encoding="utf-8")
+                    owner_sha256 = hashlib.sha256(owner.read_bytes()).hexdigest()
+                    state_path = lane.root / "state.json"
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    active = state["active_release"]
+                    previous = active + "-previous"
+                    state["previous_release"] = previous
+                    state["releases"][previous] = copy.deepcopy(state["releases"][active])
+                    state["gpu_owner"] = {
+                        "controller_path": str(owner), "controller_sha256": owner_sha256,
+                        "state_root": str(lane.root / "gpu-owner-state"),
+                    }
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    (lane.root / "gpu-owner-lease.json").write_text(json.dumps({
+                        "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                        "release_id": active, "controller_sha256": owner_sha256,
+                        "prior_paused": False, "phase": "released",
+                    }), encoding="utf-8")
+                    report = lane.release / "logs" / "shutdown.json"
+                    report.write_text(json.dumps({
+                        "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                        "launch_id": "1" * 32, "complete": complete, "saved": 0,
+                        "skipped": 0, "refused": refused,
+                    }), encoding="utf-8")
+                    runtime_path = lane.root / "runtime.json"
+                    runtime_path.write_text(json.dumps({
+                        "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                        "release_id": active, "pid": 4242, "start_time_utc_ticks": 1,
+                        "managed_stop": "stop-event", "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
+                        "launch_id": "1" * 32, "shutdown_report": str(report),
+                    }), encoding="utf-8")
+                    runtime_bytes = runtime_path.read_bytes()
+                    observed = self.invoke(
+                        ps_assignments(StateRoot=lane.root, FirstAction=first_action,
+                                       OwnerLog=owner.parent / "owner.log")
+                        + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$script:live=$true
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=0}
+$script:child|Add-Member ScriptMethod WaitForExit {$this.HasExited=$true;$script:live=$false}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Request-ManagedStop { 'signalled' }
+function Start-ScheduledTask { throw 'an incomplete shutdown must not start a release' }
+$attempts=@(foreach($Action in @($FirstAction,'Stop','Rollback','Stop')){
+  $failure=$null
+  try{
+""" + dispatch + """
+  }catch{$failure=$_.Exception.Message}
+  [ordered]@{action=$Action;failure=$failure;lease=Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json');
+    owner_actions=@(if(Test-Path $OwnerLog){Get-Content -LiteralPath $OwnerLog})}
+})
+@{attempts=$attempts;live=$script:live}|ConvertTo-Json -Depth 6 -Compress
+""")
+                    self.assertFalse(observed["live"])
+                    for attempt in observed["attempts"]:
+                        self.assertIn("incomplete shutdown", attempt["failure"])
+                        self.assertFalse(attempt["lease"], attempt)
+                        self.assertEqual(attempt["owner_actions"], ["start", "status"], attempt)
+                    self.assertEqual(runtime_path.read_bytes(), runtime_bytes)
+                    self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["active_release"], active)
+                    self.assertEqual(json.loads((lane.root / "last-stop.json").read_text(encoding="utf-8"))["outcome"],
+                                     "graceful_incomplete_shutdown")
+
+    def test_uninstall_requires_proven_task_absence_before_deleting_state(self) -> None:
+        for outcome in ("denied", "survived", "unreadable", "removed", "absent"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                observed = self.invoke(
+                    ps_assignments(StateRoot=lane.root, Outcome=outcome)
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$state=Get-State
+$script:task=if($Outcome -cne 'absent'){[pscustomobject]@{TaskName=$state.task_name;State='Ready'}}else{$null}
+function Get-ScheduledTask {
+  if($Outcome -ceq 'unreadable'){throw 'task inventory unreadable'}
+  $script:task
+}
+function Get-ScheduledTaskInfo { }
+function Get-CimInstance { }
+function Wait-ManagedWrapperExit { $true }
+function Unregister-ScheduledTask {
+  [CmdletBinding()]param([string]$TaskName,[switch]$Confirm)
+  if($Outcome -ceq 'denied'){Write-Error 'task removal denied'}
+  if($Outcome -ceq 'removed'){$script:task=$null}
+}
+$failure=$null;$receipt=$null
+try{$receipt=Uninstall-ManagedRelease|ConvertFrom-Json}catch{$failure=$_.Exception.Message}
+@{failure=$failure;receipt=$receipt;root_retained=Test-Path $StateRoot;task_survived=$null -ne $script:task}|ConvertTo-Json -Depth 6 -Compress
+""")
+                if outcome in ("denied", "survived", "unreadable"):
+                    self.assertIsNotNone(observed["failure"], observed)
+                    self.assertIsNone(observed["receipt"])
+                    self.assertTrue(observed["root_retained"])
+                    self.assertTrue(observed["task_survived"])
+                else:
+                    self.assertIsNone(observed["failure"], observed)
+                    self.assertEqual(observed["receipt"]["status"], "passed")
+                    self.assertFalse(observed["root_retained"])
+                self.assertTrue((Path(directory) / "models" / "model.ninfer").exists())
+
+    def test_model_alias_into_lifecycle_state_is_refused_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            owned_models = lane.root / "model-assets"
+            owned_models.mkdir()
+            model = owned_models / "model.ninfer"
+            (Path(directory) / "models" / "model.ninfer").rename(model)
+            alias = Path(directory) / "model-alias"
+            state_path = lane.root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["releases"][state["active_release"]]["model_artifact"] = str(alias / model.name)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            observed = self.invoke(
+                ps_assignments(StateRoot=lane.root, Alias=alias, Target=owned_models)
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$linkType=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){'Junction'}else{'SymbolicLink'}
+New-Item -ItemType $linkType -Path $Alias -Target $Target|Out-Null
+function Write-InstallEvent { }
+$statePath=Join-Path $StateRoot 'state.json'
+$state=Read-JsonFile $statePath
+$release=$state.releases.PSObject.Properties[[string]$state.active_release].Value
+$model=Get-Item -LiteralPath ([string]$release.model_artifact)
+$release.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
+$release.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
+Write-JsonAtomic $statePath $state
+$failures=[ordered]@{}
+try{Assert-ExternalModelReference ([string]$release.model_artifact) $StateRoot}catch{$failures.install=$_.Exception.Message}
+try{Copy-InstalledRelease ([string]$state.active_release) $release|Out-Null}catch{$failures.reinstall=$_.Exception.Message}
+""" + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$script:effects=@()
+function Stop-ManagedRelease { $script:effects+='stop' }
+function Invoke-GpuOwner { $script:effects+='owner' }
+function Unregister-ScheduledTask { $script:effects+='unregister' }
+function Get-ScheduledTask { }
+function Get-CimInstance { }
+try{Assert-InstalledModelIdentity $release}catch{$failures.launch=$_.Exception.Message}
+try{Uninstall-ManagedRelease|Out-Null}catch{$failures.uninstall=$_.Exception.Message}
+@{failures=$failures;effects=$script:effects;model_survived=Test-Path (Join-Path $Target 'model.ninfer')}|ConvertTo-Json -Depth 6 -Compress
+""")
+            self.assertEqual(set(observed["failures"]), {"install", "reinstall", "launch", "uninstall"}, observed)
+            self.assertEqual(observed["effects"], [])
+            self.assertTrue(observed["model_survived"])
+            self.assertTrue(lane.root.exists())
+
+    def test_rollback_removals_do_not_report_success_when_state_survives(self) -> None:
+        for resource in ("task", "snapshot"):
+            with self.subTest(resource=resource), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "state.json"
+                target.write_text("candidate state\n", encoding="utf-8")
+                observed = self.invoke(
+                    ps_assignments(Target=target, Resource=resource)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+function Get-ScheduledTask { [pscustomobject]@{TaskName='NInfer-Fixture'} }
+function Unregister-ScheduledTask {
+  [CmdletBinding()]param([string]$TaskName,[switch]$Confirm)
+  Write-Error 'task removal denied'
+}
+function Remove-Item {
+  [CmdletBinding()]param([string]$LiteralPath,[switch]$Force)
+  Write-Error 'snapshot removal denied'
+}
+$failure=$null
+try{
+  if($Resource -ceq 'task'){Restore-ReleaseTask 'NInfer-Fixture' $false $null}
+  else{Restore-PersistedFileSnapshot $Target ([pscustomobject]@{exists=$false})}
+}catch{$failure=$_.Exception.Message}
+@{failure=$failure;target_survived=Test-Path $Target}|ConvertTo-Json -Compress
+""")
+                self.assertIsNotNone(observed["failure"], observed)
+                self.assertTrue(observed["target_survived"])
+
+    def test_cleanup_alias_escaping_its_owned_root_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            releases = root / "state" / "releases"
+            external = root / "external"
+            releases.mkdir(parents=True)
+            external.mkdir()
+            observed = self.invoke(
+                ps_assignments(StateRoot=root / "state", Target=external, Alias=releases / "candidate")
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$linkType=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){'Junction'}else{'SymbolicLink'}
+New-Item -ItemType $linkType -Path $Alias -Target $Target|Out-Null
+$failure=$null
+try{Get-TransactionCleanupTargets ([pscustomobject]@{release_root=$Alias})|Out-Null}catch{$failure=$_.Exception.Message}
+@{failure=$failure;external_retained=Test-Path $Target}|ConvertTo-Json -Compress
+""")
+            self.assertIn("escapes its owned root", observed["failure"] or "")
+            self.assertTrue(observed["external_retained"])
+
+    def test_owner_lease_retirement_requires_file_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed = self.invoke(
+                ps_assignments(StateRoot=directory)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$leasePath=Join-Path $StateRoot 'gpu-owner-lease.json'
+[IO.File]::WriteAllText($leasePath,'{}')
+function Get-GpuOwnerLease { [pscustomobject]@{prior_paused=$false;controller_sha256='fixture'} }
+function Get-State { [pscustomobject]@{active_release='fixture'} }
+function Get-Release { [pscustomobject]@{} }
+function Get-OwnedProcess { }
+function Assert-NoReleaseProcess { }
+function Get-GpuOwner { [pscustomobject]@{controller_sha256='fixture'} }
+function Invoke-GpuOwner { [pscustomobject]@{paused=$false} }
+function Remove-Item {
+  [CmdletBinding()]param([string]$LiteralPath,[switch]$Force)
+  Write-Error 'lease removal denied'
+}
+$failure=$null
+try{Restore-GpuOwnerLease}catch{$failure=$_.Exception.Message}
+@{failure=$failure;lease_retained=Test-Path $leasePath}|ConvertTo-Json -Compress
+""")
+            self.assertIn("could not be retired", observed["failure"] or "")
+            self.assertTrue(observed["lease_retained"])
+
+    def test_stop_rethrows_original_error_when_owner_restoration_also_fails(self) -> None:
+        observed = self.invoke(ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$original=[InvalidOperationException]::new('incomplete shutdown fixture')
+function Stop-ManagedProcess { throw $original }
+function Restore-GpuOwnerLease { throw 'owner restoration refused' }
+$caught=$null
+try{Stop-ManagedRelease $false}catch{$caught=$_}
+@{same_exception=[object]::ReferenceEquals($caught.Exception,$original);
+  restore_failure=$caught.Exception.Data['gpu_owner_restore_failure']}|ConvertTo-Json -Compress
+""")
+        self.assertTrue(observed["same_exception"])
+        self.assertEqual(observed["restore_failure"], "owner restoration refused")
+    # End P21 ECTRL regressions.
 
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_uninstall_restores_prior_power_even_when_owner_was_already_paused(self) -> None:

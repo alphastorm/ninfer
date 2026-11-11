@@ -52,6 +52,38 @@ public static class NInferAtomicProtectedDirectoryV1 {
 '@
 }
 
+function Resolve-NInferFinalPath(
+    [string]$Path,
+    [Collections.Generic.HashSet[string]]$VisitedLinks = $null
+) {
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    if ([string]::Equals($fullPath, [IO.Path]::GetPathRoot($fullPath),
+                        [StringComparison]::OrdinalIgnoreCase)) {
+        return $fullPath
+    }
+    $fullPath = $fullPath.TrimEnd($separators)
+    $parent = Resolve-NInferFinalPath ([IO.Path]::GetDirectoryName($fullPath)) $VisitedLinks
+    $fullPath = Join-Path $parent ([IO.Path]::GetFileName($fullPath))
+    # Cleanup journals can name directories already removed by an earlier repair.
+    # Resolve their existing ancestors without requiring the missing suffix to exist.
+    if (-not (Test-Path -LiteralPath $fullPath)) { return $fullPath }
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { return $fullPath }
+    if ($null -eq $VisitedLinks) {
+        $VisitedLinks = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+    if (-not $VisitedLinks.Add($fullPath)) { throw 'filesystem path contains a reparse-point cycle' }
+    $property = $item.PSObject.Properties['Target']
+    $targets = @(if ($null -ne $property) { $property.Value })
+    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
+        throw 'filesystem reparse point has no unambiguous target'
+    }
+    $target = [string]$targets[0]
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path $parent $target }
+    return Resolve-NInferFinalPath $target $VisitedLinks
+}
+
 function Get-NInferAllowedOwnerSidValues {
     return @('S-1-5-18', 'S-1-5-32-544')
 }
