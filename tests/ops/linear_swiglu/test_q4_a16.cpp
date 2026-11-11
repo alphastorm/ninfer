@@ -20,6 +20,14 @@ int main() {
                            {QType::Q4_G64_FP16, 34816, 5120, 17408, 1401U, ActivationCompute::A16},
                            kTokenCases,
                            std::array<std::int32_t, 10>{7, 8, 9, 16, 25, 49, 128, 152, 168, 1024});
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+        // A second represented fixture covers both exact-width islands and their neighbours.
+        failures += run_profile(
+            "LinearSwiGLU Q4 native verify",
+            {QType::Q4_G64_FP16, 34816, 5120, 17408, 1423U, ActivationCompute::A16},
+            std::array<std::int32_t, 6>{7, 8, 9, 15, 16, 17},
+            std::array<std::int32_t, 2>{8, 16});
+#endif
         failures += run_profile(
             "LinearSwiGLU Q4 allow-A8",
             {QType::Q4_G64_FP16, 34816, 5120, 17408, 1401U, ActivationCompute::A8},

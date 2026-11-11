@@ -193,6 +193,12 @@ int run_q4_q5() {
     for (int t : {31, 32, 33, 127, 128, 129, 255, 256, 257, 512, 513, 1024})
         failures += run_target_projection_case(query_key, &gate_value, t,
                                                ops::LinearPolicy::AllowA8, true);
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    // Permissive policy must still use the A16 verify arithmetic at these widths.
+    for (int t : {8, 16})
+        failures += run_target_projection_case(query_key, &gate_value, t,
+                                               ops::LinearPolicy::AllowA8, true);
+#endif
     return failures;
 }
 

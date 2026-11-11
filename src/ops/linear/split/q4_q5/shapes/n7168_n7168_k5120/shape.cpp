@@ -17,6 +17,9 @@ void launch(const Tensor& x, Weights weights, std::span<const Tensor> outputs, M
     }
 #endif
     bool small = x.ne[1] <= 12;
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    small = small || x.ne[1] == 16;
+#endif
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     small = small || x.ne[1] == 16;
 #endif

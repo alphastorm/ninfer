@@ -9,6 +9,10 @@
 #include "ops/linear/kernels/q4/q4_instances.cuh"
 #include "ops/linear/kernels/q4/q4_sliced_k_launch.cuh"
 
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#endif
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
@@ -62,6 +66,28 @@ struct Q4SwiGluSmallTEpilogue {
 };
 
 using SmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+struct NativeSwiGluRows {
+    static constexpr int kOutputRowsPerTile = 8;
+    __device__ __forceinline__ int weight_row(int tile, int local) const {
+        return tile * 8 + (local & 7) + (local >= 8 ? kIntermediate : 0);
+    }
+};
+
+template <int Columns>
+void launch_native_verify(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+#if defined(NINFER_SM86)
+    using Schedule = SmallTMmaSchedule<SmallTFormat::Q4, kK, Columns, 4, 2>;
+#else
+    using Schedule = SmallTMmaSchedule<SmallTFormat::Q4, kK, Columns, 8, Columns == 8 ? 2 : 1>;
+#endif
+    launch_q45_small_t_mma<Schedule>(
+        q4_linear_operands(x, w),
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
+        Q4SwiGluSmallTEpilogue{}, stream, NativeSwiGluRows{});
+}
+#endif
 
 template <class Schedule>
 void launch_small_t_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
@@ -223,6 +249,10 @@ void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& ou
     if (x.ne[1] < 2 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4 LinearSwiGLU exact small-T requires T=2..32");
     }
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+    if (x.ne[1] == 8) return launch_native_verify<8>(x, w, out, stream);
+    if (x.ne[1] == 16) return launch_native_verify<16>(x, w, out, stream);
+#endif
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     if (x.ne[1] == 8)
         return launch_small_t_schedule<q4_instances::SlicedK5120T8PairwisePad16>(x, w, out, stream);

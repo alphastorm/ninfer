@@ -37,6 +37,16 @@ int q5_a16_conformance() {
                                                                   .full_output     = true});
         using namespace ninfer::test::linear_add;
         using ninfer::ops::LinearPolicy;
+#if defined(NINFER_NATIVE_SMALL_T_TC)
+        // Independent FP64 oracle, full rows, changed-input graph replay at both verify widths.
+        constexpr std::array<Invocation, 2> native_verify{{
+            {8, LinearPolicy::A16Only, Arithmetic::A16, GraphReplay::OriginalZeroOriginal},
+            {16, LinearPolicy::A16Only, Arithmetic::A16, GraphReplay::OriginalNegative},
+        }};
+        failures += run_cases("Q5 native verify LinearAdd", WeightFormat::Q5G64F16S,
+                              {.n = 5120, .k = k, .seed = 521U, .invocations = native_verify,
+                               .fixture = FixturePattern::Hashed, .rows = Samples::All});
+#endif
         constexpr std::array<Invocation, 12> a8{{
             {31, LinearPolicy::AllowA8, Arithmetic::A16},
             {32, LinearPolicy::AllowA8, Arithmetic::A16},
