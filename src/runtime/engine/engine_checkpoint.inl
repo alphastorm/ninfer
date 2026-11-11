@@ -639,10 +639,10 @@ private:
         }
     }
     // The next operation-free boundary is taken: a Pending pressure save, or a durable prepare
-    // held until the operation in flight completes. Every site about to start a context operation
-    // (admission, resident reclaim, capture preparation and start) waits, so a held prepare waits
-    // for at most the one operation that was in flight when it arrived; held-with-no-operation
-    // ends at the next top-of-turn runner, which runs every held command.
+    // held until the operation in flight completes. Admission, resident reclaim and capture
+    // preparation wait on either, a capture start only on a held prepare: every start site waits
+    // while one is held, so it waits for at most the one operation in flight when it arrived.
+    // Held-with-no-operation ends at the next top-of-turn runner, which runs every held command.
     [[nodiscard]] bool operation_boundary_taken() const noexcept {
         return checkpoints_.pending() || !checkpoint_held_commands_.empty();
     }

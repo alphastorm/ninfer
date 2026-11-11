@@ -431,11 +431,13 @@ Export and import preparation run only at an operation-free boundary. Native pre
 refuses `transaction_busy` while a context operation (binding, capture, demotion, pause) is
 in flight, so an off-worker prepare command that meets one is held in the worker, in arrival
 order, instead of being refused. It runs right after the next top-of-turn completion poll
-that leaves no operation in flight, before anything in that turn can start another one; while
-one is held, a resident reservation that would need reclaim waits as it does for a Pending
-pressure save, so resident work cannot keep a held prepare waiting. Retirements and every
-other worker command are never held; an inline worker prepare and a failed Engine (which
-refuses with `io_unavailable`) are not held either, and a stopping worker drops held commands.
+that leaves no operation in flight, or at the next turn's command runner when the operation
+completes mid-turn. While a prepare is held, nothing starts a context operation — admission,
+resident reclaim, capture preparation and capture start all wait — so a held prepare waits
+for at most the one operation in flight when it arrived. A Pending pressure save stops the
+same sites except capture start. Retirements and every other worker command are never held;
+an inline worker prepare and a failed Engine (which refuses with `io_unavailable`) are not
+held either, and a stopping worker drops held commands.
 
 Export preparation distinguishes a contended Host **byte deficit** from Busy, absent
 Host storage, deterministic staging/empty-arena limits and a contiguity-only miss.

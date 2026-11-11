@@ -1413,7 +1413,10 @@ private:
         request->model_state        = next;
         request->capture_pending    = true;
         request->post_capture_state = next;
-        if (instance_.program->has_context_operation() || operation_boundary_taken()) { return; }
+        // Held prepares only, unlike the other start sites: a Pending save never deferred captures.
+        if (instance_.program->has_context_operation() || !checkpoint_held_commands_.empty()) {
+            return;
+        }
         if (const auto owner = scheduler_.progress_owner(); owner && *owner != request->id) {
             instance_.program->skip_capture(*request->sequence);
             request->capture_pending = false;
