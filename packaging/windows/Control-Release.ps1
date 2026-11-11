@@ -167,8 +167,9 @@ function Get-Release([object]$State, [string]$ReleaseId) {
         throw 'installed release immutable build profile is invalid'
     }
     $laneNumber = $Matches[1]
+    $baseBuildProfile = [string]$release.build_profile -creplace '-(?:tc-a8|tc|a8)-rtx([0-9]{4})$', '-rtx$1'
     if ([string]$release.cuda_architecture -cnotmatch '^sm_[0-9]{2,3}a?$' -or
-        [string]$release.deployment_profile -cne ('qwen38-' + $laneNumber + '-native-v' + ([string]$release.build_profile).Substring(8, ([string]$release.build_profile).Length - 16))) {
+        [string]$release.deployment_profile -cne ('qwen38-' + $laneNumber + '-native-v' + $baseBuildProfile.Substring(8, $baseBuildProfile.Length - 16))) {
         throw 'installed release immutable build profile is invalid'
     }
     return $release
@@ -196,8 +197,8 @@ function Assert-FileHash([string]$Path, [string]$Expected, [string]$Label) {
 }
 function Test-PathWithinRoot([string]$Path, [string]$Root) {
     $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd($separators) + [IO.Path]::DirectorySeparatorChar
+    $fullPath = Resolve-NInferFinalPath $Path
+    $fullRoot = (Resolve-NInferFinalPath $Root).TrimEnd($separators) + [IO.Path]::DirectorySeparatorChar
     return $fullPath.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)
 }
 function Test-SamePath([string]$Left, [string]$Right) {
@@ -486,6 +487,9 @@ function Restore-GpuOwnerLease {
     # whichever finishes second must not fail for finding the work already done.
     Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force `
         -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')) {
+        throw 'restored GPU-owner lease could not be retired'
+    }
 }
 
 function Get-GpuOwnerStatus([object]$State) {
@@ -1051,7 +1055,8 @@ function Stop-ManagedProcess {
                 }
             }
         }
-        Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+        $runtimePath = Join-Path $StateRoot 'runtime.json'
+        if (Test-Path -LiteralPath $runtimePath) { Remove-Item -LiteralPath $runtimePath -Force -ErrorAction Stop }
     }
     finally {
         $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
@@ -1061,7 +1066,16 @@ function Stop-ManagedProcess {
 }
 
 function Stop-ManagedRelease([bool]$RestoreOwner = $true) {
-    Stop-ManagedProcess
+    try { Stop-ManagedProcess }
+    catch {
+        $stopFailure = $_
+        # A refused final save is still a stopped server. Hand back its lease, including
+        # Restart's keep-lease-on-success path, without retiring the sticky launch report.
+        # Restore's existing process guards keep a live or unattributed server leased.
+        try { Restore-GpuOwnerLease }
+        catch { $stopFailure.Exception.Data['gpu_owner_restore_failure'] = $_.Exception.Message }
+        throw $stopFailure
+    }
     if ($RestoreOwner) { Restore-GpuOwnerLease }
 }
 
@@ -1441,7 +1455,13 @@ function Uninstall-ManagedRelease {
             # Whole-root removal also retires a pause that predates the release lease. Restore
             # its recorded prior limit now, or leave its record and the state root for retry.
             Invoke-GpuOwner $state 'start' | Out-Null
-            Unregister-ScheduledTask -TaskName ([string]$state.task_name) -Confirm:$false -ErrorAction SilentlyContinue
+            $taskName = [string]$state.task_name
+            if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -ceq $taskName }).Count -ne 0) {
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+            }
+            if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -ceq $taskName }).Count -ne 0) {
+                throw 'managed scheduled task survived uninstall removal'
+            }
             if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
                 throw 'a server process survived the uninstall stop'
             }

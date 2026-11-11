@@ -123,7 +123,8 @@ PROTECTED_STATE_STUB = """function Initialize-NInferProtectedStateRoot([string]$
 }
 function Assert-NInferProtectedStateRoot([string]$Path) { }
 function Assert-NInferProtectedStateTree([string]$Path) { }
-"""
+""" + ps_function((WINDOWS / "Protect-StateRoot.ps1").read_text(encoding="utf-8"),
+                  "Resolve-NInferFinalPath")
 
 
 def committed_bytes(commit: str, path: str) -> bytes:
@@ -137,7 +138,11 @@ def ps_assignments(**values: object) -> str:
 
 def ps_definitions(path: Path) -> str:
     """PowerShell that defines every top-level function of one script without running its body."""
-    return (
+    shared = (
+        ps_function((WINDOWS / "Protect-StateRoot.ps1").read_text(encoding="utf-8"), "Resolve-NInferFinalPath") + "\n"
+        if path.name in ("Control-Release.ps1", "Install-Release.ps1") else ""
+    )
+    return shared + (
         "foreach($definition in [Management.Automation.Language.Parser]::ParseFile("
         f"{qualify_native.ps_quote(str(path))},[ref]$null,[ref]$null).FindAll("
         "{param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))"
@@ -301,7 +306,7 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
     lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
     root = directory / "qwen38-3090-native"
     operation = "5" * 32
-    candidate = "qwen38-3090-native-v0.8.0-beta.2-" + "c" * 12
+    candidate = "qwen38-3090-native-v0.8.0-beta.3-" + "c" * 12
     incumbent = "qwen38-3090-native-v0.7.0-beta.3-" + PREDECESSOR_3090[:12]
     transaction_root = root / "receipts" / "install-transactions" / operation
     snapshots = transaction_root / "snapshots"
@@ -376,7 +381,9 @@ $controllerLog=Join-Path $StateRoot 'controller.log'
 function Write-InstallEvent { }
 function Register-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:register' }
 function Unregister-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:unregister' }
-function Get-CimInstance { $LiveProcesses|ConvertFrom-Json }
+function Get-CimInstance {
+  foreach($entry in (ConvertFrom-Json -InputObject $LiveProcesses)){$entry}
+}
 $transaction=Get-Content -Raw -LiteralPath $Journal|ConvertFrom-Json
 $outcome=[ordered]@{completed=$true;failure=$null}
 try{Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath $Mode|Out-Null}
@@ -543,7 +550,7 @@ try{
   [ordered]@{
     start_failed=$null -ne $failure
     lease_held=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
-    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){Get-Content -LiteralPath $OwnerLog})
+    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){[IO.File]::ReadAllLines($OwnerLog,[Text.Encoding]::UTF8)})
   }|ConvertTo-Json -Compress
 }
 finally{if($null -ne $global:server -and -not $global:server.HasExited){$global:server.Kill()}}
@@ -1756,8 +1763,14 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         options = SimpleNamespace(
             lane_dir="packaging/windows/lanes/rtx3090", lifecycle_dir="packaging/windows",
             release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.3",
+            build_profile="fixture",
         )
-        with patch.object(release_package, "read_committed_file", return_value=b"committed") as read:
+        def committed(_source: Path, _head: str, name: str) -> bytes:
+            if name.endswith("/release-spec.json"):
+                return b'{"build_profile":"fixture","build_profiles":{"default":"fixture"}}'
+            return b"committed"
+
+        with patch.object(release_package, "read_committed_file", side_effect=committed) as read:
             release_package.windows_support_files(options, ROOT, "payload")
         sources = {call.args[2] for call in read.call_args_list}
         with self.subTest(invariant="one canonical fixture"):
@@ -2092,6 +2105,70 @@ class SharedLifecycleTreeTests(unittest.TestCase):
             self.assertTrue((ROOT / "tools/smoke" / name).is_file())
 
 
+class NativeBuildProfileTests(unittest.TestCase):
+    def lane(self) -> qualify_native.Lane:
+        directory = WINDOWS / "lanes" / "rtx3090"
+        return qualify_native.Lane(
+            "rtx3090", json.loads((directory / "release-spec.json").read_text(encoding="utf-8")),
+            json.loads((directory / "server-config.json").read_text(encoding="utf-8")),
+        )
+
+    def test_qualification_selects_only_allowlisted_profiles(self) -> None:
+        lane = self.lane()
+        for profile in lane.spec["build_profiles"].values():
+            selected = lane.with_build_profile(profile)
+            self.assertEqual(selected.build_profile, profile)
+            self.assertEqual(selected.release_id, lane.release_id)
+            self.assertEqual(selected.spec["deployment_profile"], lane.spec["deployment_profile"])
+            self.assertEqual(lane.build_profile, lane.spec["build_profiles"]["default"])
+        with self.assertRaisesRegex(qualify_native.LaneError, "allowlist"):
+            lane.with_build_profile("native-unlisted")
+
+    def test_qualification_checkpoint_cannot_change_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+            subject.config = SimpleNamespace(
+                scratch_state_root="C:/qualification/qwen38-3090-native", scratch_task_suffix="Variant",
+                scratch_port=18210, pressure_port=18200, upgrade_orchestrator_state=False, build_profile=None,
+            )
+            subject.lane = self.lane()
+            subject.head = subject.tool_head = "a" * 40
+            subject.script_sha = "b" * 64
+            subject.state_path = Path(directory) / "state.json"
+            state = subject._load_state()
+            state["gpu_uuid"] = SYNTHETIC_GPU_UUID
+            state["phases"]["neutral_build"] = {"receipt": {"build_profile": subject.lane.build_profile}}
+            qualify_native.atomic_json(subject.state_path, state)
+            subject.lane = subject.lane.with_build_profile(subject.lane.spec["build_profiles"]["a8"])
+            subject.config.build_profile = subject.lane.build_profile
+            with self.assertRaisesRegex(qualify_native.LaneError, "binding"):
+                subject._load_state()
+
+    def test_qualified_binary_profile_comparison_remains_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("ninfer.exe", "ninfer-serve.exe", "ninfer_bench.exe", *qualify_native.DIRECTSTORAGE_DLLS):
+                (root / name).write_bytes(name.encode("ascii"))
+            build_receipt = root / "build.json"
+            build_receipt.write_text("{}\n", encoding="utf-8")
+            profile = self.lane().spec["build_profiles"]["tc-a8"]
+            identity = {
+                "patch_stack_sha": "a" * 40, "upstream_base_sha": "b" * 40,
+                "build_profile": profile, "cuda_architecture": "86",
+                "source_dirty": "false", "build_type": "Release",
+            }
+            args = SimpleNamespace(
+                source_root=ROOT, runtime_bin=root, build_receipt=build_receipt,
+                source_commit="a" * 40, upstream_base_sha="b" * 40, cuda_architecture="86",
+                build_profile=profile,
+            )
+            with patch.object(release_package, "parse_build_info", return_value=identity):
+                self.assertEqual(qualify_native.internal_verify_native_build(args)["build_profile"], profile)
+                args.build_profile = self.lane().build_profile
+                with self.assertRaisesRegex(qualify_native.LaneError, "build_profile"):
+                    qualify_native.internal_verify_native_build(args)
+
+
 class LaneSpecificationTests(unittest.TestCase):
     def test_qualification_accepts_schema_5_and_refuses_frozen_schema_4(self) -> None:
         for lane_dir in LANES:
@@ -2169,7 +2246,12 @@ class LaneSpecificationTests(unittest.TestCase):
                     "draft_tokens": {"min": 7, "max": 7},
                 }
                 if not blackwell:
-                    self.assertEqual(version, "0.8.0-beta.2")
+                    self.assertEqual(version, "0.8.0-beta.3")
+                    self.assertEqual(spec["build_profiles"], {
+                        variant: f"native-v{version}{suffix}-{lane}"
+                        for variant, suffix in (("default", ""), ("a8", "-a8"),
+                                                ("tc", "-tc"), ("tc-a8", "-tc-a8"))
+                    })
                     self.assertEqual(spec["source"]["lineage_base_sha"],
                                      "752dd887be6a9cdb2da6217f3b664b3c03ed33ae")
                     expected_shape.update({
@@ -2332,17 +2414,29 @@ class PackagedStatusTests(unittest.TestCase):
             qualify_native.host_context_mib(broken)
 
 
-POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
+POWERSHELL = (
+    (shutil.which("powershell") or shutil.which("pwsh"))
+    if sys.platform == "win32"
+    else (shutil.which("pwsh") or shutil.which("powershell"))
+)
 
 
 @unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for executable script contracts")
 class PowerShellContractTests(unittest.TestCase):
     def invoke(self, script: str) -> object:
-        result = subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
-             "$ErrorActionPreference='Stop';\n" + script],
-            text=True, capture_output=True,
-        )
+        # Windows has a 32K native command-line limit; the real installer body is larger.
+        # A BOM also makes Windows PowerShell 5.1 read the fixture as UTF-8, not ANSI.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contract.ps1"
+            path.write_text(
+                "$ErrorActionPreference='Stop'\n"
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)\n" + script,
+                encoding="utf-8-sig",
+            )
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(path)],
+                text=True, encoding="utf-8", capture_output=True,
+            )
         if result.returncode != 0:
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
@@ -3151,7 +3245,6 @@ function Start-FixtureChild { $script:live=$true;return $script:child }
 function Acquire-GpuOwnerLease {
   Write-JsonAtomic (Join-Path $StateRoot 'gpu-owner-lease.json') @{artifact_type='ninfer_gpu_owner_lease';schema_version=1}
 }
-function Restore-GpuOwnerLease { Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') }
 function Test-ManagedActionInProgress { $ActionHeld -ceq 'True' }
 function Get-CimInstance { if($script:live){[pscustomobject]@{ExecutablePath=$release.server_executable;ProcessId=4242}} }
 $failure=$null
@@ -3507,6 +3600,364 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                     + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + FAILED_START)
                 self.assertEqual(observed, expected)
 
+
+    # P21 ECTRL: native profile selection and package/install binding.
+    def test_native_build_profile_parameter_is_allowlisted_and_defaults_exactly(self) -> None:
+        for lane in ("rtx3090", "rtx4090"):
+            with self.subTest(lane=lane):
+                spec_path = WINDOWS / "lanes" / lane / "release-spec.json"
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                observed = self.invoke(
+                    ps_assignments(SpecPath=spec_path)
+                    + ps_definitions(WINDOWS / "New-Package.ps1") + """
+$spec=Read-JsonFile $SpecPath
+$selected=@(Resolve-NativeBuildProfile $spec '')
+foreach($property in $spec.build_profiles.PSObject.Properties){
+  $selected+=Resolve-NativeBuildProfile $spec ([string]$property.Value)
+}
+$failure=$null
+try{Resolve-NativeBuildProfile $spec 'native-unlisted'|Out-Null}catch{$failure=$_.Exception.Message}
+@{selected=$selected;failure=$failure}|ConvertTo-Json -Compress
+""")
+                self.assertEqual(observed["selected"], [spec["build_profile"], *spec["build_profiles"].values()])
+                self.assertIn("allowlist", observed["failure"])
+
+    def test_allowlisted_native_variants_package_and_install_with_exact_profile(self) -> None:
+        from tests.test_release_package import NativeWindowsPackageTests
+
+        lane_path = WINDOWS / "lanes" / "rtx3090"
+        default_spec = json.loads((lane_path / "release-spec.json").read_text(encoding="utf-8"))
+        installer = (WINDOWS / "Install-Release.ps1").read_text(encoding="utf-8")
+        install_body = installer[installer.index("\n$StateRoot = Initialize-NInferProtectedStateRoot"):]
+        for variant, profile in default_spec["build_profiles"].items():
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture = NativeWindowsPackageTests()
+                source, binaries, _ = fixture.fixture(root, build_profile=profile)
+                spec = copy.deepcopy(default_spec)
+                spec["source"]["upstream_base_sha"] = fixture.runtime_head
+                spec["source"]["lineage_base_sha"] = fixture.runtime_head
+                model = root / "model.ninfer"
+                model.write_bytes(b"native variant model fixture")
+                spec["model"]["bytes"] = model.stat().st_size
+                spec["model"]["sha256"] = hashlib.sha256(model.read_bytes()).hexdigest()
+                (source / "packaging/windows/lanes/rtx3090/release-spec.json").write_text(
+                    json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+                config = root / "server-config.json"
+                config.write_bytes((lane_path / "server-config.json").read_bytes())
+                controller = source / "packaging/windows/Control-Release.ps1"
+                controller.write_text(
+                    "param([string]$Action,[string]$StateRoot)\n"
+                    "@{process_state='stopped'}|ConvertTo-Json -Compress\n", encoding="utf-8")
+                owner = source / "packaging/windows/Control-GpuOwner.ps1"
+                owner.write_text(OWNER_CONTROLLER_STUB, encoding="utf-8")
+                (source / "packaging/windows/Protect-StateRoot.ps1").write_text(PROTECTED_STATE_STUB, encoding="utf-8")
+                subprocess.run(["git", "-C", str(source), "add", "-A"], check=True, capture_output=True)
+                subprocess.run(["git", "-C", str(source), "commit", "--quiet", "-m", "variant package fixture"],
+                               check=True, capture_output=True)
+                head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                                      capture_output=True, text=True, encoding="utf-8").stdout.strip()
+                options = fixture.options(
+                    source, binaries, head, root / "package", build_profile=profile,
+                    release_version="v" + spec["release_version"], product_prefix=spec["product_prefix"],
+                    lineage_base_sha=fixture.runtime_head)
+                identity = {
+                    "upstream_base_sha": fixture.runtime_head, "patch_stack_sha": fixture.runtime_head,
+                    "build_profile": profile, "build_type": "Release", "cxx_compiler": "MSVC-fixture",
+                    "cuda_compiler": "NVIDIA-fixture", "cuda_toolkit": "13.3.52",
+                    "cuda_architecture": "86", "source_dirty": "false",
+                }
+                # The package/install contract uses inert binary bytes on both hosts; it never
+                # executes a synthetic Windows application or claims GPU qualification.
+                with patch.object(release_package, "parse_build_info", return_value=identity):
+                    receipt = release_package.package_release(options)
+                package = options.output_dir / receipt["binary_asset"]["name"]
+                key = root / "api-key.txt"
+                key.write_text("k" * 32 + "\n", encoding="utf-8")
+                state_root = root / "installed" / spec["lifecycle"]["state_root_name"]
+                observed = self.invoke(
+                    ps_assignments(StateRoot=state_root, PackagePath=package,
+                                   PackageSha256=receipt["binary_asset"]["sha256"],
+                                   ModelArtifactPath=model, ApiKeyFile=key,
+                                   GpuOwnerControllerPath=owner, GpuUuid=SYNTHETIC_GPU_UUID,
+                                   FixtureRoot=root)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + PROTECTED_STATE_STUB + """
+Set-StrictMode -Version Latest
+$NoStart=$true;$RepairInterruptedInstall=$false;$ScratchTaskSuffix='Variant'
+$env:ProgramData=$FixtureRoot
+function Protect-NInferRetainedSecretAcls { }
+function Set-NInferProtectedRootAcl { }
+function Set-NInferProtectedFileAcl { }
+function Write-InstallEvent { }
+function Get-ScheduledTask { }
+function Register-ReleaseTask { }
+function Get-CimInstance { }
+function Assert-GpuOwnerAttestation { }
+function Assert-HostPrerequisites([object]$Spec) {
+  [pscustomobject]@{index=0;uuid=$GpuUuid;name=$Spec.gpu.name;pci_bus_id='""" + SYNTHETIC_GPU_PCI + """'}
+}
+$installed=@(& {
+""" + install_body + """
+})
+""" + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$state=Get-State
+$release=Get-Release $state ([string]$state.active_release)
+Assert-CandidateLayout $release ([string]$state.active_release)
+Assert-InstalledModelIdentity $release
+$copy=Copy-InstalledRelease ([string]$state.active_release) $release
+@{receipt=($installed[-1]|ConvertFrom-Json);profile=$release.build_profile;
+  copied_profile=$copy.build_profile;deployment=$release.deployment_profile}|ConvertTo-Json -Depth 12 -Compress
+""")
+                self.assertEqual(observed["receipt"]["status"], "passed")
+                self.assertEqual(observed["profile"], profile)
+                self.assertEqual(observed["copied_profile"], profile)
+                self.assertEqual(observed["deployment"], spec["deployment_profile"])
+                self.assertEqual(observed["receipt"]["identity"]["build_profile"], profile)
+    # End P21 ECTRL profile regressions.
+
+    # P21 ECTRL: lease restoration, verified removals, and resolved containment.
+    def test_incomplete_stop_restores_owner_once_and_keeps_rollback_refused(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        dispatch = controller[controller.index("\nswitch ($Action)"):]
+        for first_action in ("Stop", "Restart"):
+            for complete, refused in ((False, 0), (True, 1)):
+                with self.subTest(first_action=first_action, complete=complete, refused=refused), \
+                        tempfile.TemporaryDirectory() as directory:
+                    lane = installed_release(Path(directory))
+                    owner = lane.root / "gpu-owner" / "Control-GpuOwner.ps1"
+                    owner.parent.mkdir()
+                    owner.write_text(OWNER_CONTROLLER_STUB, encoding="utf-8")
+                    owner_sha256 = hashlib.sha256(owner.read_bytes()).hexdigest()
+                    state_path = lane.root / "state.json"
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    active = state["active_release"]
+                    previous = active + "-previous"
+                    state["previous_release"] = previous
+                    state["releases"][previous] = copy.deepcopy(state["releases"][active])
+                    state["gpu_owner"] = {
+                        "controller_path": str(owner), "controller_sha256": owner_sha256,
+                        "state_root": str(lane.root / "gpu-owner-state"),
+                    }
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    (lane.root / "gpu-owner-lease.json").write_text(json.dumps({
+                        "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                        "release_id": active, "controller_sha256": owner_sha256,
+                        "prior_paused": False, "phase": "released",
+                    }), encoding="utf-8")
+                    report = lane.release / "logs" / "shutdown.json"
+                    report.write_text(json.dumps({
+                        "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                        "launch_id": "1" * 32, "complete": complete, "saved": 0,
+                        "skipped": 0, "refused": refused,
+                    }), encoding="utf-8")
+                    runtime_path = lane.root / "runtime.json"
+                    runtime_path.write_text(json.dumps({
+                        "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                        "release_id": active, "pid": 4242, "start_time_utc_ticks": 1,
+                        "managed_stop": "stop-event", "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
+                        "launch_id": "1" * 32, "shutdown_report": str(report),
+                    }), encoding="utf-8")
+                    runtime_bytes = runtime_path.read_bytes()
+                    observed = self.invoke(
+                        ps_assignments(StateRoot=lane.root, FirstAction=first_action,
+                                       OwnerLog=owner.parent / "owner.log")
+                        + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$script:live=$true
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=0}
+$script:child|Add-Member ScriptMethod WaitForExit {$this.HasExited=$true;$script:live=$false}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Request-ManagedStop { 'signalled' }
+function Start-ScheduledTask { throw 'an incomplete shutdown must not start a release' }
+$attempts=@(foreach($Action in @($FirstAction,'Stop','Rollback','Stop')){
+  $failure=$null
+  try{
+""" + dispatch + """
+  }catch{$failure=$_.Exception.Message}
+  [ordered]@{action=$Action;failure=$failure;lease=Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json');
+    owner_actions=@(if(Test-Path $OwnerLog){[IO.File]::ReadAllLines($OwnerLog,[Text.Encoding]::UTF8)})}
+})
+@{attempts=$attempts;live=$script:live}|ConvertTo-Json -Depth 6 -Compress
+""")
+                    self.assertFalse(observed["live"])
+                    for attempt in observed["attempts"]:
+                        self.assertIn("incomplete shutdown", attempt["failure"])
+                        self.assertFalse(attempt["lease"], attempt)
+                        self.assertEqual(attempt["owner_actions"], ["start", "status"], attempt)
+                    self.assertEqual(runtime_path.read_bytes(), runtime_bytes)
+                    self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["active_release"], active)
+                    self.assertEqual(json.loads((lane.root / "last-stop.json").read_text(encoding="utf-8"))["outcome"],
+                                     "graceful_incomplete_shutdown")
+
+    def test_uninstall_requires_proven_task_absence_before_deleting_state(self) -> None:
+        for outcome in ("denied", "survived", "unreadable", "removed", "absent"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                observed = self.invoke(
+                    ps_assignments(StateRoot=lane.root, Outcome=outcome)
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$state=Get-State
+$script:task=if($Outcome -cne 'absent'){[pscustomobject]@{TaskName=$state.task_name;State='Ready'}}else{$null}
+function Get-ScheduledTask {
+  if($Outcome -ceq 'unreadable'){throw 'task inventory unreadable'}
+  $script:task
+}
+function Get-ScheduledTaskInfo { }
+function Get-CimInstance { }
+function Wait-ManagedWrapperExit { $true }
+function Unregister-ScheduledTask {
+  [CmdletBinding()]param([string]$TaskName,[switch]$Confirm)
+  if($Outcome -ceq 'denied'){Write-Error 'task removal denied'}
+  if($Outcome -ceq 'removed'){$script:task=$null}
+}
+$failure=$null;$receipt=$null
+try{$receipt=Uninstall-ManagedRelease|ConvertFrom-Json}catch{$failure=$_.Exception.Message}
+@{failure=$failure;receipt=$receipt;root_retained=Test-Path $StateRoot;task_survived=$null -ne $script:task}|ConvertTo-Json -Depth 6 -Compress
+""")
+                if outcome in ("denied", "survived", "unreadable"):
+                    self.assertIsNotNone(observed["failure"], observed)
+                    self.assertIsNone(observed["receipt"])
+                    self.assertTrue(observed["root_retained"])
+                    self.assertTrue(observed["task_survived"])
+                else:
+                    self.assertIsNone(observed["failure"], observed)
+                    self.assertEqual(observed["receipt"]["status"], "passed")
+                    self.assertFalse(observed["root_retained"])
+                self.assertTrue((Path(directory) / "models" / "model.ninfer").exists())
+
+    def test_model_alias_into_lifecycle_state_is_refused_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            owned_models = lane.root / "model-assets"
+            owned_models.mkdir()
+            model = owned_models / "model.ninfer"
+            (Path(directory) / "models" / "model.ninfer").rename(model)
+            alias = Path(directory) / "model-alias"
+            state_path = lane.root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["releases"][state["active_release"]]["model_artifact"] = str(alias / model.name)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            observed = self.invoke(
+                ps_assignments(StateRoot=lane.root, Alias=alias, Target=owned_models)
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$linkType=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){'Junction'}else{'SymbolicLink'}
+New-Item -ItemType $linkType -Path $Alias -Target $Target|Out-Null
+function Write-InstallEvent { }
+$statePath=Join-Path $StateRoot 'state.json'
+$state=Read-JsonFile $statePath
+$release=$state.releases.PSObject.Properties[[string]$state.active_release].Value
+$model=Get-Item -LiteralPath ([string]$release.model_artifact)
+$release.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
+$release.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
+Write-JsonAtomic $statePath $state
+$failures=[ordered]@{}
+try{Assert-ExternalModelReference ([string]$release.model_artifact) $StateRoot}catch{$failures.install=$_.Exception.Message}
+try{Copy-InstalledRelease ([string]$state.active_release) $release|Out-Null}catch{$failures.reinstall=$_.Exception.Message}
+""" + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$script:effects=@()
+function Stop-ManagedRelease { $script:effects+='stop' }
+function Invoke-GpuOwner { $script:effects+='owner' }
+function Unregister-ScheduledTask { $script:effects+='unregister' }
+function Get-ScheduledTask { }
+function Get-CimInstance { }
+try{Assert-InstalledModelIdentity $release}catch{$failures.launch=$_.Exception.Message}
+try{Uninstall-ManagedRelease|Out-Null}catch{$failures.uninstall=$_.Exception.Message}
+@{failures=$failures;effects=$script:effects;model_survived=Test-Path (Join-Path $Target 'model.ninfer')}|ConvertTo-Json -Depth 6 -Compress
+""")
+            self.assertEqual(set(observed["failures"]), {"install", "reinstall", "launch", "uninstall"}, observed)
+            self.assertEqual(observed["effects"], [])
+            self.assertTrue(observed["model_survived"])
+            self.assertTrue(lane.root.exists())
+
+    def test_rollback_removals_do_not_report_success_when_state_survives(self) -> None:
+        for resource in ("task", "snapshot"):
+            with self.subTest(resource=resource), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "state.json"
+                target.write_text("candidate state\n", encoding="utf-8")
+                observed = self.invoke(
+                    ps_assignments(Target=target, Resource=resource)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+function Get-ScheduledTask { [pscustomobject]@{TaskName='NInfer-Fixture'} }
+function Unregister-ScheduledTask {
+  [CmdletBinding()]param([string]$TaskName,[switch]$Confirm)
+  Write-Error 'task removal denied'
+}
+function Remove-Item {
+  [CmdletBinding()]param([string]$LiteralPath,[switch]$Force)
+  Write-Error 'snapshot removal denied'
+}
+$failure=$null
+try{
+  if($Resource -ceq 'task'){Restore-ReleaseTask 'NInfer-Fixture' $false $null}
+  else{Restore-PersistedFileSnapshot $Target ([pscustomobject]@{exists=$false})}
+}catch{$failure=$_.Exception.Message}
+@{failure=$failure;target_survived=Test-Path $Target}|ConvertTo-Json -Compress
+""")
+                self.assertIsNotNone(observed["failure"], observed)
+                self.assertTrue(observed["target_survived"])
+
+    def test_cleanup_alias_escaping_its_owned_root_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            releases = root / "state" / "releases"
+            external = root / "external"
+            releases.mkdir(parents=True)
+            external.mkdir()
+            observed = self.invoke(
+                ps_assignments(StateRoot=root / "state", Target=external, Alias=releases / "candidate")
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$linkType=if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){'Junction'}else{'SymbolicLink'}
+New-Item -ItemType $linkType -Path $Alias -Target $Target|Out-Null
+$failure=$null
+try{Get-TransactionCleanupTargets ([pscustomobject]@{release_root=$Alias})|Out-Null}catch{$failure=$_.Exception.Message}
+@{failure=$failure;external_retained=Test-Path $Target}|ConvertTo-Json -Compress
+""")
+            self.assertIn("escapes its owned root", observed["failure"] or "")
+            self.assertTrue(observed["external_retained"])
+
+    def test_owner_lease_retirement_requires_file_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            observed = self.invoke(
+                ps_assignments(StateRoot=directory)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+$leasePath=Join-Path $StateRoot 'gpu-owner-lease.json'
+[IO.File]::WriteAllText($leasePath,'{}')
+function Get-GpuOwnerLease { [pscustomobject]@{prior_paused=$false;controller_sha256='fixture'} }
+function Get-State { [pscustomobject]@{active_release='fixture'} }
+function Get-Release { [pscustomobject]@{} }
+function Get-OwnedProcess { }
+function Assert-NoReleaseProcess { }
+function Get-GpuOwner { [pscustomobject]@{controller_sha256='fixture'} }
+function Invoke-GpuOwner { [pscustomobject]@{paused=$false} }
+function Remove-Item {
+  [CmdletBinding()]param([string]$LiteralPath,[switch]$Force)
+  Write-Error 'lease removal denied'
+}
+$failure=$null
+try{Restore-GpuOwnerLease}catch{$failure=$_.Exception.Message}
+@{failure=$failure;lease_retained=Test-Path $leasePath}|ConvertTo-Json -Compress
+""")
+            self.assertIn("could not be retired", observed["failure"] or "")
+            self.assertTrue(observed["lease_retained"])
+
+    def test_stop_rethrows_original_error_when_owner_restoration_also_fails(self) -> None:
+        observed = self.invoke(ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$original=[InvalidOperationException]::new('incomplete shutdown fixture')
+function Stop-ManagedProcess { throw $original }
+function Restore-GpuOwnerLease { throw 'owner restoration refused' }
+$caught=$null
+try{Stop-ManagedRelease $false}catch{$caught=$_}
+@{same_exception=[object]::ReferenceEquals($caught.Exception,$original);
+  restore_failure=$caught.Exception.Data['gpu_owner_restore_failure']}|ConvertTo-Json -Compress
+""")
+        self.assertTrue(observed["same_exception"])
+        self.assertEqual(observed["restore_failure"], "owner restoration refused")
+    # End P21 ECTRL regressions.
 
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_uninstall_restores_prior_power_even_when_owner_was_already_paused(self) -> None:

@@ -172,6 +172,12 @@ class Lane:
     def build_profile(self) -> str:
         return self.spec["build_profile"]
 
+    def with_build_profile(self, profile: str) -> "Lane":
+        profiles = self.spec.get("build_profiles")
+        if not isinstance(profiles, dict) or profile not in profiles.values():
+            raise LaneError("requested build profile is not in the committed lane allowlist")
+        return dataclasses.replace(self, spec={**self.spec, "build_profile": profile})
+
     @property
     def upstream_sha(self) -> str:
         return self.spec["source"]["upstream_base_sha"]
@@ -824,6 +830,7 @@ class Config:
     qualified_runtime_bin: str | None
     qualified_build_receipt: str | None
     gpu_uuid: str | None = None
+    build_profile: str | None = None
 
 
 class Orchestrator:
@@ -834,6 +841,8 @@ class Orchestrator:
         run(["git", "cat-file", "-e", f"{self.head}^{{commit}}"], cwd=config.source_root)
         self.head8 = self.head[:8]
         self.lane = Lane.load(config.source_root, config.lane, self.head)
+        if getattr(config, "build_profile", None):
+            self.lane = self.lane.with_build_profile(config.build_profile)
         validate_scratch_configuration(config, self.lane.spec)
         # Staged callers may dispatch phases themselves instead of using execute().
         self.preflight_protocol()
@@ -891,6 +900,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
             "port": self.config.scratch_port,
             "pressure_port": self.config.pressure_port,
         }
+        if getattr(self.config, "build_profile", None):
+            scratch_binding["build_profile"] = self.lane.build_profile
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             if state.get("phases") and not state.get("gpu_uuid"):
@@ -1387,7 +1398,7 @@ $runtime=@(Get-ChildItem $bin -Filter '*.dll' -File|Sort-Object Name|ForEach-Obj
 function Build-One([string]$Out,[string]$Config){{
   if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}}
   $parameters=@{{
-    Lane={ps_quote(self.lane.name)};SourceRoot=$source;
+    Lane={ps_quote(self.lane.name)};SourceRoot=$source;BuildProfile={ps_quote(self.lane.build_profile)};
     NInferExecutable=(Join-Path $bin 'ninfer.exe');ServerExecutable=(Join-Path $bin 'ninfer-serve.exe');
     BenchmarkExecutable=(Join-Path $bin 'ninfer_bench.exe');ReleaseHeadSha={ps_quote(self.tool_head)};RuntimeSourceSha={ps_quote(self.head)};
     RuntimeFile=$runtime;DependencySbomTool={ps_quote(self.config.dependency_sbom_tool)};
@@ -1422,6 +1433,8 @@ if([string]$sa.package.sha256 -cne [string]$sb.package.sha256 -or $scratchOuterA
         result = self.remote_json(self.config.builder, package_script, timeout=3600)
         receipt = result["public"]
         scratch = result["scratch"]
+        if receipt["build_profile"] != self.lane.build_profile or scratch["build_profile"] != self.lane.build_profile:
+            raise LaneError("qualification package differs from the selected build profile")
         require_port_only_equivalence(result["public_config"], result["scratch_config"], self.config.scratch_port)
         if receipt["binaries"] != scratch["binaries"] or receipt["support_assets"] != scratch["support_assets"]:
             raise LaneError("scratch package changed executable or lifecycle bytes")
@@ -2458,6 +2471,7 @@ def main() -> int:
     parser.add_argument("--api-key-file", required=True, help="protected target-side operator key; never discovered in shipped roots")
     parser.add_argument("--qualified-runtime-bin", help="consume this exact integrator-qualified builder-side flat runtime; do not rebuild")
     parser.add_argument("--qualified-build-receipt", help="builder-side integrator receipt binding the qualified runtime input")
+    parser.add_argument("--build-profile", help="exact allowlisted native build profile; defaults to the committed lane profile")
     parser.add_argument("--long-fixture", type=Path, required=True)
     parser.add_argument("--omp-root", required=True)
     parser.add_argument("--transfer-tool", type=Path,
@@ -2495,6 +2509,7 @@ def main() -> int:
         qualified_runtime_bin=args.qualified_runtime_bin,
         qualified_build_receipt=args.qualified_build_receipt,
         gpu_uuid=args.gpu_uuid,
+        build_profile=args.build_profile,
     )
     result = Orchestrator(config).execute()
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -1,5 +1,47 @@
 # NInfer native Windows lanes
 
+## 2026-11-11 — Native component 0.8.0-beta.3 (qualification pending)
+
+The native component candidates are `v0.8.0-qwen38-4090-beta.3` and
+`v0.8.0-qwen38-3090-beta.3`. Release, deployment and default build identities
+advance together. Model bytes, runtime shape, admission reserves and GPU-owner
+policies remain unchanged from `0.8.0-beta.2`.
+
+Package-build receipts remain `hardware-pending`. Both candidates require fresh
+exact-source build, package, GPU, lifecycle and restoration evidence before
+qualification; prior-component receipts are not evidence for these bytes.
+
+`New-Package.ps1 -BuildProfile` selects an exact binary profile from the lane's
+committed `build_profiles` allowlist: `default`, `a8`, `tc` or `tc-a8`. Omitting
+the parameter keeps the default profile and does not rewrite the packaged spec.
+Variant packages bind the selected profile in that spec, the build identity and
+the package receipt; a profile outside the allowlist or different from the binary
+is refused. Release/deployment identities, model bytes and runtime shape do not
+change between variants. Each variant still needs its own qualification gates.
+
+The native qualification driver accepts the same exact token through
+`--build-profile` when consuming the matching qualified binary set, passes it to
+packaging and binds it into checkpoint reuse. Installation retains the exact
+packaged-spec/build-identity profile equality check.
+
+## 2026-11-11 — Native controller containment fixes (next release)
+
+Stop and Restart restore the GPU-owner lease after a stopped server reports an
+incomplete final save, then rethrow the original shutdown refusal. The launch-bound
+`runtime.json`, shutdown report and candidate checkpoints remain; rollback stays
+blocked pending reconciliation. Repeating Stop does not repeat owner actions once
+the lease has been retired. A live or unattributed server still keeps its lease.
+
+Uninstall verifies that the managed scheduled task is absent before deleting the
+state root. Failed task removal leaves that root for retry instead of reporting
+success. Installer rollback likewise verifies task removal and fails if a file
+that should be absent cannot be removed.
+
+Model containment follows junction and symbolic-link ancestors before install,
+launch or uninstall. An external-looking alias to a model inside lifecycle state
+is refused before deletion; interrupted-install cleanup also checks resolved paths.
+Unsupported or ambiguous reparse targets fail closed.
+
 ## 2026-11-02 — Native component 0.8.0-beta.2 (qualification pending)
 
 The native component candidates are `v0.8.0-qwen38-4090-beta.2` and

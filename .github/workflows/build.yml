@@ -208,6 +208,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Run Windows PowerShell 5.1 lifecycle host contracts
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Windows lifecycle contracts require Windows PowerShell 5.1'
+          }
+          python -m unittest discover -s tests -p test_windows_release.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Windows lifecycle host contracts failed' }
       - name: Cache Windows dependency binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:

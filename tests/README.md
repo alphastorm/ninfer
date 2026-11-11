@@ -181,7 +181,9 @@ compile workflow, checks the additive schema-30 `speculative.attempted_per_posit
 
 The same Linux job runs `python3 -m unittest discover -s tests -p 'test_windows_release.py' -v`
 with PowerShell. These lifecycle contracts use synthetic GPU/task fixtures, not a native GPU.
-The Windows job compiles `ninfer_core`, the DirectStorage backend and its native test, the
+The Windows job first runs the same lifecycle module under Windows PowerShell 5.1,
+including incomplete-shutdown, rollback, task-removal and junction-containment contracts.
+It compiles `ninfer_core`, the DirectStorage backend and its native test, the
 Windows stop-event and checkpoint-service objects, and the host checkpoint/quota tests; only
 GPU-free checkpoint, durable-file and quota CTests execute there. This is Windows compilation
 coverage, not DirectStorage/GPU qualification or an sm_86/sm_89 runtime build.

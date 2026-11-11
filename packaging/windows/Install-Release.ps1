@@ -98,7 +98,12 @@ function Restore-ReleaseTask([string]$TaskName, [bool]$Existed, [string]$Xml) {
         Register-ScheduledTask -TaskName $TaskName -Xml $Xml -Force | Out-Null
         return
     }
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -ceq $TaskName }).Count -ne 0) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+    }
+    if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -ceq $TaskName }).Count -ne 0) {
+        throw 'managed scheduled task survived rollback removal'
+    }
 }
 
 function Write-InstallEvent([string]$Phase, [string]$Message, [object]$Data = $null) {
@@ -122,8 +127,8 @@ function Get-BoundedDiagnostic([object]$Value, [int]$MaximumLength = 1024) {
 
 function Test-PathWithinRoot([string]$Path, [string]$Root) {
     $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd($separators) + [IO.Path]::DirectorySeparatorChar
+    $fullPath = Resolve-NInferFinalPath $Path
+    $fullRoot = (Resolve-NInferFinalPath $Root).TrimEnd($separators) + [IO.Path]::DirectorySeparatorChar
     return $fullPath.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)
 }
 
@@ -214,7 +219,7 @@ function Save-PersistedFileSnapshot(
 
 function Restore-PersistedFileSnapshot([string]$Path, [object]$Snapshot) {
     if (-not [bool]$Snapshot.exists) {
-        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
         return
     }
     $backupPath = [string]$Snapshot.backup_path

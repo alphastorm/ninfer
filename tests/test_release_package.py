@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -9,7 +10,9 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
+from tools.release import package as release_package
 from tools.release.package import ReleaseError, ReleaseOptions, package_release, parse_build_info
 
 
@@ -98,63 +101,90 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertNotEqual(changed_head_result.returncode, 0)
             self.assertIn("source commit changed since configure", changed_head_result.stderr)
 
+    def fixture(self, root: Path) -> ReleaseOptions:
+        source = root / "source"
+        binaries = root / "binaries"
+        source.mkdir()
+        binaries.mkdir()
+
+        def git(*arguments: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(source), *arguments],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            return result.stdout.strip()
+
+        git("init", "--quiet")
+        git("config", "user.name", "NInfer Test")
+        git("config", "user.email", "ninfer-test@example.invalid")
+        (source / "LICENSE").write_text("Apache License fixture\n", encoding="utf-8")
+        git("add", "LICENSE")
+        git("commit", "--quiet", "-m", "release fixture")
+        head = git("rev-parse", "HEAD")
+
+        common = (
+            f"upstream_base_sha={head} patch_stack_sha={head} "
+            "build_profile=qwen38-5090-v0.1.0 build_type=Release "
+            "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-13.1.115 "
+            "cuda_toolkit=13.1.115 cuda_architecture=120a source_dirty=false"
+        )
+        ninfer = binaries / "ninfer"
+        ninfer_serve = binaries / "ninfer-serve"
+        ninfer.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' 'ninfer {common}'\n", encoding="utf-8"
+        )
+        ninfer_serve.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' 'ninfer-serve {common}'\n",
+            encoding="utf-8",
+        )
+        ninfer.chmod(0o755)
+        ninfer_serve.chmod(0o755)
+
+        return ReleaseOptions(
+            source=source,
+            ninfer=ninfer,
+            ninfer_serve=ninfer_serve,
+            output_dir=root / "release",
+            release_version="v0.1.0",
+            platform="linux-x86_64-cuda13.1",
+            upstream_base_sha=head,
+            release_head_sha=head,
+            build_profile="qwen38-5090-v0.1.0",
+            source_date_epoch=1_700_000_000,
+        )
+
+    def test_binary_replaced_after_hashing_is_not_published(self) -> None:
+        for program in ("ninfer", "ninfer-serve"):
+            with self.subTest(program=program), tempfile.TemporaryDirectory() as directory:
+                options = self.fixture(Path(directory))
+                binary = options.ninfer if program == "ninfer" else options.ninfer_serve
+                write_archive = release_package.write_archive
+
+                def replace_binary(*args, **kwargs) -> None:
+                    replacement = binary.with_name(binary.name + ".replacement")
+                    replacement.write_bytes(b"!" * binary.stat().st_size)
+                    replacement.replace(binary)
+                    write_archive(*args, **kwargs)
+
+                with mock.patch.object(release_package, "write_archive", side_effect=replace_binary):
+                    with self.assertRaisesRegex(
+                        ReleaseError, "archive member differs from recorded digest"
+                    ):
+                        package_release(options)
+                self.assertEqual(list(options.output_dir.iterdir()), [])
+
     def test_deterministic_asset_checksums_and_spdx(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "source"
-            binaries = root / "binaries"
-            source.mkdir()
-            binaries.mkdir()
-
-            def git(*arguments: str) -> str:
-                result = subprocess.run(
-                    ["git", "-C", str(source), *arguments],
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                return result.stdout.strip()
-
-            git("init", "--quiet")
-            git("config", "user.name", "NInfer Test")
-            git("config", "user.email", "ninfer-test@example.invalid")
-            (source / "LICENSE").write_text("Apache License fixture\n", encoding="utf-8")
-            git("add", "LICENSE")
-            git("commit", "--quiet", "-m", "release fixture")
-            head = git("rev-parse", "HEAD")
-
-            common = (
-                f"upstream_base_sha={head} patch_stack_sha={head} "
-                "build_profile=qwen38-5090-v0.1.0 build_type=Release "
-                "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-13.1.115 "
-                "cuda_toolkit=13.1.115 cuda_architecture=120a source_dirty=false"
-            )
-            ninfer = binaries / "ninfer"
-            ninfer_serve = binaries / "ninfer-serve"
-            ninfer.write_text(
-                f"#!/bin/sh\nprintf '%s\\n' 'ninfer {common}'\n", encoding="utf-8"
-            )
-            ninfer_serve.write_text(
-                f"#!/bin/sh\nprintf '%s\\n' 'ninfer-serve {common}'\n",
-                encoding="utf-8",
-            )
-            ninfer.chmod(0o755)
-            ninfer_serve.chmod(0o755)
+            fixture = self.fixture(root)
+            source = fixture.source
+            head = fixture.release_head_sha
 
             def options(output: Path) -> ReleaseOptions:
-                return ReleaseOptions(
-                    source=source,
-                    ninfer=ninfer,
-                    ninfer_serve=ninfer_serve,
-                    output_dir=output,
-                    release_version="v0.1.0",
-                    platform="linux-x86_64-cuda13.1",
-                    upstream_base_sha=head,
-                    release_head_sha=head,
-                    build_profile="qwen38-5090-v0.1.0",
-                    source_date_epoch=1_700_000_000,
-                )
+                return dataclasses.replace(fixture, output_dir=output)
 
             first = package_release(options(root / "release-one"))
             second = package_release(options(root / "release-two"))
@@ -216,7 +246,13 @@ _NATIVE_SUPPORT = {
     "packaging/windows/Control-GpuOwner.ps1": "# gpu owner fixture\n",
     "packaging/windows/Protect-StateRoot.ps1": "# state protection fixture\n",
     "tools/smoke/agent_protocol.py": "# protocol fixture\n",
-    "packaging/windows/lanes/rtx3090/release-spec.json": '{"release_id":"fixture"}\n',
+    "packaging/windows/lanes/rtx3090/release-spec.json": json.dumps({
+        "release_id": "fixture", "build_profile": "native-v0.6.0-rtx3090",
+        "build_profiles": {
+            "default": "native-v0.6.0-rtx3090", "a8": "native-v0.6.0-a8-rtx3090",
+            "tc": "native-v0.6.0-tc-rtx3090", "tc-a8": "native-v0.6.0-tc-a8-rtx3090",
+        },
+    }) + "\n",
     "packaging/windows/RELEASE_NOTES.md": "Release notes fixture\n",
     "tools/smoke/serve_contract.py": "# smoke contract fixture\n",
 }
@@ -224,7 +260,7 @@ _NATIVE_SUPPORT = {
 
 class NativeWindowsPackageTests(unittest.TestCase):
     """The native lane package: one packager, lane names from the caller."""
-    def fixture(self, root: Path) -> tuple[Path, Path, str]:
+    def fixture(self, root: Path, *, build_profile: str = "native-v0.6.0-rtx3090") -> tuple[Path, Path, str]:
         source = root / "source"
         binaries = root / "binaries"
         source.mkdir()
@@ -252,7 +288,7 @@ class NativeWindowsPackageTests(unittest.TestCase):
         head = git("rev-parse", "HEAD")
         common = (
             f"upstream_base_sha={runtime_head} patch_stack_sha={runtime_head} "
-            "build_profile=native-v0.6.0-rtx3090 build_type=Release "
+            f"build_profile={build_profile} build_type=Release "
             "cxx_compiler=MSVC-19.44.35207 cuda_compiler=NVIDIA-13.3.52 "
             "cuda_toolkit=13.3.52 cuda_architecture=86 source_dirty=false"
         )
@@ -350,6 +386,46 @@ class NativeWindowsPackageTests(unittest.TestCase):
                 package_release(self.options(source, binaries, head, root / "lane", lane_dir=None))
             with self.assertRaisesRegex(ReleaseError, "only accepted for Windows"):
                 package_release(self.options(source, binaries, head, root / "linux", platform="linux-x86_64-cuda13.1"))
+
+    def test_native_package_binds_each_allowlisted_profile_without_rewriting_default(self) -> None:
+        profiles = json.loads(_NATIVE_SUPPORT["packaging/windows/lanes/rtx3090/release-spec.json"])["build_profiles"]
+        for variant, profile in profiles.items():
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, binaries, head = self.fixture(root, build_profile=profile)
+                committed_spec = (source / "packaging/windows/lanes/rtx3090/release-spec.json").read_bytes()
+                receipt = package_release(self.options(source, binaries, head, root / "release", build_profile=profile))
+                archive_root = receipt["binary_asset"]["name"].removesuffix(".tar.gz")
+                with tarfile.open(root / "release" / receipt["binary_asset"]["name"], "r:gz") as archive:
+                    spec_bytes = archive.extractfile(f"{archive_root}/release-spec.json").read()
+                    spec = json.loads(spec_bytes)
+                    identity = json.load(archive.extractfile(f"{archive_root}/build-identity.json"))
+                    manifest = archive.extractfile(f"{archive_root}/SHA256SUMS.txt").read().decode("ascii")
+                self.assertEqual(spec["build_profile"], profile)
+                self.assertEqual(identity["build_profile"], profile)
+                self.assertEqual(receipt["build_profile"], profile)
+                self.assertIn(f"{hashlib.sha256(spec_bytes).hexdigest()}  release-spec.json\n", manifest)
+                if variant == "default":
+                    self.assertEqual(spec_bytes, committed_spec)
+                self.assertEqual((source / "packaging/windows/lanes/rtx3090/release-spec.json").read_bytes(), committed_spec)
+                with tarfile.open(root / "release" / receipt["source_archive"]["name"], "r:gz") as archive:
+                    member = next(name for name in archive.getnames()
+                                  if name.endswith("/packaging/windows/lanes/rtx3090/release-spec.json"))
+                    self.assertEqual(archive.extractfile(member).read(), committed_spec)
+
+    def test_native_package_refuses_unlisted_and_mislabelled_profiles(self) -> None:
+        for binary_profile, requested_profile, failure in (
+            ("native-v0.6.0-unlisted-rtx3090", "native-v0.6.0-unlisted-rtx3090", "allowlist"),
+            ("native-v0.6.0-rtx3090", "native-v0.6.0-a8-rtx3090", "build_profile"),
+        ):
+            with self.subTest(binary_profile=binary_profile, requested_profile=requested_profile), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, binaries, head = self.fixture(root, build_profile=binary_profile)
+                with self.assertRaisesRegex(ReleaseError, failure):
+                    package_release(self.options(source, binaries, head, root / "release",
+                                                 build_profile=requested_profile))
+                self.assertFalse((root / "release").exists())
 
 
 if __name__ == "__main__":
