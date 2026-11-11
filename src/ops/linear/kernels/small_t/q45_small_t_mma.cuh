@@ -4,7 +4,8 @@
 // DFlash verify and paired cohorts replace native routes where the SIMT split kernels pay
 // one FMA stream per column and the generic sliced-K MMA stalls on its operand decode.
 //
-// Adapted from ashalliants/ninfer-3090 (Apache License 2.0) at 4a178c4b:
+// Adapted from ashalliants/ninfer-3090 (Apache License 2.0), commit
+// 4a178c4b1fd78555b5efd9b07d10d5b1946ca3ad. See THIRD_PARTY_NOTICES.md.
 // src/ops/linear/q4/q4_ksplit_mma.cuh, src/ops/linear/q5/q5_small_t_mma.cuh and
 // src/ops/common/small_t_layout.cuh. This version folds both formats into one kernel and
 // publishes through this tree's Output/Epilogue contracts and row policies. The native verify
