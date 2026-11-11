@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/storage/checkpoint_codec.h"
 #include "models/common/qwen/vision/control.h"
 #include "runtime/contract/continuation_checkpoint.h"
+#include "runtime/contract/checkpoint_timing.h"
 #include "core/sha256.h"
 
 #include <nlohmann/json.hpp>
@@ -632,11 +633,14 @@ ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet&
     auto& p = *impl_;
     out->owner = &p;
     try {
+        CheckpointRestoreTimer timing(limits.restore_timing,
+                                     &RuntimeCheckpointRestoreStats::validation_ns);
         if (!p.context_cache.enabled) throw Refusal{DurablePrepareState::PolicyDisabled, DurableReason::CacheDisabled};
         if (p.has_context_operation() || p.pending_transaction_)
             throw Refusal{DurablePrepareState::CapacityRefused, DurableReason::TransactionBusy};
         auto metadata = validate_import_metadata(p, set, reader, limits);
         out->stats = metadata.stats;
+        timing.select(&RuntimeCheckpointRestoreStats::host_reservation_ns);
         capacity(p.host_context_arena && p.host_kv_extents &&
                  metadata.resident_bytes <= p.host_context_arena->free_bytes());
         auto& identities = metadata.identities;
@@ -680,9 +684,11 @@ ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet&
         std::sort(reads.begin(), reads.end(), [](const auto& a, const auto& b) {
             return std::tie(a.file, a.offset) < std::tie(b.file, b.offset);
         });
+        timing.select(&RuntimeCheckpointRestoreStats::payload_read_ns);
         for (const auto& read : reads)
             check_read(reader.read_file(set.payloads[read.file].path, read.offset, read.destination), reader);
         check_read(reader.verify_complete(), reader);
+        timing.select(&RuntimeCheckpointRestoreStats::host_publication_ns);
         for (auto image : images) p.state_store->complete_host_initialization(image);
         for (auto& pages : out->pages) pages.publish();
         for (const auto& saved : set.histories) {

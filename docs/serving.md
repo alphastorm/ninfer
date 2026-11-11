@@ -1104,12 +1104,34 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_host_context_{used,reserved,capacity,peak}_bytes` | Unified Host backing; reserved bytes are already included in used bytes |
 | `ninfer_context_transfer_bytes_total{resource,pool_id,direction}` | Completed State or KV payload transfers; `pool_id` is present for KV |
 | `ninfer_host_work_seconds_total{phase}`, `ninfer_device_wait_seconds_total` | Instrumented worker wall time; device wait is not CUDA kernel time |
+| `ninfer_checkpoint_restore_{attempts,imported}_total` | Durable restore attempts (including refusals/misses) and successfully published restores |
+| `ninfer_checkpoint_bindings_total`, `ninfer_checkpoint_restore_seconds_total{phase}` | Restore preparation and subsequent initial checkpoint-binding wall time; see phase accounting below |
 | `ninfer_constraint_requests_total{outcome}`, `ninfer_constraint_cache_total{result}` | Settled constrained requests by completion state and compilation-cache access |
 | `ninfer_constraint_{prepare,mask,matcher}_seconds_total`, `ninfer_constraint_mask_{positions,upload_bytes}_total` | Constraint work aggregated at request settlement, including truncated/cancelled results |
 | `ninfer_constraint_draft_wait_seconds_total` | Live draft-ready wait counted once per batch; a subset of device wait |
 | `ninfer_requests_total{outcome}`, `ninfer_response_failures_total` | Generation attempts entering preparation and subsequent response failures; protocol/model validation failures and token-count requests are excluded |
 | `ninfer_time_to_first_token_seconds` | Histogram updated once at the first committed token, including preparation, queueing and binding |
 | `ninfer_request_duration_seconds`, `ninfer_request_queue_seconds` | Histograms for settled generation outcomes, including cancellation; exceptional failures have separate counts |
+
+Restore phases are additive nanosecond counters in `RuntimeStats::checkpoint_restore`, exposed in
+seconds by metrics. `total` covers the service restore call, including guards, queueing, receipts
+and cleanup; `store_load` covers manifest/origin/Responses reads and validation; `engine_prepare`
+includes worker queueing and the nested `index_read` (read, digest and decode), `validation`
+(native metadata and identity), `host_reservation`, `payload_read` (native I/O **and streamed digest
+verification**), and `host_publication` (Host image/history construction). `commit` covers guarded
+Responses/native publication. Do not add `total` or `engine_prepare` to their subsets. Retries
+accumulate all attempted work. The residual identifies orchestration, queueing or reclaim, not an
+unmeasured CUDA kernel. `binding` is later initial checkpoint binding, including Device promotion,
+and counts RAM-only reuse too; isolate requests when attributing it to a disk restore.
+
+One-time `engine startup timing` and `server startup timing` stderr records provide integer
+nanoseconds without changing request JSONL. Engine fields are **exclusive** nested phase sums
+(including failed/repeated preparations): weight materialization, staging pin, CUDA initialization,
+artifact inspection, planning, frontend, runtime/KV/state allocation, Host-context pin, graph
+calibration/capture and finalization. Server totals separate Engine, warmup, service attachment
+(including checkpoint-store discovery), and other startup work, measured from entry to `main`
+through the ready announcement immediately before listening. External first-health timing also
+includes process launch and listener/poll latency; these are not charged to Engine phases.
 
 Histograms expose `_bucket`, `_sum` and `_count`. Metrics have bounded labels; they do not retain
 request IDs or request text. Rates are calculated by the consumer, for example:

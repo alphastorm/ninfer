@@ -16,6 +16,7 @@ namespace ninfer {
 class Engine;
 class PreparedPrompt;
 class GenerationHandle;
+struct RuntimeCheckpointRestoreStats;
 }
 
 namespace ninfer::runtime {
@@ -113,6 +114,8 @@ struct DurableLimits {
     std::uint64_t manifest_bytes = kDurableManifestMaxBytes;
     std::uint32_t max_files = kDurableMaxFiles;
     std::uint32_t max_points = kDurableMaxPoints;
+    // Synchronous import-only observation. Never retained by a native reservation or persisted.
+    RuntimeCheckpointRestoreStats* restore_timing = nullptr;
 };
 
 // Runtime-only compare-and-publish token; never persisted or reused across Engine lifetimes.
@@ -219,6 +222,8 @@ public:
     static void set_reclaimable_session_oracle(
         Engine&, std::shared_ptr<const ReclaimableSessionOracle>);
     static void notify_checkpoint_progress(Engine&) noexcept;
+    // Service-owned wall observations; does not schedule worker work or alter checkpoint policy.
+    static void observe_restore(Engine&, const RuntimeCheckpointRestoreStats&) noexcept;
     // Call after Responses publication, outside its mutex, with the latest stored endpoint.
     static void response_stored(Engine&, std::string_view session_sha256,
                                std::string_view tag) noexcept;

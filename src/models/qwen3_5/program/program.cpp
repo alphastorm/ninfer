@@ -328,8 +328,10 @@ std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
     if (plan.impl_->multiprocessor_count != device.multiprocessor_count()) {
         throw std::invalid_argument("sequence plan device capacity does not match execution");
     }
+    StartupPhaseScope allocation(startup_observer, StartupPhase::ProgramAllocate);
     auto impl =
         std::make_unique<detail::ProgramImpl>(parameters, *plan.impl_, device, startup_observer);
+    allocation.complete();
     if (plan.impl_->use_cuda_graph) {
         StartupPhaseScope phase(startup_observer, StartupPhase::CudaGraphPrepare);
         impl->initialize_graphs();

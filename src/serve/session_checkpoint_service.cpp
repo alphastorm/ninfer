@@ -5,6 +5,7 @@
 #include "ninfer/build_info.h"
 #include "ninfer/engine.h"
 #include "runtime/engine/checkpoint_identity.h"
+#include "runtime/contract/checkpoint_timing.h"
 #include "serve/client_identity.h"
 #include "serve/opaque_id.h"
 #include "serve/server_identity.h"
@@ -164,7 +165,21 @@ void SessionCheckpointService::receipt(std::string_view kind, std::string_view s
 
 runtime::DurableImportResult SessionCheckpointService::restore(
     std::string_view session, std::optional<std::string_view> required_response) {
+    RuntimeCheckpointRestoreStats observation{.attempts = 1};
+    const struct Observation {
+        Engine& engine;
+        RuntimeCheckpointRestoreStats& stats;
+        runtime::CheckpointRestoreTimer::Clock::time_point started =
+            runtime::CheckpointRestoreTimer::Clock::now();
+        ~Observation() {
+            stats.total_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    runtime::CheckpointRestoreTimer::Clock::now() - started).count());
+            Access::observe_restore(engine, stats);
+        }
+    } observed{engine_, observation};
     const auto finish = [&](runtime::DurableImportResult result, std::string_view origin = "not_checked") {
+        observation.imported = result.state == ImportState::Imported && result.reason == Reason::None;
         receipt("restore", import_name(result.state), result.reason,
                 result.state == ImportState::Imported && result.reason == Reason::None,
                 result.stats, origin);
@@ -180,7 +195,11 @@ runtime::DurableImportResult SessionCheckpointService::restore(
         .expected_epoch = Access::session_epoch(engine_, session),
         .shared_reuse_scope = principal_scope_,
         .allow_prefix_reuse = options_.allow_prefix_reuse, .cache_participation = true};
-    auto loaded = store_.load(session, fingerprint_json_, required_response);
+    auto loaded = [&] {
+        runtime::CheckpointRestoreTimer phase(&observation,
+                                              &RuntimeCheckpointRestoreStats::store_load_ns);
+        return store_.load(session, fingerprint_json_, required_response);
+    }();
     if (loaded.state != SessionCheckpointLoadState::Available || !loaded.checkpoint) {
         const auto state = loaded.state == SessionCheckpointLoadState::Unavailable ? ImportState::Unavailable
             : loaded.state == SessionCheckpointLoadState::Corrupt ? ImportState::Corrupt
@@ -194,16 +213,23 @@ runtime::DurableImportResult SessionCheckpointService::restore(
     if (verified.responses.replay_only) {
         // This authenticated generation deliberately has no native continuation. Publish only
         // its guarded Responses lineage; a subsequent parent request replays its transcript.
-        const auto result = commit_openai_response_restore(responses_, std::move(verified.responses), guard,
-            [] { return runtime::DurableImportResult{.state = ImportState::Imported, .reason = Reason::None}; });
+        const auto result = [&] {
+            runtime::CheckpointRestoreTimer phase(&observation,
+                                                  &RuntimeCheckpointRestoreStats::commit_ns);
+            return commit_openai_response_restore(responses_, std::move(verified.responses), guard,
+                [] { return runtime::DurableImportResult{.state = ImportState::Imported, .reason = Reason::None}; });
+        }();
         auto value = operation("restore", import_name(result.state), result.reason,
                                result.state == ImportState::Imported && result.reason == Reason::None,
                                result.stats, origin);
         value["replay_only"] = true;
         receipt(value);
+        observation.imported = result.state == ImportState::Imported && result.reason == Reason::None;
         return result;
     }
     auto prepared = [&]() -> runtime::DurablePrepareResult {
+        runtime::CheckpointRestoreTimer phase(&observation,
+                                              &RuntimeCheckpointRestoreStats::engine_prepare_ns);
         try {
             return Access::prepare_import(engine_, target, *verified.engine, fingerprint_,
                                            verified.expected_engine, limits_);
@@ -217,6 +243,8 @@ runtime::DurableImportResult SessionCheckpointService::restore(
     if (prepared.state != runtime::DurablePrepareState::Prepared || !prepared.prepared) {
         result = prepared_refusal(prepared);
     } else {
+        runtime::CheckpointRestoreTimer phase(&observation,
+                                              &RuntimeCheckpointRestoreStats::commit_ns);
         result = commit_openai_response_restore(responses_, std::move(verified.responses), guard,
                                                 [&] { return prepared.prepared->commit(); });
         if (result.state != ImportState::Imported) { prepared.prepared->abort(); }

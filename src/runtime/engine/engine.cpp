@@ -609,6 +609,14 @@ std::uint64_t CheckpointEngineAccess::checkpoint_progress(const Engine& engine) 
     } catch (...) { return 0; }
 }
 
+void CheckpointEngineAccess::observe_restore(
+    Engine& engine, const RuntimeCheckpointRestoreStats& value) noexcept {
+    if (!engine.impl_) { return; }
+    try {
+        generation_core(engine.impl_->core, [&](auto& core) { core.observe_restore(value); });
+    } catch (...) {}
+}
+
 void CheckpointEngineAccess::set_checkpoint_tag(PreparedPrompt& prompt, std::string_view tag) {
     if (!prompt.impl_) { throw std::invalid_argument("PreparedPrompt is empty"); }
     prompt.impl_->checkpoint_tag = tag;

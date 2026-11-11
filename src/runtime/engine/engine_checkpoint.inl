@@ -314,6 +314,8 @@
             const auto oracle = checkpoints_.oracle();
             // Reclaimed victims and a prepared reservation change catalog and Host occupancy.
             checkpoint_change([&] {
+                auto observed_limits = limits;
+                observed_limits.restore_timing = &cumulative_stats_.checkpoint_restore;
                 if (failed_) {
                     result.state = DurablePrepareState::Unavailable;
                     result.reason = DurableReason::IoUnavailable;
@@ -340,7 +342,7 @@
                 for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
                     const auto& input = fresh ? *fresh : reader;
                     DurableCheckpointSet set;
-                    const auto reason = read_checkpoint_index(input, limits, set);
+                    const auto reason = read_checkpoint_index(input, observed_limits, set);
                     if (reason != DurableReason::None) {
                         result.state = reason == DurableReason::IoUnavailable
                             ? DurablePrepareState::Unavailable : DurablePrepareState::Corrupt;
@@ -352,7 +354,8 @@
                         result.reason = DurableReason::FingerprintMismatch;
                         return;
                     }
-                    pending->native.emplace(instance_.program->prepare_checkpoint_import(set, input, limits));
+                    pending->native.emplace(instance_.program->prepare_checkpoint_import(
+                        set, input, observed_limits));
                     result.state = pending->native->state();
                     result.reason = pending->native->reason();
                     if (result.state == DurablePrepareState::Prepared) {
@@ -576,6 +579,8 @@ private:
     static DurableReason read_checkpoint_index(const ContinuationCheckpointReader& reader,
                                                const DurableLimits& limits,
                                                DurableCheckpointSet& set) {
+        CheckpointRestoreTimer timing(limits.restore_timing,
+                                     &RuntimeCheckpointRestoreStats::index_read_ns);
         const auto bytes = reader.file_size("engine/index.cbor");
         if (!bytes || !*bytes || *bytes > limits.manifest_bytes || *bytes > limits.staging_bytes ||
             *bytes > std::numeric_limits<std::size_t>::max()) { return DurableReason::InvalidIndex; }

@@ -441,8 +441,13 @@ int main(int argc, char** argv) {
             const auto empty = program->physical_usage();
             {
                 Reader corrupted(root, true); const auto index = corrupted.index();
-                auto refused = program->prepare_checkpoint_import(index, corrupted, {});
+                RuntimeCheckpointRestoreStats timing;
+                auto refused = program->prepare_checkpoint_import(
+                    index, corrupted, {.restore_timing = &timing});
                 require(refused.state() == DurablePrepareState::Corrupt && !refused.valid(), "bad payload was not corruption");
+                require(timing.validation_ns > 0 && timing.host_reservation_ns > 0 &&
+                            timing.payload_read_ns > 0 && timing.host_publication_ns == 0,
+                        "corrupt payload lost phase timing or charged unpublished Host work");
             }
             require(program->physical_usage().occupied == empty.occupied, "corruption rollback leaked resources");
             for (const auto failure : {DurableReason::IoUnavailable, DurableReason::PayloadSizeMismatch}) {
@@ -538,8 +543,13 @@ int main(int argc, char** argv) {
             }
             require(static_cast<bool>(fresh), "fresh reader lost its pinned generation");
             const auto index = fresh->index();
-            auto prepared = program->prepare_checkpoint_import(index, *fresh, {});
+            RuntimeCheckpointRestoreStats timing;
+            auto prepared = program->prepare_checkpoint_import(
+                index, *fresh, {.restore_timing = &timing});
             require(prepared.valid(), "native final import refused");
+            require(timing.validation_ns > 0 && timing.host_reservation_ns > 0 &&
+                        timing.payload_read_ns > 0 && timing.host_publication_ns > 0,
+                    "successful native import did not attribute all preparation phases");
             auto points = program->commit_import(std::move(prepared));
             require(points.size() == index.points.size(), "native commit lost checkpoint points");
             std::size_t continuation_bytes = 0;
