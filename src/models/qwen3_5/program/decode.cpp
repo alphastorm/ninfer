@@ -836,7 +836,6 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_raw(
 
 runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     SequenceState& sequence, RequestControl& request, std::uint32_t accepted_tokens, bool terminal,
-    std::optional<std::uint32_t> prefix_execution_split_after,
     runtime::ExecutionTiming* failed_timing) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Post, failed_timing);
     if (request.lifecycle != Lifecycle::Pending) {
@@ -853,8 +852,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
                                                    : request.pending.base_S;
     commit_generated_prefix_identity(
         sequence, base_ledger_frontier,
-        std::span<const TokenId>(sequence.ledger).subspan(base_ledger_frontier, accepted_tokens),
-        prefix_execution_split_after);
+        std::span<const TokenId>(sequence.ledger).subspan(base_ledger_frontier, accepted_tokens));
 
     switch (request.pending.kind) {
     case PendingKind::Begin:

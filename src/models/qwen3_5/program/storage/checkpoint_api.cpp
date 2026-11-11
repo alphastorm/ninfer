@@ -122,8 +122,6 @@ DurableIdentity identity(const detail::PreparedCaptureBacking& backing, std::uin
     result.token_types.assign(exact.token_types().begin(), exact.token_types().begin() + frontier);
     for (std::size_t axis = 0; axis < 3; ++axis)
         result.positions[axis].assign(exact.positions(axis).begin(), exact.positions(axis).begin() + frontier);
-    result.execution_frontiers.assign(exact.execution_frontiers().begin(),
-        std::upper_bound(exact.execution_frontiers().begin(), exact.execution_frontiers().end(), frontier));
     result.shortlist_tag = backing.digests.at(frontier);
     for (const auto& item : exact.vision_items()) {
         check(!item.token_spans.empty());
@@ -151,7 +149,6 @@ restore_identity(const DurableIdentity& saved, const ProgramImpl& p) {
     prompt.token_ids = saved.ledger;
     prompt.token_types = saved.token_types;
     for (const auto& axis : saved.positions) prompt.positions.insert(prompt.positions.end(), axis.begin(), axis.end());
-    prompt.identity.rewrite_execution_frontiers = saved.execution_frontiers;
     for (const auto& item : saved.vision_items) {
         qwen::VisionItem out{.modality = item.modality == "image" ? qwen::Modality::Image : qwen::Modality::Video,
             .grid = {item.temporal, item.height, item.width}, .patch_begin = item.patch_begin,

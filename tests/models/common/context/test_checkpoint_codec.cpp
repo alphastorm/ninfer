@@ -18,7 +18,6 @@ DurableCheckpointSet fixture() {
     identity.ledger.resize(65, 198);
     identity.token_types.resize(65, 0);
     for (auto& axis : identity.positions) for (int i = 0; i < 65; ++i) axis.push_back(i);
-    identity.execution_frontiers = {32, 48};
     identity.vision_items.push_back({.modality = "video", .temporal = 1, .height = 1, .width = 1,
         .patch_count = 1, .content_sha256 = std::string(64, 'b'),
         .timestamps_bits = {"3ff0000000000000"}, .token_spans = {{8, 4}}});
@@ -65,6 +64,9 @@ int main() {
         codec::validate(set, {});
         const auto bytes = codec::encode(set);
         const auto decoded = codec::decode(std::as_bytes(std::span(bytes)), {});
+        require(nlohmann::json::from_cbor(bytes)["identities"][0]["execution_frontiers"] ==
+                    nlohmann::json::array() && decoded.identities[0].execution_frontiers.empty(),
+                "qwen-identity/2 must retain the empty schema-3 execution_frontiers key");
         require(codec::encode(decoded) == bytes && decoded.histories.size() == 1 && decoded.points.size() == 3 &&
                 decoded.points[2].dflash_context_frontier == 65 && decoded.points[0].rope_delta == -3 &&
                 decoded.identities[0].vision_items[0].timestamps_bits[0] == "3ff0000000000000",
@@ -77,7 +79,10 @@ int main() {
         rejects([](auto& x) { x.pools[0].pages[1].offset = 0; });
         rejects([](auto& x) { x.histories[0].committed_tokens = 66; });
         rejects([](auto& x) { x.identities[0].positions[2].pop_back(); });
-        rejects([](auto& x) { x.identities[0].execution_frontiers = {48, 32}; });
+        rejects([](auto& x) { x.identities[0].execution_frontiers = {32, 48}; });
+        auto old_identity = nlohmann::json::from_cbor(bytes);
+        old_identity["identities"][0]["execution_frontiers"] = {32, 48};
+        rejects_cbor(old_identity);
         rejects([](auto& x) { x.identities[0].vision_items[0].timestamps_bits[0] = "7ff0000000000000"; });
         rejects([](auto& x) { x.identities[0].vision_items[0].token_spans[0] = {64, 2}; });
         rejects([](auto& x) { x.states.push_back(x.states[0]); });

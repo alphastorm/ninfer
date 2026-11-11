@@ -170,8 +170,9 @@ Frontend 根据模板渲染和 next-user probe 选择 typed R，再独立决定�
 为精确 token frontier 时，实际保存 C；恢复后重新计算闭合 token。否则保存 R。这一选择来自 typed R
 对应的消息结构，与本次自动共享 marker 位置无关。输入规划、source 携带检查使用同一恢复位置。
 
-`rewrite_execution_frontiers` 另行约束数学执行的切分，可能位于 assistant header 之后。
-实际恢复位置前移或可选保存失败都不改变这些数学边界。
+Chat markers do not impose mathematical prefill or Replay splits. Chunk/pacing limits,
+actual capture frontiers, prompt/media boundaries and MTP alignment still bound execution.
+Prefix identity compares tokens, token types, positions and media, not chat-marker decomposition.
 
 从较深 E 恢复时，Native 携带仍精确兼容的输入点。需要更靠后位置时，旧点可在申请新目的之前
 退休；新保存失败不恢复旧点。较早 state 不能从更深 state 倒推。每次生成不另存固定 P 镜像；

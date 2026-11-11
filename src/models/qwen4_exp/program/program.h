@@ -322,7 +322,7 @@ public:
                                       runtime::TokenMaskProvider* = nullptr);
     [[nodiscard]] runtime::ExecutionTiming
     append_forced_tokens(std::span<const SequenceHandle>, std::span<const TokenId>,
-                         std::uint32_t stride, std::span<const std::optional<std::uint32_t>>,
+                         std::uint32_t stride,
                          runtime::ExecutionTiming* = nullptr);
     [[nodiscard]] CommitResult
     commit(PendingBatch&&, std::span<const runtime::CommitDecision>,

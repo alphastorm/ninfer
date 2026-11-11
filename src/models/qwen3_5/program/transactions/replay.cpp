@@ -46,8 +46,6 @@ qwen::PreparedPromptData replay_prompt(const RequestBasePlanImpl& base,
             out.positions[axis * ledger_tokens + token] = static_cast<std::int32_t>(position);
         }
     }
-    const auto splits = sequence.prefix_identity.execution_frontiers();
-    out.identity.rewrite_execution_frontiers.assign(splits.begin(), splits.end());
     return out;
 }
 
@@ -194,13 +192,7 @@ ReplayProgress ProgramImpl::advance_replay(SequenceHandle handle,
             count = std::min(count, prompt_tokens - cursor - 1U);
         }
         const bool skip_mtp_alignment = awaits_first_mtp_token && cursor + 1U == prompt_tokens;
-        const auto splits             = sequence.prefix_identity.execution_frontiers();
-        const auto next_split         = std::upper_bound(splits.begin(), splits.end(), cursor);
-        std::optional<std::uint32_t> split =
-            next_split != splits.end() ? std::optional<std::uint32_t>(*next_split) : std::nullopt;
-        if (capture_frontier && (!split || *capture_frontier < *split)) {
-            split = capture_frontier;
-        }
+        const auto split = capture_frontier;
 
         const context::StateImageSelectors selectors = state_selectors(sequence);
         execution::PrefillContext context{

@@ -778,7 +778,7 @@ public:
 
     [[nodiscard]] rt::ExecutionTiming
     append_forced_tokens(std::span<const Sequence> sequences, std::span<const TokenId>,
-                         std::uint32_t, std::span<const std::optional<std::uint32_t>>,
+                         std::uint32_t,
                          rt::ExecutionTiming* = nullptr) {
         for (const auto sequence : sequences) { (void)live(sequence); }
         return {};
