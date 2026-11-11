@@ -1,5 +1,16 @@
 # NInfer native Windows lanes
 
+## 2026-11-11 — Native component 0.8.0-beta.3 (qualification pending)
+
+The native component candidates are `v0.8.0-qwen38-4090-beta.3` and
+`v0.8.0-qwen38-3090-beta.3`. Release, deployment and default build identities
+advance together. Model bytes, runtime shape, admission reserves and GPU-owner
+policies remain unchanged from `0.8.0-beta.2`.
+
+Package-build receipts remain `hardware-pending`. Both candidates require fresh
+exact-source build, package, GPU, lifecycle and restoration evidence before
+qualification; prior-component receipts are not evidence for these bytes.
+
 ## 2026-11-11 — Native controller containment fixes (next release)
 
 Stop and Restart restore the GPU-owner lease after a stopped server reports an
