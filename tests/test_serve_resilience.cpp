@@ -158,6 +158,59 @@ void unchanged_inputs(const std::string& source, const fi::CompiledChatTemplate&
     require(unchanged, "valid tool argument wire bytes changed");
 }
 
+// P21 EUP: replay every upstream rejection vector through the real request/template adapters.
+void p21_eup_tool_history(const fi::CompiledChatTemplate& compiled) {
+    for (const auto bad : {
+             R"({"x": nope})",    // 4461c9683, Qwen/GLM tool_history_arguments: invalid JSON token.
+             R"({"x":)",          // 4461c9683, Qwen/GLM tool_history_arguments: truncated JSON.
+             "[]",               // 4461c9683, Qwen/GLM tool_history_arguments: non-object array.
+             "null",             // 4461c9683, Qwen/GLM tool_history_arguments: non-object null.
+             R"({"x":1e99999})",  // 4461c9683, Qwen/GLM tool_history_arguments: number overflow.
+         }) {
+        auto body = chat_body();
+        body["messages"][0]["content"] = "run the tool";
+        body["messages"].push_back(Json{
+            {"role", "assistant"}, {"content", ""},
+            {"tool_calls", Json::array({
+                Json{{"id", "first"}, {"type", "function"},
+                     {"function", Json{{"name", "noop"}, {"arguments", "{}"}}}},
+                Json{{"id", "second"}, {"type", "function"},
+                     {"function", Json{{"name", "legacy"}, {"arguments", bad}}}},
+            })}});
+        body["messages"].push_back(
+            Json{{"role", "tool"}, {"tool_call_id", "second"}, {"content", "done"}});
+        for (int turn = 0; turn != 2; ++turn) {
+            if (turn != 0) {
+                body["messages"].push_back(Json{{"role", "assistant"}, {"content", "recovered"}});
+                body["messages"].push_back(
+                    Json{{"role", "user"}, {"content", "continue with this history"}});
+            }
+            try {
+                const auto request = parse_chat_completion_request(body, {});
+                const auto rendered = render(compiled, request.generation);
+                require(rendered.text.find("<parameter=input>\n" + std::string(bad) +
+                                           "\n</parameter>") != std::string::npos,
+                        "raw malformed history was not rendered as an input field");
+                auto canonical = body;
+                canonical["messages"][1]["tool_calls"][1]["function"]["arguments"] =
+                    Json{{"input", bad}}.dump();
+                require(rendered.text ==
+                            render(compiled, parse_chat_completion_request(canonical, {}).generation).text,
+                        "malformed and explicitly wrapped history rendered differently");
+                require(turn == 0 ||
+                            rendered.text.find("continue with this history") != std::string::npos,
+                        "later request carrying malformed history was not rendered");
+                require(body["messages"][1]["tool_calls"][1]["function"]["arguments"] == bad,
+                        "serving rewrote the client's stored malformed history");
+            } catch (const std::exception& error) {
+                throw std::runtime_error("P21 EUP vector " + Json(bad).dump() + ", turn " +
+                                         std::to_string(turn) + ": " + error.what());
+            }
+        }
+    }
+}
+// P21 EUP end.
+
 void numerical_error_mapping() {
     const auto error = request_error_to_api_error(ninfer::RequestError(
         ninfer::RequestErrorKind::NumericalFailure, "non-finite sample"));
@@ -192,5 +245,7 @@ int main(int argc, char** argv) {
     run("malformed_response", malformed_response);
     run("unchanged_inputs", [&] { unchanged_inputs(source, compiled); });
     run("numerical_error_mapping", numerical_error_mapping);
+    // P21 EUP
+    run("p21_eup_tool_history", [&] { p21_eup_tool_history(compiled); });
     return failures ? 1 : 0;
 }

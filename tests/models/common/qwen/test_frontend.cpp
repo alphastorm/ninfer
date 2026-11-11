@@ -2929,6 +2929,89 @@ int test_media_auto_threads_respect_affinity() {
     return check(!error && threads == 1, "automatic media pool ignored the allowed CPU affinity");
 }
 
+// P21 EUP: characterize the fork's lenient policy, not upstream's HTTP 400 policy.
+int test_p21_eup_tool_history_arguments() {
+    using Json = nlohmann::ordered_json;
+    const auto inspect = make_frontend(resources("{{ messages|tojson }}"), false);
+    const auto shipped = make_frontend(resources(reasoning_effort_template_source()), false);
+    ninfer::PromptInput history;
+    history.options.enable_thinking = false;
+    history.messages = {
+        {.role = ninfer::ChatRole::User, .parts = {{.text = "run the tool"}}},
+        {.role = ninfer::ChatRole::Assistant,
+         .tool_calls = {{.id = "first", .name = "noop", .arguments_json = "{}"},
+                        {.id = "second", .name = "legacy"}}},
+        {.role = ninfer::ChatRole::Tool, .parts = {{.text = "done"}}, .tool_call_id = "second"}};
+    int failures = 0;
+    for (const auto bad : {
+             R"({"x": nope})",    // 4461c9683, Qwen test_tool_history_arguments: invalid JSON token.
+             R"({"x":)",          // 4461c9683, Qwen test_tool_history_arguments: truncated JSON.
+             "[]",               // 4461c9683, Qwen test_tool_history_arguments: non-object array.
+             "null",             // 4461c9683, Qwen test_tool_history_arguments: non-object null.
+             R"({"x":1e99999})",  // 4461c9683, Qwen test_tool_history_arguments: number overflow.
+         }) {
+        auto input = history;
+        input.messages[1].tool_calls[1].arguments_json = bad;
+        for (int turn = 0; turn != 2; ++turn) {
+            if (turn != 0) {
+                input.messages.push_back(
+                    {.role = ninfer::ChatRole::Assistant, .parts = {{.text = "recovered"}}});
+                input.messages.push_back(
+                    {.role = ninfer::ChatRole::User, .parts = {{.text = "continue with this history"}}});
+            }
+            try {
+                const auto prepared = inspect.prepare(input);
+                const auto rendered = Json::parse(
+                    fixture_tokenizer().decode(FrontendFactory::inspect(prepared).token_ids));
+                const auto expected = Json{{"input", bad}};
+                failures += check(
+                    rendered.at(1).at("tool_calls").at(1).at("function").at("arguments").dump() ==
+                        expected.dump(),
+                    "P21 EUP malformed history did not retain its exact raw input");
+                failures += check(
+                    rendered.at(1).at("tool_calls").at(0).at("function").at("arguments") ==
+                        Json::object(),
+                    "P21 EUP malformed history changed the preceding valid call");
+                failures += check(rendered.size() == input.messages.size() &&
+                                      (turn == 0 ||
+                                       rendered.back().at("content") == "continue with this history"),
+                                  "P21 EUP replay lost the later turn");
+                const auto prompt = shipped.prepare(input);
+                auto canonical = input;
+                canonical.messages[1].tool_calls[1].arguments_json = expected.dump();
+                const auto wrapped = shipped.prepare(canonical);
+                failures += check(FrontendFactory::inspect(prompt).token_ids ==
+                                      FrontendFactory::inspect(wrapped).token_ids,
+                                  "P21 EUP shipped template did not render the raw input wrapper");
+                failures += check(shipped.count_tokens(input) == prompt.summary().prompt_tokens,
+                                  "P21 EUP history token counting disagreed with preparation");
+            } catch (const std::exception& error) {
+                std::cerr << "P21 EUP vector " << Json(bad).dump() << ", turn " << turn
+                          << " threw: " << error.what() << '\n';
+                return failures + 1;
+            }
+        }
+    }
+    for (const auto valid : {
+             "",       // 4461c9683, Qwen test_tool_history_arguments: empty arguments.
+             "{}",     // 4461c9683, Qwen test_tool_history_arguments: empty object.
+             R"({"z":[1,true,null,{"s":"a\nb\"c"}],"a":2})",
+             // 4461c9683, Qwen test_tool_history_arguments: nested values and object member order.
+         }) {
+        history.messages[1].tool_calls[1].arguments_json = valid;
+        const auto prepared = inspect.prepare(history);
+        const auto rendered = Json::parse(
+            fixture_tokenizer().decode(FrontendFactory::inspect(prepared).token_ids));
+        const auto expected = std::string_view(valid).empty() ? Json::object() : Json::parse(valid);
+        failures += check(
+            rendered.at(1).at("tool_calls").at(1).at("function").at("arguments").dump() ==
+                expected.dump(),
+            "P21 EUP valid history changed argument values or object member order");
+    }
+    return failures;
+}
+// P21 EUP end.
+
 int probe_resource_frontend(const std::filesystem::path& directory,
                             const std::filesystem::path& selected_template) {
     FrontendResources source;
@@ -3030,5 +3113,7 @@ int main(int argc, char** argv) {
     failures += test_media_auto_threads_respect_affinity();
     failures += test_invalid_media_classification();
     failures += test_disabled_vision();
+    // P21 EUP
+    failures += test_p21_eup_tool_history_arguments();
     return failures == 0 ? 0 : 1;
 }
