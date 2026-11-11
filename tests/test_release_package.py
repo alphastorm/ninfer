@@ -246,7 +246,13 @@ _NATIVE_SUPPORT = {
     "packaging/windows/Control-GpuOwner.ps1": "# gpu owner fixture\n",
     "packaging/windows/Protect-StateRoot.ps1": "# state protection fixture\n",
     "tools/smoke/agent_protocol.py": "# protocol fixture\n",
-    "packaging/windows/lanes/rtx3090/release-spec.json": '{"release_id":"fixture"}\n',
+    "packaging/windows/lanes/rtx3090/release-spec.json": json.dumps({
+        "release_id": "fixture", "build_profile": "native-v0.6.0-rtx3090",
+        "build_profiles": {
+            "default": "native-v0.6.0-rtx3090", "a8": "native-v0.6.0-a8-rtx3090",
+            "tc": "native-v0.6.0-tc-rtx3090", "tc-a8": "native-v0.6.0-tc-a8-rtx3090",
+        },
+    }) + "\n",
     "packaging/windows/RELEASE_NOTES.md": "Release notes fixture\n",
     "tools/smoke/serve_contract.py": "# smoke contract fixture\n",
 }
@@ -254,7 +260,7 @@ _NATIVE_SUPPORT = {
 
 class NativeWindowsPackageTests(unittest.TestCase):
     """The native lane package: one packager, lane names from the caller."""
-    def fixture(self, root: Path) -> tuple[Path, Path, str]:
+    def fixture(self, root: Path, *, build_profile: str = "native-v0.6.0-rtx3090") -> tuple[Path, Path, str]:
         source = root / "source"
         binaries = root / "binaries"
         source.mkdir()
@@ -282,7 +288,7 @@ class NativeWindowsPackageTests(unittest.TestCase):
         head = git("rev-parse", "HEAD")
         common = (
             f"upstream_base_sha={runtime_head} patch_stack_sha={runtime_head} "
-            "build_profile=native-v0.6.0-rtx3090 build_type=Release "
+            f"build_profile={build_profile} build_type=Release "
             "cxx_compiler=MSVC-19.44.35207 cuda_compiler=NVIDIA-13.3.52 "
             "cuda_toolkit=13.3.52 cuda_architecture=86 source_dirty=false"
         )
@@ -380,6 +386,46 @@ class NativeWindowsPackageTests(unittest.TestCase):
                 package_release(self.options(source, binaries, head, root / "lane", lane_dir=None))
             with self.assertRaisesRegex(ReleaseError, "only accepted for Windows"):
                 package_release(self.options(source, binaries, head, root / "linux", platform="linux-x86_64-cuda13.1"))
+
+    def test_native_package_binds_each_allowlisted_profile_without_rewriting_default(self) -> None:
+        profiles = json.loads(_NATIVE_SUPPORT["packaging/windows/lanes/rtx3090/release-spec.json"])["build_profiles"]
+        for variant, profile in profiles.items():
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, binaries, head = self.fixture(root, build_profile=profile)
+                committed_spec = (source / "packaging/windows/lanes/rtx3090/release-spec.json").read_bytes()
+                receipt = package_release(self.options(source, binaries, head, root / "release", build_profile=profile))
+                archive_root = receipt["binary_asset"]["name"].removesuffix(".tar.gz")
+                with tarfile.open(root / "release" / receipt["binary_asset"]["name"], "r:gz") as archive:
+                    spec_bytes = archive.extractfile(f"{archive_root}/release-spec.json").read()
+                    spec = json.loads(spec_bytes)
+                    identity = json.load(archive.extractfile(f"{archive_root}/build-identity.json"))
+                    manifest = archive.extractfile(f"{archive_root}/SHA256SUMS.txt").read().decode("ascii")
+                self.assertEqual(spec["build_profile"], profile)
+                self.assertEqual(identity["build_profile"], profile)
+                self.assertEqual(receipt["build_profile"], profile)
+                self.assertIn(f"{hashlib.sha256(spec_bytes).hexdigest()}  release-spec.json\n", manifest)
+                if variant == "default":
+                    self.assertEqual(spec_bytes, committed_spec)
+                self.assertEqual((source / "packaging/windows/lanes/rtx3090/release-spec.json").read_bytes(), committed_spec)
+                with tarfile.open(root / "release" / receipt["source_archive"]["name"], "r:gz") as archive:
+                    member = next(name for name in archive.getnames()
+                                  if name.endswith("/packaging/windows/lanes/rtx3090/release-spec.json"))
+                    self.assertEqual(archive.extractfile(member).read(), committed_spec)
+
+    def test_native_package_refuses_unlisted_and_mislabelled_profiles(self) -> None:
+        for binary_profile, requested_profile, failure in (
+            ("native-v0.6.0-unlisted-rtx3090", "native-v0.6.0-unlisted-rtx3090", "allowlist"),
+            ("native-v0.6.0-rtx3090", "native-v0.6.0-a8-rtx3090", "build_profile"),
+        ):
+            with self.subTest(binary_profile=binary_profile, requested_profile=requested_profile), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, binaries, head = self.fixture(root, build_profile=binary_profile)
+                with self.assertRaisesRegex(ReleaseError, failure):
+                    package_release(self.options(source, binaries, head, root / "release",
+                                                 build_profile=requested_profile))
+                self.assertFalse((root / "release").exists())
 
 
 if __name__ == "__main__":

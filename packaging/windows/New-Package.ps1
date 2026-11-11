@@ -51,6 +51,8 @@ param(
     [ValidatePattern('^rtx[0-9]{4}$')]
     [string]$Lane,
 
+    [string]$BuildProfile,
+
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$ServerConfig,
 
@@ -72,6 +74,16 @@ if (-not $ServerConfig) { $ServerConfig = Join-Path $laneDirectory 'server-confi
 
 function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Resolve-NativeBuildProfile([object]$Spec, [string]$RequestedProfile) {
+    if ([string]::IsNullOrWhiteSpace($RequestedProfile)) { return [string]$Spec.build_profile }
+    $profiles = $Spec.PSObject.Properties['build_profiles']
+    if ($null -eq $profiles -or
+        @($profiles.Value.PSObject.Properties | ForEach-Object { [string]$_.Value }) -cnotcontains $RequestedProfile) {
+        throw 'requested build profile is not in the committed lane allowlist'
+    }
+    return $RequestedProfile
 }
 
 function Get-LowerSha256([string]$Path) {
@@ -215,7 +227,9 @@ if (-not (Test-Path -LiteralPath $packageTool -PathType Leaf)) {
     throw 'source tree does not contain tools/release/package.py'
 }
 
-$spec = Read-JsonFile (Join-Path $laneDirectory 'release-spec.json')
+$specLines = @(& git -C $source show "${ReleaseHeadSha}:packaging/windows/lanes/$Lane/release-spec.json" 2>&1)
+if ($LASTEXITCODE -ne 0) { throw 'the committed lane release specification is unavailable' }
+$spec = [string]::Join([Environment]::NewLine, @($specLines | ForEach-Object { [string]$_ })) | ConvertFrom-Json
 $config = Read-JsonFile $configPath
 if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
     [int]$spec.schema_version -ne 5 -or
@@ -231,7 +245,7 @@ if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
 $releaseId = [string]$spec.release_id
 $releaseVersion = 'v' + [string]$spec.release_version
 $deploymentProfile = [string]$spec.deployment_profile
-$buildProfile = [string]$spec.build_profile
+$buildProfile = Resolve-NativeBuildProfile $spec $BuildProfile
 $platform = [string]$spec.platform
 $productPrefix = [string]$spec.product_prefix
 $upstreamBaseSha = [string]$spec.source.upstream_base_sha
@@ -340,6 +354,7 @@ try {
         [string]$identity.configuration_sha256 -cne $expectedConfigSha256 -or
         (Get-LowerSha256 (Join-Path $payload 'server-config.json')) -cne $expectedConfigSha256 -or
         [string]$packagedSpec.release_id -cne $releaseId -or
+        [string]$packagedSpec.build_profile -cne $buildProfile -or
         [string]$packagedConfig.deployment_profile -cne $deploymentProfile) {
         throw 'generated package contents are not bound to the release identity'
     }

@@ -657,12 +657,21 @@ def windows_support_files(
     ]
     if options.release_notes is not None:
         committed.append((options.release_notes, "RELEASE_NOTES.md"))
-    files = [
-        ReleaseFile.from_bytes(
-            f"{binary_root}/{destination}", 0o644, read_committed_file(source, head, name)
-        )
-        for name, destination in committed
-    ]
+    files = []
+    for name, destination in committed:
+        content = read_committed_file(source, head, name)
+        if destination == "release-spec.json":
+            try:
+                spec = json.loads(content)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ReleaseError("committed Windows release specification is not valid JSON") from error
+            profiles = spec.get("build_profiles") if isinstance(spec, dict) else None
+            if not isinstance(profiles, dict) or options.build_profile not in profiles.values():
+                fail("requested build profile is not in the committed lane allowlist")
+            if options.build_profile != spec["build_profile"]:
+                spec["build_profile"] = options.build_profile
+                content = (json.dumps(spec, indent=2) + "\n").encode("utf-8")
+        files.append(ReleaseFile.from_bytes(f"{binary_root}/{destination}", 0o644, content))
     files.append(
         ReleaseFile.from_bytes(
             f"{binary_root}/VERSION",

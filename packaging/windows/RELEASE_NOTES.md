@@ -11,6 +11,19 @@ Package-build receipts remain `hardware-pending`. Both candidates require fresh
 exact-source build, package, GPU, lifecycle and restoration evidence before
 qualification; prior-component receipts are not evidence for these bytes.
 
+`New-Package.ps1 -BuildProfile` selects an exact binary profile from the lane's
+committed `build_profiles` allowlist: `default`, `a8`, `tc` or `tc-a8`. Omitting
+the parameter keeps the default profile and does not rewrite the packaged spec.
+Variant packages bind the selected profile in that spec, the build identity and
+the package receipt; a profile outside the allowlist or different from the binary
+is refused. Release/deployment identities, model bytes and runtime shape do not
+change between variants. Each variant still needs its own qualification gates.
+
+The native qualification driver accepts the same exact token through
+`--build-profile` when consuming the matching qualified binary set, passes it to
+packaging and binds it into checkpoint reuse. Installation retains the exact
+packaged-spec/build-identity profile equality check.
+
 ## 2026-11-11 — Native controller containment fixes (next release)
 
 Stop and Restart restore the GPU-owner lease after a stopped server reports an

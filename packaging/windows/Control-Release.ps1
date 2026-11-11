@@ -167,8 +167,9 @@ function Get-Release([object]$State, [string]$ReleaseId) {
         throw 'installed release immutable build profile is invalid'
     }
     $laneNumber = $Matches[1]
+    $baseBuildProfile = [string]$release.build_profile -creplace '-(?:tc-a8|tc|a8)-rtx([0-9]{4})$', '-rtx$1'
     if ([string]$release.cuda_architecture -cnotmatch '^sm_[0-9]{2,3}a?$' -or
-        [string]$release.deployment_profile -cne ('qwen38-' + $laneNumber + '-native-v' + ([string]$release.build_profile).Substring(8, ([string]$release.build_profile).Length - 16))) {
+        [string]$release.deployment_profile -cne ('qwen38-' + $laneNumber + '-native-v' + $baseBuildProfile.Substring(8, $baseBuildProfile.Length - 16))) {
         throw 'installed release immutable build profile is invalid'
     }
     return $release
