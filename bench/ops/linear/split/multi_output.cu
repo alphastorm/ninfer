@@ -354,10 +354,10 @@ void run_q4q5(const Options& options, bench::L2FlushBuffer& flush, CudaExecution
                 (options.cache == CacheMode::Warm && cache != CacheState::Warm))
                 continue;
             const auto exact = ops::linear_split_workspace_capacity_bytes(weights, rows, tokens, tokens);
+            const auto measurement = measure_public(launch, cache, flush, cuda, options.warmup,
+                                                     options.repeat, options.graph);
             append_result(results, "q4q5", policy_name(options.q4q5_policy), tokens, cache,
-                          exact, logical, flops,
-                          measure_public(launch, cache, flush, cuda, options.warmup, options.repeat,
-                                         options.graph), capacity, workspace.peak_used());
+                          exact, logical, flops, measurement, capacity, workspace.peak_used());
         }
     }
 }
