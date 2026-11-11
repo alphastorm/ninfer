@@ -381,7 +381,9 @@ $controllerLog=Join-Path $StateRoot 'controller.log'
 function Write-InstallEvent { }
 function Register-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:register' }
 function Unregister-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:unregister' }
-function Get-CimInstance { $LiveProcesses|ConvertFrom-Json }
+function Get-CimInstance {
+  foreach($entry in (ConvertFrom-Json -InputObject $LiveProcesses)){$entry}
+}
 $transaction=Get-Content -Raw -LiteralPath $Journal|ConvertFrom-Json
 $outcome=[ordered]@{completed=$true;failure=$null}
 try{Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath $Mode|Out-Null}
@@ -548,7 +550,7 @@ try{
   [ordered]@{
     start_failed=$null -ne $failure
     lease_held=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
-    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){Get-Content -LiteralPath $OwnerLog})
+    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){[IO.File]::ReadAllLines($OwnerLog,[Text.Encoding]::UTF8)})
   }|ConvertTo-Json -Compress
 }
 finally{if($null -ne $global:server -and -not $global:server.HasExited){$global:server.Kill()}}
@@ -2127,7 +2129,7 @@ class NativeBuildProfileTests(unittest.TestCase):
             subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
             subject.config = SimpleNamespace(
                 scratch_state_root="C:/qualification/qwen38-3090-native", scratch_task_suffix="Variant",
-                scratch_port=18210, pressure_port=18200, upgrade_orchestrator_state=False,
+                scratch_port=18210, pressure_port=18200, upgrade_orchestrator_state=False, build_profile=None,
             )
             subject.lane = self.lane()
             subject.head = subject.tool_head = "a" * 40
@@ -2138,7 +2140,8 @@ class NativeBuildProfileTests(unittest.TestCase):
             state["phases"]["neutral_build"] = {"receipt": {"build_profile": subject.lane.build_profile}}
             qualify_native.atomic_json(subject.state_path, state)
             subject.lane = subject.lane.with_build_profile(subject.lane.spec["build_profiles"]["a8"])
-            with self.assertRaisesRegex(qualify_native.LaneError, "build profile"):
+            subject.config.build_profile = subject.lane.build_profile
+            with self.assertRaisesRegex(qualify_native.LaneError, "binding"):
                 subject._load_state()
 
     def test_qualified_binary_profile_comparison_remains_exact(self) -> None:
@@ -3775,7 +3778,7 @@ $attempts=@(foreach($Action in @($FirstAction,'Stop','Rollback','Stop')){
 """ + dispatch + """
   }catch{$failure=$_.Exception.Message}
   [ordered]@{action=$Action;failure=$failure;lease=Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json');
-    owner_actions=@(if(Test-Path $OwnerLog){Get-Content -LiteralPath $OwnerLog})}
+    owner_actions=@(if(Test-Path $OwnerLog){[IO.File]::ReadAllLines($OwnerLog,[Text.Encoding]::UTF8)})}
 })
 @{attempts=$attempts;live=$script:live}|ConvertTo-Json -Depth 6 -Compress
 """)

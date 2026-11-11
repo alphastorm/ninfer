@@ -900,6 +900,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
             "port": self.config.scratch_port,
             "pressure_port": self.config.pressure_port,
         }
+        if getattr(self.config, "build_profile", None):
+            scratch_binding["build_profile"] = self.lane.build_profile
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             if state.get("phases") and not state.get("gpu_uuid"):
@@ -908,10 +910,6 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
                 raise LaneError("checkpoint belongs to another source, lane, or orchestrator revision")
             if state.get("scratch_binding") != scratch_binding:
                 raise LaneError("checkpoint belongs to another scratch root, task, or port binding")
-            for phase in ("neutral_build", "package"):
-                receipt = state.get("phases", {}).get(phase, {}).get("receipt")
-                if receipt is not None and receipt.get("build_profile") != self.lane.build_profile:
-                    raise LaneError("checkpoint belongs to another build profile")
             if state.get("orchestrator_sha256") != self.script_sha:
                 if not self.config.upgrade_orchestrator_state:
                     raise LaneError("checkpoint belongs to another source or orchestrator revision")
