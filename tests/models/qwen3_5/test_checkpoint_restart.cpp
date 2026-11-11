@@ -384,7 +384,9 @@ int main(int argc, char** argv) {
                             before.host_state_slots == after.host_state_slots,
                         "deterministic staging refusal demoted export sources");
             }
-            {
+            if (scenario == "terminal") {
+                // Test absolute export capacity separately from snapshot recovery: a
+                // one-StateImage Host arena cannot also back up a paused request's KV.
                 options.context_cache.host_capacity_bytes = native_layout.state_bytes;
                 auto limited = make_program();
                 options.context_cache.host_capacity_bytes = 1ULL << 30;

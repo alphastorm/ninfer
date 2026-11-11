@@ -508,6 +508,16 @@ preemption even if only one request grows while its peer remains at the initial 
 complete request still fits alone. Cancellation follows the target request's own scheduling
 observations and preserves work observed before delivery; bounded pressure rotation may preempt
 either request.
+
+`ninfer_qwen3_5_checkpoint_restart_test` runs export and import in separate processes.
+CTest selects DFlash2 K7 and covers terminal, partial-accept, forced-token and snapshot-pause
+continuations. `python3 tests/models/qwen3_5/run_checkpoint_restart.py
+build/tests/ninfer_qwen3_5_checkpoint_restart_test none|mtp|dflash2` selects a backend.
+The absolute export-capacity refusal uses only the terminal fixture: its one-StateImage
+Host arena cannot also retain paused KV. Snapshot recovery remains required by the separate
+pause scenario with sufficient Host capacity; under insufficient capacity, Native may
+legitimately discard the snapshot and retain progress for Replay.
+
 `ninfer_qwen3_5_checkpoint_reclaim_real_test` requires the DFlash2 artifact and checks a Host-only
 victim import under capacity pressure. Its release callback must observe exactly one complete
 native validation and two pins; pressure settlement independently validates and re-pins before
