@@ -220,6 +220,17 @@ public:
         std::uint32_t demoting_steps   = 0;
         std::uint32_t state_binds      = 0;
         std::uint32_t credit_shortages = 0;
+        // Demotions started when a held arrival's binding completed and when the latest export
+        // was prepared, and whether that preparation followed the held binding's completion.
+        std::uint32_t demotes_at_held_binding = 0;
+        std::uint32_t demotes_at_prepare      = 0;
+        bool held_binding_completed           = false;
+        bool prepared_after_held_binding      = false;
+        // A HeldDemotionArrival's own demotion started; exports prepared so far, and how many
+        // had been prepared when that arrival's binding started.
+        bool arrival_demotion_started         = false;
+        std::uint32_t prepares                = 0;
+        std::uint32_t prepares_at_arrival_bind = 0;
     };
 
     template <class Update>
@@ -282,6 +293,8 @@ enum class Script : std::uint8_t {
     SourceSeed,      // Publishes the short reusable prefix.
     SourceArrival,   // Prefers the SourceSeed prefix.
     LaneHold,        // Occupies its lane without progress until hold_released.
+    HeldArrival,     // Binding stays in flight until hold_released, then publishes.
+    HeldDemotionArrival, // Binds only after its own demotion, held until hold_released, ends.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
@@ -667,13 +680,22 @@ public:
             }
             credits_ -= kArrivalPageGroups;
         }
+        if (base.script() == Script::HeldDemotionArrival) {
+            if (!arrival_demotion_done_) {
+                // Its own reclaim starts the next demotion, which frees what it needs.
+                arrival_demotion_requested_ = true;
+                return {.capacity_possible = true, .shortage = {.kv_page_groups = {1}}};
+            }
+            events_.record(
+                [](Events::State& state) { state.prepares_at_arrival_bind = state.prepares; });
+        }
         operation_ = Operation{.kind          = ContextKind::Bind,
                                .lane          = lane.value,
                                .script        = base.script(),
                                .prompt_tokens = base.summary().prompt_tokens,
                                .reused_tokens = source.reused_tokens,
                                .publish       = base.summary().publish_continuation};
-        if (base.script() == Script::HoldBinding) {
+        if (base.script() == Script::HoldBinding || base.script() == Script::HeldArrival) {
             events_.record([](Events::State& state) { state.binding_held = true; });
         }
         operation_started('b');
@@ -684,9 +706,14 @@ public:
         require(operation_.has_value(), "context progress has no operation");
         const auto operation = *operation_;
         const bool held = (operation.kind == ContextKind::Bind &&
-                           operation.script == Script::HoldBinding) ||
+                           (operation.script == Script::HoldBinding ||
+                            (operation.script == Script::HeldArrival &&
+                             !events_.hold_released.load()))) ||
                           (operation.kind == ContextKind::Pause &&
-                           operation.script == Script::VictimHold);
+                           operation.script == Script::VictimHold) ||
+                          (operation.kind == ContextKind::Demote &&
+                           operation.script == Script::HeldDemotionArrival &&
+                           !events_.hold_released.load());
         ContextProgress progress;
         progress.kind = operation.kind;
         // ESAVE: a released hold completes at the first poll after a decode round (mid-turn).
@@ -700,12 +727,19 @@ public:
         if (operation.kind == ContextKind::Demote) {
             // The demoted history keeps its catalog entry; one Device page group is now free.
             ++credits_;
+            if (operation.script == Script::HeldDemotionArrival) { arrival_demotion_done_ = true; }
             progress.published = true;
             return progress;
         }
         auto& lane        = lanes_.at(operation.lane);
         if (operation.kind == ContextKind::Bind) {
             if (held) { return progress; }
+            if (operation.script == Script::HeldArrival) {
+                events_.record([](Events::State& state) {
+                    state.held_binding_completed  = true;
+                    state.demotes_at_held_binding = state.demotes;
+                });
+            }
             lane = Lane{.active        = true,
                         .script        = operation.script,
                         .epoch         = next_epoch_++,
@@ -1086,8 +1120,14 @@ public:
 
     [[nodiscard]] bool start_demote(const Demotion& plan) {
         require(!operation_ && valid_checkpoint(plan.handle), "demotion overlaps native ownership");
-        operation_ = Operation{.kind = ContextKind::Demote};
-        events_.record([](Events::State& state) { ++state.demotes; });
+        // A HeldDemotionArrival's shortage asked for this demotion; it is held like its binding.
+        const bool own = std::exchange(arrival_demotion_requested_, false);
+        operation_ = Operation{.kind   = ContextKind::Demote,
+                               .script = own ? Script::HeldDemotionArrival : Script::Complete};
+        events_.record([own](Events::State& state) {
+            ++state.demotes;
+            state.arrival_demotion_started |= own;
+        });
         return true;
     }
 
@@ -1143,42 +1183,56 @@ public:
     std::optional<HostKind> forced_refusal;
     rt::DurableReason refusal_reason = rt::DurableReason::Capacity;
     std::uint64_t prepare_calls = 0;
+    // Preparations refused because a context operation was in flight (busy_during_context).
+    std::uint64_t busy_refusals = 0;
     std::function<void()> validation_callback;
     bool validation_valid = true;
 
-    // Refused leases acquire no readers; prepared leases stage counted Host copies.
+    // Refused leases acquire no readers; prepared leases stage counted Host copies, or pin the
+    // Device images a staged export streams without any Host copy.
     class ExportLease {
     public:
-        ExportLease(Program& program, std::span<const Checkpoint> points)
-            : program_(&program), points_(points.begin(), points.end()) {
+        ExportLease(Program& program, std::span<const Checkpoint> points, bool device = false)
+            : program_(&program), points_(points.begin(), points.end()), device_(device) {
             ++program.prepare_calls;
             program.trace('E');
             // Like native preparation, a busy context transaction refuses retryably.
             if (program.busy_during_context && program.operation_) {
+                ++program.busy_refusals;
                 kind_   = HostKind::Busy;
                 reason_ = rt::DurableReason::TransactionBusy;
                 return;
             }
-            const auto used = program.physical_usage().occupied.host_bytes;
-            if (program.forced_refusal || used + kCheckpointHostBytes > program.host_capacity) {
-                kind_ = program.forced_refusal.value_or(HostKind::HostCapacity);
-                shortage_ = kind_ == HostKind::HostCapacity
-                    ? used + kCheckpointHostBytes - program.host_capacity : 0;
-                reason_ = program.refusal_reason;
-                return;
+            if (!device_) {
+                const auto used = program.physical_usage().occupied.host_bytes;
+                if (program.forced_refusal || used + kCheckpointHostBytes > program.host_capacity) {
+                    kind_ = program.forced_refusal.value_or(HostKind::HostCapacity);
+                    shortage_ = kind_ == HostKind::HostCapacity
+                        ? used + kCheckpointHostBytes - program.host_capacity : 0;
+                    reason_ = program.refusal_reason;
+                    return;
+                }
             }
             for (const auto point : points_) { ++program.live_record(point).pins; }
-            ++program.staged_exports_;
+            if (!device_) { ++program.staged_exports_; }
+            program.events_.record([](Events::State& state) {
+                ++state.prepares;
+                state.demotes_at_prepare          = state.demotes;
+                state.prepared_after_held_binding = state.held_binding_completed;
+            });
         }
 
         ExportLease(ExportLease&& other) noexcept
             : program_(std::exchange(other.program_, nullptr)), points_(std::move(other.points_)),
-              kind_(other.kind_), shortage_(other.shortage_), reason_(other.reason_) {}
+              device_(other.device_), kind_(other.kind_), shortage_(other.shortage_),
+              reason_(other.reason_) {}
 
         ExportLease& operator=(ExportLease&&) = delete;
 
         ~ExportLease() {
-            if (program_ != nullptr && kind_ == HostKind::Prepared) { program_->retire_export(points_); }
+            if (program_ != nullptr && kind_ == HostKind::Prepared) {
+                program_->retire_export(points_, device_);
+            }
         }
 
         [[nodiscard]] rt::DurablePrepareState state() const noexcept {
@@ -1189,6 +1243,9 @@ public:
         [[nodiscard]] rt::DurableReason reason() const noexcept { return reason_; }
         [[nodiscard]] HostKind host_shortage_kind() const noexcept { return kind_; }
         [[nodiscard]] std::size_t host_shortage_bytes() const noexcept { return shortage_; }
+        [[nodiscard]] std::uint64_t device_staged_states() const noexcept {
+            return device_ && kind_ == HostKind::Prepared ? points_.size() : 0;
+        }
 
         // Runs off the worker and reads only the copy this lease staged.
         [[nodiscard]] rt::DurableExportResult write(rt::ContinuationCheckpointWriter& writer) {
@@ -1203,6 +1260,7 @@ public:
     private:
         Program* program_ = nullptr;
         std::vector<Checkpoint> points_;
+        bool device_ = false;
         HostKind kind_ = HostKind::Prepared;
         std::size_t shortage_ = 0;
         rt::DurableReason reason_ = rt::DurableReason::None;
@@ -1259,9 +1317,18 @@ public:
         return ExportLease(*this, points);
     }
 
+    // The Device-staged retry after an exhausted Host route (fork #89) streams from Device only
+    // when a fixture enables it; otherwise it is refused like the Host route.
+    [[nodiscard]] ExportLease prepare_checkpoint_export(std::span<const Checkpoint> points,
+                                                        const rt::DurableLimits&,
+                                                        bool device_staging) {
+        return ExportLease(*this, points, device_staging && stage_from_device);
+    }
+
     bool pause_needs_host = false;
     bool release_named_victim = false;
     bool busy_during_context  = false;
+    bool stage_from_device    = false;
 
 private:
     struct Lane {
@@ -1314,9 +1381,9 @@ private:
         gate_->changed();
     }
 
-    void retire_export(std::span<const Checkpoint> points) noexcept {
+    void retire_export(std::span<const Checkpoint> points, bool device) noexcept {
         for (const auto point : points) { --records_[point.index].pins; }
-        --staged_exports_;
+        if (!device) { --staged_exports_; }
         gate_->changed();
     }
 
@@ -1370,6 +1437,9 @@ private:
     std::optional<Operation> operation_;
     // Device page groups freed by completed demotions and not yet reserved.
     std::uint32_t credits_ = 0;
+    // A HeldDemotionArrival's shortage asked for the next demotion, and that demotion completed.
+    bool arrival_demotion_requested_ = false;
+    bool arrival_demotion_done_      = false;
     std::uint64_t next_epoch_ = 1;
     // Index 0 never names a checkpoint.
     std::vector<Record> records_{Record{}};
@@ -2485,6 +2555,138 @@ void exhausted_priority_request_spares_the_next_arrival() {
             "attempts leaked between arrivals or the resident took the freed page group");
     require_membership(harness.observed_stats(), {}, "exhausted arrival cleanup");
 }
+
+// While an export holds its lease, the waiting arrival is not attempted, so the export spends
+// none of its bound; it binds after the lease retires.
+void fresh_priority_waits_out_an_export() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    acknowledged_turn(harness, kSession, "exported");
+    auto resident = start_demoting_resident(harness);
+    std::optional<Submission> arrival;
+    Events::State submitted, during;
+    ninfer::RuntimeStats during_stats;
+    CallbackWriter writer([&] {
+        submitted = harness.events().snapshot();
+        arrival.emplace(harness.submit(Script::Complete, 1, false, Clock::now() + 2s));
+        harness.events().await(
+            [&](const Events::State& state) { return state.demotes >= submitted.demotes + 3; },
+            "resident demotions while the export lease is held");
+        during       = harness.events().snapshot();
+        during_stats = harness.observed_stats();
+    });
+    const auto saved = harness.core().export_session(kSession, "exported", writer, {});
+    const auto outcome = harness.await(*arrival);
+    finish_demoting_resident(harness, resident, harness.events().snapshot());
+    require(saved.state == rt::DurableExportState::Exported, "held export did not complete");
+    require(during.bound == submitted.bound && during_stats.waiting_requests == 1,
+            "the arrival bound while an export lease was held");
+    require_finished(outcome, FinishReason::OutputLimit, "arrival after the export lease retired");
+    require_membership(harness.observed_stats(), {}, "export lease cleanup");
+}
+
+// A Device-staged export (fork #89: the Host arena cannot take its copy) holds the same lease
+// for its whole off-lock write. The armed arrival is not attempted meanwhile, so the staged
+// write spends none of its bound; it binds once the export retires.
+void fresh_priority_waits_out_a_device_staged_export() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    acknowledged_turn(harness, kSession, "staged");
+    auto resident = start_demoting_resident(harness);
+    harness.configure([](Program& p) {
+        p.forced_refusal    = Program::HostKind::HostContiguity;
+        p.stage_from_device = true;
+    });
+    std::optional<Submission> arrival;
+    Events::State submitted, during;
+    ninfer::RuntimeStats during_stats;
+    CallbackWriter writer([&] {
+        submitted = harness.events().snapshot();
+        arrival.emplace(harness.submit(Script::Complete, 1, false, Clock::now() + 2s));
+        harness.events().await(
+            [&](const Events::State& state) { return state.demotes >= submitted.demotes + 3; },
+            "resident demotions while the Device-staged export is written");
+        during       = harness.events().snapshot();
+        during_stats = harness.observed_stats();
+    });
+    const auto saved = harness.core().export_session(kSession, "staged", writer, {});
+    const auto outcome = harness.await(*arrival);
+    finish_demoting_resident(harness, resident, harness.events().snapshot());
+    require(saved.state == rt::DurableExportState::Exported && saved.reclaim.prepare_attempts == 1 &&
+                saved.reclaim.device_staging_attempted && saved.reclaim.device_staged_states != 0,
+            "the export did not complete through the Device-staged route");
+    require(during.bound == submitted.bound && during_stats.waiting_requests == 1,
+            "the arrival bound while a Device-staged export held its lease");
+    require_finished(outcome, FinishReason::OutputLimit, "arrival after the staged export retired");
+    require_membership(harness.observed_stats(), {}, "staged export cleanup");
+}
+
+// A save requested while a priority binding is in flight is held for the next operation-free
+// boundary, not refused as a busy transaction. Issued from another thread, it does not return
+// while the binding is in flight; it is prepared once the binding completes, before the
+// resident's next demotion or any other operation starts, and exports without a busy refusal.
+void priority_binding_defers_a_save_until_it_completes() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    acknowledged_turn(harness, kSession, "saved");
+    harness.configure([](Program& p) { p.busy_during_context = true; });
+    auto resident = start_demoting_resident(harness);
+    auto arrival  = harness.submit(Script::HeldArrival, 1, false, Clock::now() + 2s);
+    harness.events().await([](const Events::State& state) { return state.binding_held; },
+                           "the arrival's binding in flight");
+    std::uint64_t before = 0, during = 0, after = 0, busy = 0;
+    harness.configure([&](Program& p) { before = p.prepare_calls; });
+    // Only this thread releases the binding, so a save issued here would never return.
+    auto saving = std::async(std::launch::async, [&] { return harness.save("saved"); });
+    const bool held = saving.wait_for(300ms) == std::future_status::timeout;
+    harness.configure([&](Program& p) { during = p.prepare_calls; });
+    harness.release_hold();
+    const auto saved   = saving.get();
+    const auto outcome = harness.await(arrival);
+    const auto settled = harness.events().snapshot();
+    harness.configure([&](Program& p) {
+        after = p.prepare_calls;
+        busy  = p.busy_refusals;
+    });
+    finish_demoting_resident(harness, resident, settled);
+    require(held && during == before,
+            "a save returned or was prepared while the arrival's binding was in flight");
+    require(saved.state == rt::DurableExportState::Exported &&
+                saved.reason == rt::DurableReason::None && busy == 0 && after == before + 1,
+            "a save met the in-flight binding instead of waiting for its completion");
+    require(settled.held_binding_completed && settled.prepared_after_held_binding &&
+                settled.demotes_at_prepare == settled.demotes_at_held_binding,
+            "another operation started between the binding's completion and the held save");
+    require_finished(outcome, FinishReason::OutputLimit, "arrival whose binding was held");
+    require_membership(harness.observed_stats(), {}, "held save cleanup");
+}
+
+// A prepare held behind a priority attempt's own demotion takes the boundary that completes it.
+// The arrival's next attempt is ready there but yields: the prepare runs first and the arrival
+// binds afterwards, so the prepare waits for one operation, not for the arrival's chain.
+void priority_attempt_yields_to_a_held_prepare() {
+    Harness harness(2, true, 0, 0, kLongContext);
+    acknowledged_turn(harness, kSession, "saved");
+    harness.configure([](Program& p) { p.busy_during_context = true; });
+    auto resident = start_demoting_resident(harness);
+    auto arrival  = harness.submit(Script::HeldDemotionArrival, 1, false, Clock::now() + 2s);
+    harness.events().await(
+        [](const Events::State& state) { return state.arrival_demotion_started; },
+        "the arrival's own demotion in flight");
+    auto saving = std::async(std::launch::async, [&] { return harness.save("saved"); });
+    const bool held = saving.wait_for(300ms) == std::future_status::timeout;
+    harness.release_hold();
+    const auto saved   = saving.get();
+    const auto outcome = harness.await(arrival);
+    const auto settled = harness.events().snapshot();
+    std::uint64_t busy = 0;
+    harness.configure([&](Program& p) { busy = p.busy_refusals; });
+    finish_demoting_resident(harness, resident, settled);
+    require(held && saved.state == rt::DurableExportState::Exported &&
+                saved.reason == rt::DurableReason::None && busy == 0,
+            "a save met the arrival's in-flight demotion instead of waiting for it");
+    require(settled.prepares == 1 && settled.prepares_at_arrival_bind == 1,
+            "the arrival's next attempt started an operation before the held prepare ran");
+    require_finished(outcome, FinishReason::OutputLimit, "arrival that yielded to a held prepare");
+    require_membership(harness.observed_stats(), {}, "yielded attempt cleanup");
+}
 // --- End fork #102 ------------------------------------------------------------------------------
 
 void export_proven_victim() {
@@ -3309,6 +3511,12 @@ int main() {
              departed_priority_request_spares_the_next_arrival},
         Case{"exhausted_priority_request_spares_the_next_arrival",
              exhausted_priority_request_spares_the_next_arrival},
+        Case{"fresh_priority_waits_out_an_export", fresh_priority_waits_out_an_export},
+        Case{"fresh_priority_waits_out_a_device_staged_export",
+             fresh_priority_waits_out_a_device_staged_export},
+        Case{"priority_binding_defers_a_save_until_it_completes",
+             priority_binding_defers_a_save_until_it_completes},
+        Case{"priority_attempt_yields_to_a_held_prepare", priority_attempt_yields_to_a_held_prepare},
         Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
         Case{"export_proven_victim", export_proven_victim},
         Case{"export_proof_failures_and_intents", export_proof_failures_and_intents},
