@@ -328,6 +328,9 @@ std::shared_ptr<ContinuationCheckpointReadQueue> CheckpointEngineAccess::make_re
 }
 std::uint64_t CheckpointEngineAccess::checkpoint_progress(const Engine&) noexcept { return 0; }
 void CheckpointEngineAccess::notify_checkpoint_progress(Engine&) noexcept {}
+void CheckpointEngineAccess::observe_restore(Engine&, const RuntimeCheckpointRestoreStats&) noexcept {
+    std::terminate(); // This export-only fixture must not restore.
+}
 void CheckpointEngineAccess::response_stored(Engine&, std::string_view, std::string_view) noexcept {}
 DurableSessionEpoch CheckpointEngineAccess::session_epoch(Engine&, std::string_view) { return {}; }
 DurableExportResult CheckpointEngineAccess::export_session(Engine&, std::string_view session, std::string_view,
