@@ -1121,6 +1121,9 @@ private:
         // A failed cancellation answers that request and every later one with the failure, which
         // then ends the Engine.
         std::exception_ptr failure;
+        // A Pending pressure save latches fresh admission (checkpoint_control.h settle); name it
+        // so a 503 caused by that latch is distinguishable from ordinary queueing (fork #89).
+        const bool latched = checkpoints_.pending();
         for (auto& [request, response] : retired) {
             if (!failure && std::holds_alternative<GenerationResult>(response)) {
                 try {
@@ -1132,7 +1135,9 @@ private:
             response = failure ? failure
                                : std::make_exception_ptr(RequestError(
                                      RequestErrorKind::QueueTimeout,
-                                     "inference request expired while waiting for admission"));
+                                     latched ? "inference request expired while waiting for admission "
+                                               "(deferred by a pending checkpoint save)"
+                                             : "inference request expired while waiting for admission"));
         }
         request_admission_check();
         publish_and_deliver(retired);
