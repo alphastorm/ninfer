@@ -37,7 +37,7 @@ int q5_a16_conformance() {
                                                                   .full_output     = true});
         using namespace ninfer::test::linear_add;
         using ninfer::ops::LinearPolicy;
-        constexpr std::array<Invocation, 12> a8{{
+        constexpr std::array<Invocation, 13> a8{{
             {31, LinearPolicy::AllowA8, Arithmetic::A16},
             {32, LinearPolicy::AllowA8, Arithmetic::A16},
             {33, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
@@ -47,6 +47,7 @@ int q5_a16_conformance() {
             {255, LinearPolicy::AllowA8, Arithmetic::A8},
             {256, LinearPolicy::AllowA8, Arithmetic::A8},
             {257, LinearPolicy::AllowA4, Arithmetic::A8},
+            {511, LinearPolicy::AllowA8, Arithmetic::A8},
             {512, LinearPolicy::AllowA8, Arithmetic::A8},
             {513, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
             {1024, LinearPolicy::AllowA8, Arithmetic::A8},

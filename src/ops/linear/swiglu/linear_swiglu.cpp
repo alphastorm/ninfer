@@ -45,8 +45,10 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
             gate_up_rows, input_rows, min_tokens, max_tokens);
 #if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
         if (detail::group64_a8::selected(policy, max_tokens)) {
-            bytes = min_tokens > 32 ? 0 : detail::q4_linear_swiglu_capacity_workspace_bytes(
-                gate_up_rows, input_rows, min_tokens, 32);
+            bytes = min_tokens >= NINFER_GROUP64_A8_MIN_TOKENS
+                        ? 0
+                        : detail::q4_linear_swiglu_capacity_workspace_bytes(
+                              gate_up_rows, input_rows, min_tokens, NINFER_GROUP64_A8_MIN_TOKENS - 1);
             bytes = std::max(bytes, detail::group64_a8::workspace_bytes(input_rows, max_tokens));
         }
 #endif

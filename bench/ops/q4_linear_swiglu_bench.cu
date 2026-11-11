@@ -30,6 +30,7 @@ constexpr std::int32_t kHidden     = 5120;
 constexpr std::size_t kFlushBytes  = 256ULL << 20;
 
 struct Options {
+    ops::LinearPolicy policy = ops::LinearPolicy::A16Only;
     std::vector<std::int32_t> tokens{1, 2, 4, 8, 16, 24, 32, 48};
     int warmup   = 5;
     int repeat   = 30;
@@ -62,7 +63,16 @@ Options parse_options(int argc, char** argv) {
             if (++index >= argc) { throw std::invalid_argument(std::string("missing ") + label); }
             return argv[index];
         };
-        if (argument == "--t-sweep") {
+        if (argument == "--policy") {
+            const auto value = next("--policy value");
+            if (value == "a16") {
+                options.policy = ops::LinearPolicy::A16Only;
+            } else if (value == "a8") {
+                options.policy = ops::LinearPolicy::AllowA8;
+            } else {
+                throw std::invalid_argument("--policy must be a16 or a8");
+            }
+        } else if (argument == "--t-sweep") {
             options.tokens = bench::measurement::integers(next("--t-sweep value"));
         } else if (argument == "--warmup") {
             options.warmup = bench::measurement::integer(next("--warmup value"), 0);
@@ -80,7 +90,7 @@ Options parse_options(int argc, char** argv) {
             options.profile = true;
         } else if (argument == "--help" || argument == "-h") {
             std::printf(
-                "Usage: %s [--t-sweep 1,2,...] [--warmup N] [--repeat N] [--execution "
+                "Usage: %s [--policy a16|a8] [--t-sweep 1,2,...] [--warmup N] [--repeat N] [--execution "
                 "eager|graph]\n"
                 "          [--csv-out PATH] [--profile]\n"
                 "  --execution graph captures ONE complete public ops::linear_swiglu call per\n"
@@ -104,21 +114,23 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-void write_csv(const std::string& path, const std::vector<Result>& results) {
+void write_csv(const std::string& path, const std::vector<Result>& results,
+               ops::LinearPolicy policy) {
     std::FILE* file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) { throw std::runtime_error("cannot open csv output: " + path); }
     std::fprintf(file, "t,execution,graph_nodes,median_us,min_us,p95_us,weight_bytes,logical_bytes,"
                        "projection_flops,effective_gbs,dram_spec_pct,useful_tflops,"
-                       "workspace_sweep_bytes,workspace_exact_bytes\n");
+                       "workspace_sweep_bytes,workspace_exact_bytes,policy\n");
     for (const Result& result : results) {
         const double seconds = result.median_us * 1.0e-6;
-        std::fprintf(file, "%d,%s,%zu,%.3f,%.3f,%.3f,%.0f,%.0f,%.0f,%.4f,%.4f,%.4f,%zu,%zu\n",
+        std::fprintf(file, "%d,%s,%zu,%.3f,%.3f,%.3f,%.0f,%.0f,%.0f,%.4f,%.4f,%.4f,%zu,%zu,%s\n",
                      result.tokens, result.execution, result.graph_nodes, result.median_us,
                      result.min_us, result.p95_us, result.weight_bytes, result.logical_bytes,
                      result.projection_flops, result.logical_bytes / seconds / 1.0e9,
                      result.logical_bytes / seconds / 1.0e9 / 1792.0 * 100.0,
                      result.projection_flops / seconds / 1.0e12, result.workspace_sweep_bytes,
-                     result.workspace_exact_bytes);
+                     result.workspace_exact_bytes,
+                     policy == ops::LinearPolicy::A16Only ? "a16" : "a8");
     }
     std::fclose(file);
 }
@@ -143,7 +155,7 @@ int main(int argc, char** argv) {
         bench::PackedQuantizedWeight packed =
             bench::make_row_split_weight(QType::Q4_G64_FP16, kGateUpRows, kHidden, kHidden, 501U);
         const std::size_t workspace_capacity = ops::linear_swiglu_workspace_capacity_bytes(
-            QType::Q4_G64_FP16, kGateUpRows, kHidden, min_t, max_t);
+            QType::Q4_G64_FP16, kGateUpRows, kHidden, options.policy, min_t, max_t);
         ninfer::DeviceBuffer workspace_storage(ninfer::bench::device_context().device(),
                                                std::max<std::size_t>(workspace_capacity, 256));
         MemoryArena workspace(workspace_storage.span());
@@ -151,7 +163,7 @@ int main(int argc, char** argv) {
         const auto launch = [&](std::int32_t tokens, CudaExecutionView cuda) {
             Tensor x(input.span(), DType::BF16, {kHidden, tokens});
             Tensor out(output.span(), DType::BF16, {kOutputRows, tokens});
-            ops::linear_swiglu(x, packed.weight, out, workspace, cuda);
+            ops::linear_swiglu(x, packed.weight, out, options.policy, workspace, cuda);
         };
 
         if (options.profile) {
@@ -164,8 +176,9 @@ int main(int argc, char** argv) {
                 launch(options.tokens.front(), cuda);
             }
             CUDA_CHECK(cudaStreamSynchronize(stream));
-            std::printf("PROFILE linear_swiglu Q4 T=%d execution=%s graph_nodes=%zu "
+            std::printf("PROFILE linear_swiglu Q4 policy=%s T=%d execution=%s graph_nodes=%zu "
                         "workspace_sweep=%zu\n",
+                        options.policy == ops::LinearPolicy::A16Only ? "a16" : "a8",
                         options.tokens.front(), options.graph ? "graph" : "eager", graph.nodes(),
                         workspace_capacity);
             CUDA_CHECK(cudaStreamDestroy(stream));
@@ -173,9 +186,9 @@ int main(int argc, char** argv) {
         }
 
         std::printf("# execution=%s warmup=%d repeat=%d flush_bytes=%zu "
-                    "workspace_sweep_bytes=%zu\n",
+                    "workspace_sweep_bytes=%zu policy=%s\n",
                     options.graph ? "graph" : "eager", options.warmup, options.repeat, kFlushBytes,
-                    workspace_capacity);
+                    workspace_capacity, options.policy == ops::LinearPolicy::A16Only ? "a16" : "a8");
         std::vector<Result> results;
         results.reserve(options.tokens.size());
         for (const std::int32_t tokens : options.tokens) {
@@ -194,7 +207,7 @@ int main(int argc, char** argv) {
             const double bytes   = static_cast<double>(packed.model_weight_bytes()) +
                                  2.0 * static_cast<double>(kHidden + kOutputRows) * tokens;
             const std::size_t workspace_exact = ops::linear_swiglu_workspace_capacity_bytes(
-                QType::Q4_G64_FP16, kGateUpRows, kHidden, tokens, tokens);
+                QType::Q4_G64_FP16, kGateUpRows, kHidden, options.policy, tokens, tokens);
             std::printf("T=%-4d median=%9.3f us min=%9.3f p95=%9.3f %7.1f GB/s %7.2f TFLOP/s "
                         "workspace_sweep=%zu workspace_exact=%zu nodes=%zu\n",
                         tokens, timing.median_us, timing.min_us, timing.p95_us,
@@ -207,7 +220,7 @@ int main(int argc, char** argv) {
                                workspace_capacity, workspace_exact});
         }
 
-        if (!options.csv_out.empty()) { write_csv(options.csv_out, results); }
+        if (!options.csv_out.empty()) { write_csv(options.csv_out, results, options.policy); }
         CUDA_CHECK(cudaStreamDestroy(stream));
         return 0;
     } catch (const std::exception& error) {

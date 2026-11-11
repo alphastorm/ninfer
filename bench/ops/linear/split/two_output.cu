@@ -46,8 +46,6 @@ Options parse_options(int argc, char** argv) {
     }
     if (o.policy != "a16" && o.policy != "allow-a8" && o.policy != "allow-a4")
         throw std::invalid_argument("unknown activation policy");
-    if (o.format == "q4q5" && o.policy != "a16")
-        throw std::invalid_argument("paired Q4/Q5 weights use A16");
     const bool supported = o.format == "q8"
                                ? ((o.n == 12288 && o.k == 2048) || (o.n == 16384 && o.k == 2560))
                                : (o.format == "q4q5" || o.format == "fp8" || o.format == "nvfp4") &&
@@ -70,7 +68,7 @@ int main(int argc, char** argv) {
         if (options.format == "q4q5") {
             first   = make_row_split_weight(QType::Q4_G64_FP16, 4096, options.k, options.k, 501U);
             second  = make_row_split_weight(QType::Q5_G64_FP16, 12288, options.k, options.k, 503U);
-            weights = ops::PairedProjectionWeights{first.weight, second.weight};
+            weights = ops::PairedProjectionWeights{first.weight, second.weight, policy};
         } else {
             if (options.format == "q8")
                 first = make_row_split_weight(QType::Q8_G32_FP16, options.n, options.k, options.k,

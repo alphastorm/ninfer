@@ -12,7 +12,7 @@ namespace ninfer::ops::detail::group64_a8 {
 
 inline bool selected(LinearPolicy policy, int tokens) {
 #if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
-    return policy != LinearPolicy::A16Only && tokens > 32;
+    return policy != LinearPolicy::A16Only && tokens >= NINFER_GROUP64_A8_MIN_TOKENS;
 #else
     return false;
 #endif

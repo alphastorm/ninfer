@@ -11,7 +11,9 @@ function(ninfer_internal_includes target)
     target_compile_definitions(${target} PRIVATE NINFER_SM89=1)
   endif()
   if(NINFER_NATIVE_PREFILL_GROUP64_A8)
-    target_compile_definitions(${target} PRIVATE NINFER_NATIVE_PREFILL_GROUP64_A8=1)
+    target_compile_definitions(${target} PRIVATE
+      NINFER_NATIVE_PREFILL_GROUP64_A8=1
+      NINFER_GROUP64_A8_MIN_TOKENS=${NINFER_GROUP64_A8_MIN_TOKENS})
   endif()
 endfunction()
 

@@ -1,8 +1,11 @@
 #include "core/weight.h"
+#include "ninfer/ops/linear_swiglu.h"
 #include "ops/linear_swiglu/linear_swiglu_test_common.h"
 #include "ops/linear_common.h"
 
 #include <array>
+#include <algorithm>
+#include <stdexcept>
 
 int main() {
     using namespace ninfer;
@@ -23,8 +26,22 @@ int main() {
         failures += run_profile(
             "LinearSwiGLU Q4 allow-A8",
             {QType::Q4_G64_FP16, 34816, 5120, 17408, 1401U, ActivationCompute::A8},
-            std::array<std::int32_t, 14>{31, 32, 33, 63, 64, 127, 128, 129, 255, 256, 257, 512, 513, 1024},
-            std::array<std::int32_t, 5>{33, 128, 129, 513, 1024});
+            std::array<std::int32_t, 15>{31, 32, 33, 63, 64, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1024},
+            std::array<std::int32_t, 7>{33, 128, 129, 511, 512, 513, 1024});
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+        // A mixed interval must reserve the A16 region as well as the A8 region.
+        constexpr int boundary = NINFER_GROUP64_A8_MIN_TOKENS;
+        const auto capacity = [](ops::LinearPolicy policy, int first, int last) {
+            return ops::linear_swiglu_workspace_capacity_bytes(
+                QType::Q4_G64_FP16, 34816, 5120, policy, first, last);
+        };
+        const auto below = capacity(ops::LinearPolicy::A16Only, 1, boundary - 1);
+        const auto above = capacity(ops::LinearPolicy::AllowA8, boundary, boundary);
+        if (capacity(ops::LinearPolicy::AllowA8, 1, boundary - 1) != below ||
+            capacity(ops::LinearPolicy::AllowA8, 1, boundary) != std::max(below, above)) {
+            throw std::runtime_error("Group64 A8 mixed interval omitted A16 workspace");
+        }
+#endif
         return failures;
     });
 }

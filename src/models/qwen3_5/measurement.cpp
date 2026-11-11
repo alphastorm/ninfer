@@ -23,6 +23,10 @@ std::string prefill_signature(const Model& model, const moe::Plan* moe, std::uin
                {"num_hidden_layers", t.num_hidden_layers},
                {"rms_norm_eps", t.rms_norm_eps},
                {"layer_types", t.layer_types}};
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+    facts["native_prefill"] = {{"policy", model.options().native_prefill_policy},
+                                {"group64_a8_min_tokens", NINFER_GROUP64_A8_MIN_TOKENS}};
+#endif
     if (moe) {
         auto& execution = facts["moe_execution"];
         execution       = {{"implementation", "eager-fixed-windows-2"},
@@ -89,8 +93,15 @@ std::string prefill_signature(const Model& model, const moe::Plan* moe, std::uin
         }
         for (const auto& use : weight->uses) {
             if (!use.input.starts_with("text/") && !use.input.starts_with("vision/")) { continue; }
+            auto policy = use.policy;
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+            policy = ops::effective_weight_input(
+                         {weight->view, use.policy, use.activation_input_divisor},
+                         model.options().native_prefill_policy)
+                         .policy;
+#endif
             item["uses"].push_back(
-                {use.input, use.policy, use.activation_input_divisor.has_value()});
+                {use.input, policy, use.activation_input_divisor.has_value()});
         }
         inventory.push_back(std::move(item));
     }

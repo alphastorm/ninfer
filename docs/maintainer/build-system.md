@@ -18,21 +18,25 @@ The default configuration is Release. Ninja links and archives share the single-
 | `NINFER_BUILD_APPS` | ON | CLI, HTTP server and perplexity evaluator |
 | `BUILD_TESTING` | OFF | C++ tests and registered Python interoperability tests |
 | `NINFER_BUILD_BENCHMARKS` | OFF | Op, model, Engine and context-cost benchmarks |
-| `NINFER_NATIVE_PREFILL_GROUP64_A8` | OFF | Opt-in sm_86/sm_89 group64 integer-activation prefill |
+| `NINFER_NATIVE_PREFILL_GROUP64_A8` | OFF | Opt-in sm_86/sm_89/sm_120a group64 integer-activation prefill |
+| `NINFER_GROUP64_A8_MIN_TOKENS` | 33 | Minimum pass width for A8; integer >= 33, used only in ON builds |
 
 The native group64-A8 profile is a distinct numerical build profile, not a change to the artifact
 or its stored Use records. Loading resolves an effective activation permission identically for
 address-independent planning and bound operands: row-split Q4/Q5 group64 A16-only Uses become
 AllowA8; other Uses, geometry and auxiliaries remain unchanged. Paired projections use the
-intersection of their effective permissions. The profile is rejected for other architectures.
+intersection of their effective permissions. All three supported architectures admit this option.
 
-Above 32 columns, the supported 27B Q4/Q5 residual projections, Q4 fused SwiGLU and paired Q4/Q5
+At or above the configured minimum pass width, the supported 27B Q4/Q5 residual projections,
+Q4 fused SwiGLU and paired Q4/Q5
 input projections quantize transient activations per token and 64-channel group, execute signed
 INT8 tensor-core products, and accumulate group-scaled results in FP32. FP32 activation scales
 avoid half-precision scale underflow. The paired input projections share one quantization;
-SwiGLU retains its fused FP32 nonlinear epilogue. T <= 32 and unsupported shapes keep their
+SwiGLU retains its fused FP32 nonlinear epilogue. Widths below the minimum and unsupported shapes keep their
 existing routes. Padding is explicitly written, output tails are masked, and weights are never
-repacked or persistently copied.
+repacked or persistently copied. The default minimum of 33 preserves the original `T > 32`
+selection. A minimum of 512 is a separate numerical profile; it selects by each actual pass,
+never by total request size, preserving aligned cold/restored execution boundaries.
 
 Scratch is caller-owned and reported by the same layout helper used at execution:
 `round_up(T,512) * (K + 4*K/64)` bytes. This replaces (rather than adds to) the Q4 SwiGLU
@@ -40,7 +44,19 @@ materialized-intermediate route where that route was selected. Model workspace a
 depend on the complete planner; the formula is not a measured VRAM delta. OFF omits these CUDA
 translation units. Keep this option OFF for qualified profiles until matched throughput,
 independent Op-oracle, exact long-retrieval and powered output-quality gates pass; ON binaries
-must use a distinct `NINFER_BUILD_PROFILE` identity.
+must use a distinct `NINFER_BUILD_PROFILE` identity containing the hyphen-delimited component
+`a8`; OFF builds reject that component. For example, an sm_120a experiment uses
+`-DNINFER_NATIVE_PREFILL_GROUP64_A8=ON -DNINFER_GROUP64_A8_MIN_TOKENS=512
+-DNINFER_BUILD_PROFILE=a8-rtx5090`.
+Only ON builds add the effective activation policy and minimum width to the prefill-cost
+signature; OFF signatures and stored artifact Uses remain unchanged. This does not change
+the persisted context identity codec.
+
+The Q5 residual, Q4 SwiGLU and Q4/Q5 multi-output split Op benchmarks accept
+`--policy a16|a8` (default `a16`). The two-output split benchmark accepts
+`--policy a16|allow-a8|allow-a4`, including its Q4/Q5 shape. Reported policy is permission;
+the build option and pass width still determine whether A8 actually executes. Workspace
+queries and timing use the same requested policy.
 
 Independently of the A8 option, native INT8 causal attention specializes fully visible key
 blocks for unmasked rows of widths 1024 and 2048. Ragged rows and other widths retain the

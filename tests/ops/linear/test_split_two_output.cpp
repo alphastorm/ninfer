@@ -212,7 +212,7 @@ int run_q4_q5() {
     for (const std::int32_t tokens : {7, 8, 9, 10, 12, 13, 15, 16, 17, 33, 65, 129}) {
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
     }
-    for (const int tokens : {31, 32, 33, 127, 128, 129, 255, 256, 257, 512, 513, 1024}) {
+    for (const int tokens : {31, 32, 33, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1024}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens, ops::LinearPolicy::AllowA8);
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens, ops::LinearPolicy::AllowA4);
     }

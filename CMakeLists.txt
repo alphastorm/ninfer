@@ -18,13 +18,22 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
-# Native sm_86/sm_89 prefill: eligible Q4/Q5 weights use the Group64 A8 activation
+# Opt-in prefill: eligible Q4/Q5 weights use the Group64 A8 activation
 # policy. An explicit compile choice, never selected by the build-profile string.
 option(NINFER_NATIVE_PREFILL_GROUP64_A8 "Group64 A8 activation policy for native Q4/Q5 prefill" OFF)
-if(NINFER_NATIVE_PREFILL_GROUP64_A8 AND NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(86|89)$")
-  message(FATAL_ERROR
-    "NINFER_NATIVE_PREFILL_GROUP64_A8 requires CMAKE_CUDA_ARCHITECTURES 86 or 89; got "
-    "'${CMAKE_CUDA_ARCHITECTURES}'")
+set(NINFER_GROUP64_A8_MIN_TOKENS 33 CACHE STRING "Minimum pass width for Group64 A8 prefill")
+if(NINFER_NATIVE_PREFILL_GROUP64_A8)
+  if(NOT NINFER_GROUP64_A8_MIN_TOKENS MATCHES "^[1-9][0-9]*$" OR
+     NINFER_GROUP64_A8_MIN_TOKENS LESS 33 OR
+     NINFER_GROUP64_A8_MIN_TOKENS GREATER 2147483647)
+    message(FATAL_ERROR "NINFER_GROUP64_A8_MIN_TOKENS must be an integer in [33, 2147483647]")
+  endif()
+  if(NOT NINFER_BUILD_PROFILE MATCHES "(^|-)a8(-|$)")
+    message(FATAL_ERROR
+      "Group64 A8 requires a hyphen-delimited 'a8' component in NINFER_BUILD_PROFILE")
+  endif()
+elseif(NINFER_BUILD_PROFILE MATCHES "(^|-)a8(-|$)")
+  message(FATAL_ERROR "NINFER_BUILD_PROFILE contains 'a8' but Group64 A8 is OFF")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

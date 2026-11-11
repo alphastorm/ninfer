@@ -349,6 +349,14 @@ void cold_matrix_profile() {
 void native_prefill_policy() {
     using ops::LinearPolicy;
     using ops::NativePrefillPolicy;
+    const auto compiled = load_options(EngineOptions{}).native_prefill_policy;
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+    require(compiled == NativePrefillPolicy::Group64A8,
+            "compiled A8 policy was not selected on the configured architecture");
+#else
+    require(compiled == NativePrefillPolicy::ArtifactUse,
+            "default build changed the artifact activation policy");
+#endif
     for (const auto format : {QType::Q4_G64_FP16, QType::Q5_G64_FP16, QType::Q8_G32_FP16}) {
         const auto geometry = weight_geometry(format, QuantLayout::RowSplit,
                                               std::array<std::uint64_t, 2>{128, 5120});

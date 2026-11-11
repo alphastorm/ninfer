@@ -39,6 +39,7 @@ enum class CacheState : std::uint8_t { Cold, Warm };
 
 struct Options {
     Format format                  = Format::All;
+    ops::LinearPolicy q4q5_policy  = ops::LinearPolicy::A16Only;
     ops::LinearPolicy nvfp4_policy = ops::LinearPolicy::AllowA4;
     ops::LinearPolicy fp8_policy   = ops::LinearPolicy::AllowA8;
     CacheMode cache                = CacheMode::Cold;
@@ -74,6 +75,7 @@ struct Measurement {
                  "error: %s\n"
                  "usage: ninfer_linear_split_multi_output_bench "
                  "[--format q4q5|q8-qgkv|q8-qkv|q8-dflash2-qkv|bf16|nvfp4|fp8|all] "
+                 "[--policy a16|a8 (Q4/Q5)] "
                  "[--nvfp4-policy a16|a4] [--fp8-policy a16|a8] "
                  "[--tokens T,...] [--cache cold|warm|both] [--execution eager|graph] "
                  "[--warmup N] [--repeat N] [--profile] [--csv-out PATH]\n",
@@ -138,6 +140,14 @@ Options parse_options(int argc, char** argv) {
             else
                 usage("--format expects q4q5, q8-qgkv, q8-qkv, q8-dflash2-qkv, bf16, nvfp4, "
                       "fp8, or all");
+        } else if (argument == "--policy") {
+            const std::string_view value(next("--policy requires a value"));
+            if (value == "a16")
+                options.q4q5_policy = ops::LinearPolicy::A16Only;
+            else if (value == "a8")
+                options.q4q5_policy = ops::LinearPolicy::AllowA8;
+            else
+                usage("--policy expects a16 or a8");
         } else if (argument == "--nvfp4-policy") {
             const std::string_view value(next("--nvfp4-policy requires a value"));
             if (value == "a16")
@@ -291,8 +301,6 @@ std::uint64_t tensor_bytes(std::int32_t rows, std::int32_t tokens) {
 
 void run_q4q5(const Options& options, bench::L2FlushBuffer& flush, CudaExecutionView cuda,
               std::vector<Result>& results) {
-    ninfer::DeviceBuffer workspace_storage(ninfer::bench::device_context().device(), 256);
-    MemoryArena workspace(workspace_storage.span());
     constexpr std::int32_t hidden      = 5120;
     constexpr std::int32_t q_rows      = 6144;
     constexpr std::int32_t kv_rows     = 1024;
@@ -302,6 +310,14 @@ void run_q4q5(const Options& options, bench::L2FlushBuffer& flush, CudaExecution
         bench::make_row_split_weight(QType::Q4_G64_FP16, parent_rows, hidden, hidden, 501U);
     bench::PackedQuantizedWeight gv =
         bench::make_row_split_weight(QType::Q5_G64_FP16, parent_rows, hidden, hidden, 503U);
+    const ops::PairedProjectionWeights weights{qk.weight, gv.weight, options.q4q5_policy};
+    const std::array rows{q_rows, kv_rows, q_rows, kv_rows};
+    const int min_tokens = *std::min_element(options.tokens.begin(), options.tokens.end());
+    const auto capacity = ops::linear_split_workspace_capacity_bytes(
+        weights, rows, min_tokens, max_tokens);
+    ninfer::DeviceBuffer workspace_storage(ninfer::bench::device_context().device(),
+                                           std::max<std::size_t>(capacity, 256));
+    MemoryArena workspace(workspace_storage.span());
     DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(hidden) * max_tokens, 199U);
     DeviceBuffer q(ninfer::bench::device_context().device(),
                    static_cast<std::size_t>(q_rows) * max_tokens * 2);
@@ -318,13 +334,14 @@ void run_q4q5(const Options& options, bench::L2FlushBuffer& flush, CudaExecution
         Tensor tk(k.span(), DType::BF16, {kv_rows, tokens});
         Tensor tv(v.span(), DType::BF16, {kv_rows, tokens});
         const auto launch = [&](CudaExecutionView cuda) {
-            ops::linear_split(x, ops::PairedProjectionWeights{qk.weight, gv.weight},
+            ops::linear_split(x, weights,
                               std::array{tq, tk, tg, tv}, workspace, cuda);
         };
         const CacheState profile_cache =
             options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
         if (options.profile) {
-            profile_public(launch, "q4q5", "a16", profile_cache, flush, cuda, options.warmup,
+            profile_public(launch, "q4q5", policy_name(options.q4q5_policy), profile_cache,
+                           flush, cuda, options.warmup,
                            options.graph);
             continue;
         }
@@ -336,9 +353,11 @@ void run_q4q5(const Options& options, bench::L2FlushBuffer& flush, CudaExecution
             if ((options.cache == CacheMode::Cold && cache != CacheState::Cold) ||
                 (options.cache == CacheMode::Warm && cache != CacheState::Warm))
                 continue;
-            append_result(results, "q4q5", "a16", tokens, cache, 0, logical, flops,
+            const auto exact = ops::linear_split_workspace_capacity_bytes(weights, rows, tokens, tokens);
+            append_result(results, "q4q5", policy_name(options.q4q5_policy), tokens, cache,
+                          exact, logical, flops,
                           measure_public(launch, cache, flush, cuda, options.warmup, options.repeat,
-                                         options.graph));
+                                         options.graph), capacity, workspace.peak_used());
         }
     }
 }
