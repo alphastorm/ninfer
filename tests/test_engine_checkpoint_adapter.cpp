@@ -52,6 +52,7 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace {
+using ninfer::RuntimeCheckpointRestoreStats;
 using namespace ninfer::runtime;
 using namespace std::chrono_literals;
 
