@@ -184,6 +184,12 @@ int main() {
                                .status        = ninfer::StartupStatus::Begin,
                                .progress_unit = ninfer::StartupProgressUnit::Bytes,
                                .total         = 16ULL << 30});
+            // Nested phases must not double-count parent wall time in the summary.
+            observer.callback({.phase = ninfer::StartupPhase::WeightsStagingPin,
+                               .status = ninfer::StartupStatus::Begin});
+            observer.callback({.phase = ninfer::StartupPhase::WeightsStagingPin,
+                               .status = ninfer::StartupStatus::Complete,
+                               .elapsed_ns = 250'000'000});
             observer.callback({.phase         = ninfer::StartupPhase::WeightsMaterialize,
                                .status        = ninfer::StartupStatus::Complete,
                                .progress_unit = ninfer::StartupProgressUnit::Bytes,
@@ -197,12 +203,13 @@ int main() {
                                   .cuda_sync_mode       = "blocking",
                                   .weight_formats       = {"q4_g64_fp16", "q8_g32_fp16"},
                                   .host_to_device_bytes = 16ULL << 30});
+            startup.server_ready(5'000'000'000, 1'000'000'000, 250'000'000);
             logging.flush();
         }
         startup_output = capture.finish();
     }
     failures += check(
-        line_count(startup_output) == 4 &&
+        line_count(startup_output) == 6 &&
             startup_output.find("starting engine") != std::string::npos &&
             startup_output.find("loading weights | 16.0 GiB") != std::string::npos &&
             startup_output.find("weights ready | 16.0 GiB | 2.0s | 8.00 GiB/s") !=
@@ -212,6 +219,16 @@ int main() {
             startup_output.find("CUDA sync blocking") != std::string::npos &&
             startup_output.find("CUDA initialized") == std::string::npos,
         "normal startup pretty output is noisy or incomplete");
+    failures += check(
+        startup_output.find("engine startup timing | total_ns 3000000000 | other_ns 0"
+                            " | cuda_initialize_ns 1000000000") != std::string::npos &&
+            startup_output.find("weights_materialize_ns 1750000000"
+                                " | weights_staging_pin_ns 250000000") != std::string::npos &&
+            startup_output.find("program_allocate_ns 0") != std::string::npos &&
+            startup_output.find("server startup timing | total_ns 5000000000"
+                                " | engine_ns 3000000000 | warmup_ns 1000000000"
+                                " | attach_ns 250000000 | other_ns 750000000") != std::string::npos,
+        "startup attribution must retain integer durations and exclude nested work");
 
     std::string tool_output;
     {

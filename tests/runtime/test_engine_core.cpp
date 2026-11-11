@@ -2209,6 +2209,17 @@ void durable_import_commit() {
     const auto stats     = harness.observed_stats();
     require(committed.state == rt::DurableImportState::Imported, "durable restore did not commit");
     require_durable(stats, {.catalog = 1, .host = 1}, "durable import commit");
+    require(stats.checkpoint_restore.index_read_ns > 0,
+            "index-read timing was not published before import completion");
+    harness.core().observe_restore({.attempts = 2, .imported = 1, .total_ns = 100,
+                                   .store_load_ns = 20, .engine_prepare_ns = 60, .commit_ns = 10});
+    // Force another worker publication: it must not overwrite off-worker observations.
+    auto turn = harness.submit(Script::Complete, 1);
+    const auto after = harness.await(turn).stats.checkpoint_restore;
+    require(after.attempts == 2 && after.imported == 1 && after.total_ns == 100 &&
+                after.store_load_ns == 20 && after.engine_prepare_ns == 60 && after.commit_ns == 10 &&
+                after.index_read_ns >= stats.checkpoint_restore.index_read_ns,
+            "worker publication reset service restore counters or lost native phases");
 }
 
 void durable_import_abort() {

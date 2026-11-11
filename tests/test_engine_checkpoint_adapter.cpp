@@ -1,3 +1,4 @@
+#include "runtime/contract/checkpoint_timing.h"
 #include "runtime/engine/checkpoint_control.h"
 #include "runtime/engine/context_cache/types.h"
 #include "serve/automatic_checkpoint_queue.h"
@@ -51,6 +52,7 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace {
+using ninfer::RuntimeCheckpointRestoreStats;
 using namespace ninfer::runtime;
 using namespace std::chrono_literals;
 
@@ -396,6 +398,7 @@ class AdapterFixture {
     std::size_t checkpoint_exports_in_flight_ = 0;
     std::size_t checkpoint_pressure_depth_ = 0;
     std::exception_ptr checkpoint_publication_failure_;
+    ninfer::RuntimeStats cumulative_stats_{};
     std::atomic<bool> admission_check_pending_{false};
     bool stopping_ = false;
     bool failed_ = false;

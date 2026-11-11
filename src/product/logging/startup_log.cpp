@@ -79,11 +79,34 @@ PhasePresentation phase_presentation(StartupPhase phase) noexcept {
     case StartupPhase::CudaGraphCalibration:
         return {"calibrating CUDA graph memory", "CUDA graph memory calibrated",
                 PhaseVisibility::Info, false, false};
+    case StartupPhase::ProgramAllocate:
+        return {"allocating runtime state", "runtime state allocated",
+                PhaseVisibility::Debug, false, false};
     case StartupPhase::EngineFinalize:
         return {"finalizing engine", "engine finalized", PhaseVisibility::Debug, false, false};
     }
     return {"starting unknown phase", "unknown phase complete", PhaseVisibility::Debug, false,
             false};
+}
+
+const char* phase_name(StartupPhase phase) noexcept {
+    switch (phase) {
+    case StartupPhase::EngineStartup: return "other";
+    case StartupPhase::CudaInitialize: return "cuda_initialize";
+    case StartupPhase::ArtifactInspect: return "artifact_inspect";
+    case StartupPhase::TargetPlan: return "target_plan";
+    case StartupPhase::WeightsMaterialize: return "weights_materialize";
+    case StartupPhase::WeightsStagingPin: return "weights_staging_pin";
+    case StartupPhase::TargetFinalize: return "target_finalize";
+    case StartupPhase::FrontendInitialize: return "frontend_initialize";
+    case StartupPhase::ProgramInitialize: return "program_initialize";
+    case StartupPhase::HostContextPin: return "host_context_pin";
+    case StartupPhase::CudaGraphPrepare: return "cuda_graph_prepare";
+    case StartupPhase::CudaGraphCalibration: return "cuda_graph_calibration";
+    case StartupPhase::ProgramAllocate: return "program_allocate";
+    case StartupPhase::EngineFinalize: return "engine_finalize";
+    }
+    return "unknown";
 }
 
 std::size_t terminal_columns() noexcept {
@@ -214,6 +237,16 @@ struct StartupLogRenderer::Impl {
     void render(const StartupEvent& event) {
         const PhasePresentation presentation = phase_presentation(event.phase);
         const std::size_t index              = static_cast<std::size_t>(event.phase);
+        // Engine events are synchronous and nested. Use their measured durations rather than
+        // logging/callback timestamps; sum exclusive time, including repeated calibration.
+        if (event.status == StartupStatus::Begin && depth < frames.size()) {
+            frames[depth++] = Frame{event.phase, 0};
+        } else if ((event.status == StartupStatus::Complete || event.status == StartupStatus::Failed) &&
+                   depth && frames[depth - 1].phase == event.phase) {
+            const auto children = frames[--depth].children_ns;
+            exclusive_ns[index] += event.elapsed_ns > children ? event.elapsed_ns - children : 0;
+            if (depth) { frames[depth - 1].children_ns += event.elapsed_ns; }
+        }
         switch (event.status) {
         case StartupStatus::Begin: {
             const Clock::time_point now = Clock::now();
@@ -284,6 +317,13 @@ struct StartupLogRenderer::Impl {
     std::shared_ptr<spdlog::logger> logger;
     std::shared_ptr<TerminalProgress> progress;
     std::array<PhaseProgress, kStartupPhaseCount> phases;
+    struct Frame {
+        StartupPhase phase;
+        std::uint64_t children_ns;
+    };
+    std::array<Frame, kStartupPhaseCount> frames{};
+    std::array<std::uint64_t, kStartupPhaseCount> exclusive_ns{};
+    std::size_t depth = 0;
     std::uint64_t engine_elapsed_ns = 0;
     bool failure_logged             = false;
 };
@@ -307,6 +347,13 @@ void StartupLogRenderer::engine_ready(const LoadSummary& load) {
     impl_->logger->info("engine ready | {} | total {} | weights {} | CUDA sync {}",
                         format_pretty_text(load.model_name), format_pretty_duration(total_seconds),
                         format_pretty_bytes(load.host_to_device_bytes), load.cuda_sync_mode);
+    std::ostringstream timing;
+    timing << "engine startup timing | total_ns " << impl_->engine_elapsed_ns;
+    for (std::size_t index = 0; index < kStartupPhaseCount; ++index) {
+        timing << " | " << phase_name(static_cast<StartupPhase>(index)) << "_ns "
+               << impl_->exclusive_ns[index];
+    }
+    impl_->logger->info("{}", timing.str());
     impl_->logger->debug(
         "load detail | architecture {} | artifact read {} | H2D {} | staging peak {} | device "
         "objects {} | host objects {}",
@@ -318,6 +365,15 @@ void StartupLogRenderer::engine_ready(const LoadSummary& load) {
                          context_cost_preset_source_name(load.context_cost.transfer_source),
                          context_cost_preset_source_name(load.context_cost.prefill_source),
                          load.prefill_signature);
+}
+
+void StartupLogRenderer::server_ready(std::uint64_t total_ns, std::uint64_t warmup_ns,
+                                     std::uint64_t attach_ns) {
+    const auto accounted = impl_->engine_elapsed_ns + warmup_ns + attach_ns;
+    impl_->logger->info(
+        "server startup timing | total_ns {} | engine_ns {} | warmup_ns {} | attach_ns {} | other_ns {}",
+        total_ns, impl_->engine_elapsed_ns, warmup_ns, attach_ns,
+        total_ns > accounted ? total_ns - accounted : 0);
 }
 
 } // namespace ninfer::product

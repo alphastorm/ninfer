@@ -32,6 +32,24 @@ int main() {
     baseline.speculative_accepted_tokens = 1;
     baseline.speculative_attempted_per_position = {1, 1, 1};
     baseline.speculative_accepted_per_position  = {1, 0, 0};
+    constexpr std::array restore_phases{
+        std::pair{"total", &RuntimeCheckpointRestoreStats::total_ns},
+        std::pair{"store_load", &RuntimeCheckpointRestoreStats::store_load_ns},
+        std::pair{"engine_prepare", &RuntimeCheckpointRestoreStats::engine_prepare_ns},
+        std::pair{"commit", &RuntimeCheckpointRestoreStats::commit_ns},
+        std::pair{"index_read", &RuntimeCheckpointRestoreStats::index_read_ns},
+        std::pair{"validation", &RuntimeCheckpointRestoreStats::validation_ns},
+        std::pair{"host_reservation", &RuntimeCheckpointRestoreStats::host_reservation_ns},
+        std::pair{"payload_read", &RuntimeCheckpointRestoreStats::payload_read_ns},
+        std::pair{"host_publication", &RuntimeCheckpointRestoreStats::host_publication_ns},
+        std::pair{"binding", &RuntimeCheckpointRestoreStats::binding_ns},
+    };
+    baseline.checkpoint_restore.attempts = 3;
+    baseline.checkpoint_restore.imported = 2;
+    baseline.checkpoint_restore.bindings = 4;
+    for (const auto& [name, field] : restore_phases) {
+        baseline.checkpoint_restore.*field = 1'000'000'000;
+    }
     Metrics metrics;
     metrics.configure("custom\"model\\name\nline", options, memory, baseline);
     RuntimeStats running = baseline;
@@ -51,8 +69,26 @@ int main() {
     running.kv_pools = {{0, "text", 2, 8}, {1, "draft", 1, 4}, {2, "index", 3, 6}};
     running.context_transfers.kv.resize(3);
     running.context_transfers.kv[2][1].bytes = 8192;
+    running.checkpoint_restore.attempts += 2;
+    running.checkpoint_restore.imported += 1;
+    running.checkpoint_restore.bindings += 2;
+    for (const auto& [name, field] : restore_phases) {
+        running.checkpoint_restore.*field += 2'000'000'000;
+    }
     metrics.first_token({.prepare_seconds = 0.05, .elapsed_since_submit_seconds = 0.2});
     const auto live = metrics.render(running, true);
+    check(live.find("# TYPE ninfer_checkpoint_restore_seconds_total counter\n") !=
+              std::string::npos &&
+              live.find("ninfer_checkpoint_restore_attempts_total 2\n") != std::string::npos &&
+              live.find("ninfer_checkpoint_restore_imported_total 1\n") != std::string::npos &&
+              live.find("ninfer_checkpoint_bindings_total 2\n") != std::string::npos,
+          "restore attempts, successful imports and bindings must subtract the baseline");
+    for (const auto& [name, field] : restore_phases) {
+        const auto sample = std::string("ninfer_checkpoint_restore_seconds_total{phase=\"") +
+                            name + "\"} 2\n";
+        check(live.find(sample) != std::string::npos,
+              "every restore phase must render nanoseconds as seconds without resetting");
+    }
     check(live.find("ninfer_paced_prefill_steps_total 3\n") != std::string::npos &&
               live.find("ninfer_paced_prefill_deferred_tokens_total 4096\n") != std::string::npos &&
               live.find("ninfer_prefill_cadence_deferrals_total 8\n") != std::string::npos &&

@@ -96,6 +96,7 @@ enum class StartupPhase : std::uint8_t {
     HostContextPin,
     CudaGraphPrepare,
     CudaGraphCalibration,
+    ProgramAllocate,
     EngineFinalize,
 };
 
@@ -1095,10 +1096,31 @@ struct RuntimeHostWorkStats {
     std::uint64_t stats_publication_invocations = 0;
 };
 
+// Restore wall time, not CUDA kernel time. The service totals include worker queueing and
+// publication; index/native phases are subsets of engine_prepare_ns. Payload reads include
+// streamed digest verification (which can overlap native I/O). Binding is a later phase and
+// counts all initial checkpoint bindings, including RAM-only reuse, not only disk restores.
+struct RuntimeCheckpointRestoreStats {
+    std::uint64_t attempts = 0;
+    std::uint64_t imported = 0;
+    std::uint64_t total_ns = 0;
+    std::uint64_t store_load_ns = 0;
+    std::uint64_t engine_prepare_ns = 0;
+    std::uint64_t commit_ns = 0;
+    std::uint64_t index_read_ns = 0;
+    std::uint64_t validation_ns = 0;
+    std::uint64_t host_reservation_ns = 0;
+    std::uint64_t payload_read_ns = 0;
+    std::uint64_t host_publication_ns = 0;
+    std::uint64_t bindings = 0;
+    std::uint64_t binding_ns = 0;
+};
+
 // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
 // decision observations. Consumers derive interval counters by subtracting two snapshots.
 struct RuntimeStats {
     RuntimeHostWorkStats host_work;
+    RuntimeCheckpointRestoreStats checkpoint_restore;
     // Full prompt counted once when initial binding succeeds; includes reused tokens.
     std::uint64_t prompt_tokens = 0;
     // All committed output tokens, including the first token and Engine-injected control tokens.

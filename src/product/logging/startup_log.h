@@ -22,6 +22,7 @@ public:
 
     [[nodiscard]] StartupObserver observer();
     void engine_ready(const LoadSummary& load);
+    void server_ready(std::uint64_t total_ns, std::uint64_t warmup_ns, std::uint64_t attach_ns);
 
 private:
     struct Impl;

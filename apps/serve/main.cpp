@@ -31,6 +31,12 @@ void handle_signal(int) { g_stop_requested.store(true, std::memory_order_relaxed
 } // namespace
 
 int main(int argc, char** argv) {
+    using Clock = std::chrono::steady_clock;
+    const auto startup_started = Clock::now();
+    const auto elapsed_ns = [](Clock::time_point begin, Clock::time_point end) {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
+    };
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
         std::cout << ninfer::format_build_info("ninfer-serve") << '\n';
         return 0;
@@ -78,7 +84,6 @@ int main(int argc, char** argv) {
         startup_log.engine_ready(service->load_summary());
         operational_log.engine_capacity(*service);
 
-        using Clock                            = std::chrono::steady_clock;
         const Clock::time_point warmup_started = Clock::now();
         operational_log.warmup_started();
         try {
@@ -89,9 +94,12 @@ int main(int argc, char** argv) {
             operational_log.warmup_failure(seconds, exception.what());
             return 1;
         }
+        const auto warmup_finished = Clock::now();
         operational_log.warmup_complete(
-            std::chrono::duration<double>(Clock::now() - warmup_started).count());
+            std::chrono::duration<double>(warmup_finished - warmup_started).count());
+        const auto attach_started = Clock::now();
         server.attach(*service);
+        const auto attach_finished = Clock::now();
 
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
@@ -99,6 +107,9 @@ int main(int argc, char** argv) {
         serving = true;
         operational_log.server_ready(options.host, options.port, server.public_model_id(),
                                      !options.api_key.empty());
+        startup_log.server_ready(elapsed_ns(startup_started, Clock::now()),
+                                 elapsed_ns(warmup_started, warmup_finished),
+                                 elapsed_ns(attach_started, attach_finished));
 
         std::jthread stop_monitor([&server](std::stop_token stop) {
             while (!stop.stop_requested()) {

@@ -151,6 +151,33 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
     gauge("engine_ready", ready ? 1 : 0, "Whether Engine can accept work.");
     gauge("server_start_time_seconds", start_seconds_,
           "Unix time at service attachment after warmup.");
+    const auto& restore = stats.checkpoint_restore;
+    const auto& restore_baseline = baseline_.checkpoint_restore;
+    counter("checkpoint_restore_attempts_total", restore.attempts, restore_baseline.attempts,
+            "Durable restore attempts, including refusals and missing sessions.");
+    counter("checkpoint_restore_imported_total", restore.imported, restore_baseline.imported,
+            "Durable restore operations published successfully.");
+    counter("checkpoint_bindings_total", restore.bindings, restore_baseline.bindings,
+            "Initial bindings reusing a checkpoint, including RAM-only reuse.");
+    header("checkpoint_restore_seconds_total", "counter",
+           "Restore wall time by phase; total and engine_prepare contain nested phases.");
+    const auto restore_phase = [&](std::string_view name,
+                                    std::uint64_t RuntimeCheckpointRestoreStats::* field) {
+        out << "ninfer_checkpoint_restore_seconds_total{phase=\"" << name << "\"} "
+            << static_cast<double>(restore.*field - restore_baseline.*field) * 1e-9 << '\n';
+    };
+#define RESTORE_PHASE(field) restore_phase(#field, &RuntimeCheckpointRestoreStats::field##_ns)
+    RESTORE_PHASE(total);
+    RESTORE_PHASE(store_load);
+    RESTORE_PHASE(engine_prepare);
+    RESTORE_PHASE(commit);
+    RESTORE_PHASE(index_read);
+    RESTORE_PHASE(validation);
+    RESTORE_PHASE(host_reservation);
+    RESTORE_PHASE(payload_read);
+    RESTORE_PHASE(host_publication);
+    RESTORE_PHASE(binding);
+#undef RESTORE_PHASE
     header("model_info", "gauge", "Resident model and speculative backend.");
     out << "ninfer_model_info{model_name=\"" << escape_label(model_) << "\",speculative_backend=\""
         << product::speculative_backend_name(options_.speculative.backend) << "\"} 1\n";

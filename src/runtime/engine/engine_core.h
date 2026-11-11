@@ -8,6 +8,7 @@
 #include "core/nvtx.h"
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
+#include "runtime/contract/checkpoint_timing.h"
 #include "runtime/contract/resources.h"
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
@@ -349,7 +350,25 @@ public:
 
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
-        return published_stats_;
+        auto result = published_stats_;
+        auto& restore = result.checkpoint_restore;
+        restore.attempts = service_restore_stats_.attempts;
+        restore.imported = service_restore_stats_.imported;
+        restore.total_ns = service_restore_stats_.total_ns;
+        restore.store_load_ns = service_restore_stats_.store_load_ns;
+        restore.engine_prepare_ns = service_restore_stats_.engine_prepare_ns;
+        restore.commit_ns = service_restore_stats_.commit_ns;
+        return result;
+    }
+
+    void observe_restore(const RuntimeCheckpointRestoreStats& value) {
+        std::lock_guard lock(stats_mutex_);
+        service_restore_stats_.attempts += value.attempts;
+        service_restore_stats_.imported += value.imported;
+        service_restore_stats_.total_ns += value.total_ns;
+        service_restore_stats_.store_load_ns += value.store_load_ns;
+        service_restore_stats_.engine_prepare_ns += value.engine_prepare_ns;
+        service_restore_stats_.commit_ns += value.commit_ns;
     }
 
     [[nodiscard]] bool is_available() const {
@@ -1752,6 +1771,8 @@ private:
                 request->initial_binding_ns = elapsed_ns(*request->admitted_at, Clock::now());
                 if (control.summary.reused_prompt_tokens) {
                     ++cumulative_stats_.checkpoint_selections;
+                    ++cumulative_stats_.checkpoint_restore.bindings;
+                    cumulative_stats_.checkpoint_restore.binding_ns += request->initial_binding_ns;
                 } else {
                     ++cumulative_stats_.root_selections;
                 }
@@ -3120,6 +3141,8 @@ private:
     RuntimeStats cumulative_stats_;
     RuntimeStats stats_snapshot_;
     RuntimeStats published_stats_;
+    // Guarded by stats_mutex_; service threads never write worker-owned cumulative_stats_.
+    RuntimeCheckpointRestoreStats service_restore_stats_;
     bool stopping_ = false;
     bool failed_   = false;
     std::atomic<bool> generation_stopping_{false};
