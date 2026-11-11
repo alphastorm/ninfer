@@ -570,6 +570,23 @@ native component's event/report/restore route and the built container's SIGTERM 
 the runtime image does not build or execute CTest. Retain the long-session managed-Stop
 release rehearsal in addition to this calibrated trigger.
 
+`--n89 red|green` covers fork #89 on the same calibrated, reduced Host arena; the pressure
+server gets `--pending-timeout-ms` (default 15000). It seeds and saves A, and with the default
+`--occupant deleted` deletes A's only response: the generation goes, but A's named state stays
+Host-resident and is no provable Final victim (`--occupant covered` keeps A saved). It then
+seeds B, sends B's stored continuation and stops. A continuation whose Device slot only
+releasing B's uncovered state can free waits for B's pressure save; otherwise it is served.
+`red` accepts either a served continuation or HTTP 503 `request_queue_timeout` behind a
+`capacity` save refusal, and expects a Stop that refuses B for `capacity` (`deleted`) or saves
+it by reclaiming covered A, with no Device-staged save. `green` expects HTTP 200 with the
+reference text, a Stop that refuses nothing, and (`deleted`) a Device-staged save
+(`device_staged_states > 0`); a staged pressure save must match the calibration's Host-route
+State digests. The receipt (`--receipt`, also written on failure) carries every
+durable-operation receipt, the `transaction_busy` count and B's final State digests, so a
+covered red (Host route) and a deleted green (staged route) compare payloads directly;
+`--evidence-dir` keeps the server logs and Stop reports. Run red on the predecessor and green
+on the candidate with identical options.
+
 `ninfer_qwen3_5_tools_real_test [none|mtp|dflash|dflash2] [graph|eager|basic|snapshot|replay|cancel] [concurrency]`
 uses `NINFER_TEST_ARTIFACT` for strict tools, thinking, raw continuation, mixed batches, and
 call/result prefix reuse, and required-tool → JSON continuation with committed constraint observations.

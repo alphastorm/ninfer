@@ -101,6 +101,50 @@ class RunnerContractTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             capacity_runner.extract_classification(log, "c" * 40, "b" * 64, "a" * 40)
 
+    # --- fork #89 reduced-Host reproduction (--n89) ---
+    def test_durable_receipts_are_counted_by_operation_state_and_reason(self):
+        operation = {"schema": "ninfer-durable-operation/1", "operation": "save", "state": "refused",
+                     "committed": False}
+        log = "\n".join(("ordinary line", json.dumps({"schema": "other", "reason": "transaction_busy"}),
+                         json.dumps({**operation, "reason": "transaction_busy"}),
+                         json.dumps({**operation, "reason": "capacity"})))
+        receipts = capacity_runner.durable_receipts(log)
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(capacity_runner.receipt_summary(receipts),
+                         {"counts": {"save/refused/capacity": 1, "save/refused/transaction_busy": 1},
+                          "transaction_busy": 1})
+
+    def test_n89_red_and_green_verdicts(self):
+        refused = {"operation": "save", "reason": "capacity", "committed": False}
+        staged = {"operation": "save", "reason": "none", "committed": True, "device_staged_states": 2}
+        reclaimed = {"operation": "save", "reason": "none", "committed": True, "reclaimed_owners": 1}
+        timeout = {"status": 503, "error_code": "request_queue_timeout"}
+        served = {"status": 200, "text_equal": True, "state_digests_equal": True}
+        incomplete = {"saved": 0, "skipped": 0, "refused": 1, "complete": False}
+        clean = {"saved": 1, "skipped": 0, "refused": 0, "complete": True}
+        for args in (("red", "deleted", served, incomplete, [], [refused]),
+                     ("red", "deleted", timeout, incomplete, [refused], [refused]),
+                     ("red", "covered", served, clean, [], [reclaimed]),
+                     ("green", "deleted", served, clean, [], [staged]),
+                     ("green", "deleted", served, clean, [staged], []),
+                     ("green", "covered", served, clean, [], [reclaimed])):
+            with self.subTest(accepted=args[:2]):
+                capacity_runner.n89_verdict(*args)
+        for args, message in (
+                (("red", "deleted", timeout, incomplete, [], [refused]), "neither served nor held"),
+                (("red", "deleted", {"status": 500}, incomplete, [], [refused]), "neither served nor held"),
+                (("red", "deleted", served, incomplete, [], [staged, refused]), "predecessor staged"),
+                (("red", "deleted", served, clean, [], [refused]), "did not refuse"),
+                (("red", "deleted", served, incomplete, [], []), "did not refuse"),
+                (("red", "covered", served, clean, [], [{**reclaimed, "reclaimed_owners": 0}]), "covered occupant"),
+                (("green", "deleted", timeout, clean, [], [staged]), "Host-route reference"),
+                (("green", "deleted", served, clean, [], [refused]), "no save was Device-staged"),
+                (("green", "deleted", {**served, "state_digests_equal": False}, clean, [staged], []),
+                 "State digests"),
+                (("green", "deleted", served, incomplete, [], [staged]), "refused a session")):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                capacity_runner.n89_verdict(*args)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -101,6 +102,59 @@ def extract_classification(log: str, source: str, binary: str, delta: str) -> di
         "source_sha": source, "binary_sha256": binary, "diagnostic_delta_sha": delta}
 
 
+def durable_receipts(log: str) -> list[dict]:
+    values = []
+    for line in log.splitlines():
+        try: value = json.loads(line)
+        except ValueError: continue
+        if isinstance(value, dict) and value.get("schema") == "ninfer-durable-operation/1": values.append(value)
+    return values
+
+
+def receipt_summary(receipts: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for value in receipts:
+        key = "/".join(str(value.get(name)) for name in ("operation", "state", "reason"))
+        counts[key] = counts.get(key, 0) + 1
+    return {"counts": dict(sorted(counts.items())),
+            "transaction_busy": sum(value.get("reason") == "transaction_busy" for value in receipts)}
+
+
+def n89_verdict(expect: str, occupant: str, continuation: dict, stop: dict,
+                pending: list[dict], stopping: list[dict]) -> None:
+    """Fork #89 under reduced Host: B's fresh continuation, then a managed Stop.
+
+    The continuation is served, or held behind B's pressure save when only releasing B's uncovered
+    state frees its Device slot. That save, and B's Final save, need Host room the arena lacks on the
+    predecessor; the candidate stages them from Device.
+    """
+    def save(value: dict, committed: bool) -> bool:
+        return value.get("operation") == "save" and bool(value.get("committed")) == committed
+    served = continuation.get("status") == 200 and continuation.get("text_equal") is True
+    latched = continuation.get("status") == 503 and continuation.get("error_code") == "request_queue_timeout"
+    staged = [v for v in pending + stopping if save(v, True) and v.get("device_staged_states", 0) > 0]
+    if expect == "red":
+        require(served or (latched and any(save(v, False) and v.get("reason") == "capacity" for v in pending)),
+                "fresh continuation was neither served nor held behind a capacity-refused save")
+        require(not staged, "predecessor staged a save from Device")
+        if occupant == "deleted":
+            require(stop["refused"] >= 1 and not stop["complete"] and
+                    any(save(v, False) and v.get("reason") == "capacity" for v in stopping),
+                    "Stop did not refuse the uncovered session for capacity")
+        else:
+            require(stop["refused"] == 0 and stop["complete"] and
+                    any(save(v, True) and v.get("reclaimed_owners", 0) >= 1 for v in stopping),
+                    "Stop did not reclaim the covered occupant")
+        return
+    require(served, "fresh continuation failed or differs from the Host-route reference")
+    if occupant == "deleted":
+        require(staged, "no save was Device-staged")
+    if any(save(v, True) and v.get("device_staged_states", 0) > 0 for v in pending):
+        require(continuation.get("state_digests_equal") is True,
+                "Device-staged pressure save differs from the Host-route State digests")
+    require(stop["refused"] == 0 and stop["complete"], "Stop refused a session")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)
@@ -118,10 +172,17 @@ def main() -> int:
     mode.add_argument("--expect-defect", action="store_true")
     mode.add_argument("--classify", action="store_true",
                       help="run instrumented predecessor and extract binary-bound native evidence")
+    mode.add_argument("--n89", choices=("red", "green"),
+                      help="fresh continuation of an uncovered Device-resident session under reduced Host")
     parser.add_argument("--diagnostic-delta-sha")
     parser.add_argument("--predecessor-classification", type=Path,
                         help="binary-bound classification-only diagnostic evidence for the predecessor")
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--occupant", choices=("deleted", "covered"), default="deleted",
+                        help="--n89 Host occupant A: saved, then its response deleted; or saved and covered")
+    parser.add_argument("--pending-timeout-ms", type=int, default=15000,
+                        help="--n89 queue deadline of the pressure server")
+    parser.add_argument("--evidence-dir", type=Path, help="--n89 copy of the server logs and Stop reports")
     args = parser.parse_args()
     defect_mode = args.expect_defect or args.classify
     if args.artifact is None:
@@ -131,6 +192,7 @@ def main() -> int:
     require(args.device_state_slots is not None and args.device_state_slots >= 0,
             "select extra Device state slots explicitly for this artifact/backend/GPU")
     require(args.prompt_lines > 0 and 0 <= args.frontier_tolerance <= 64, "invalid fixture geometry")
+    require(args.pending_timeout_ms > 0, "pending timeout must be positive")
     artifact_sha, binary_sha = digest_file(args.artifact), digest_file(args.server)
     require(args.artifact_sha256 is None or artifact_sha == args.artifact_sha256, "artifact identity mismatch")
     version = subprocess.run([str(args.server), "--version"], check=True, capture_output=True, text=True).stdout.strip()
@@ -156,6 +218,10 @@ def main() -> int:
                "expect_defect": defect_mode, "classification_only": args.classify, "production_path": True,
                "fixture": {"extra_device_state_slots": args.device_state_slots, "spec": args.spec,
                            "prompt_lines": args.prompt_lines, "kv_capacity": args.kv_capacity}}
+    if args.n89:
+        receipt["artifact_type"] = "ninfer-serve-pending-capacity-proof/1"
+        receipt["n89"] = {"expect": args.n89, "occupant": args.occupant,
+                          "pending_timeout_ms": args.pending_timeout_ms}
     with proof_workdir() as root:
         key = secrets.token_hex(32)
         key_file = root / "api.key"
@@ -179,7 +245,7 @@ def main() -> int:
             except urllib.error.HTTPError as error:
                 return error.code, json.load(error)
         class Server:
-            def __init__(self, epoch, checkpoint_root, host_bytes):
+            def __init__(self, epoch, checkpoint_root, host_bytes, pending_timeout_ms=None):
                 self.report = root / f"shutdown-{epoch}.json"
                 self.log_path = root / f"server-{epoch}.log"
                 self.log = self.log_path.open("wb")
@@ -195,6 +261,7 @@ def main() -> int:
                     "--session-checkpoint-quota-mib", str(8 * args.roomy_host_mib),
                     "--shutdown-report", str(self.report), "--log-stats-interval-ms", "0", "--no-thinking"]
                 if args.spec != "none": argv += ["--draft-tokens", "7", "--lm-head-draft"]
+                if pending_timeout_ms is not None: argv += ["--pending-timeout-ms", str(pending_timeout_ms)]
                 argv += ["--config-sha256", hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()]
                 self.process = ManagedProcess(argv, self.log)
                 deadline = time.monotonic() + 300
@@ -210,23 +277,22 @@ def main() -> int:
                     self.process.stop()
                     self.log.close()
                     raise
-            def stop(self, expected):
-                # expected: one exact report, or a tuple of acceptable exact reports.
+            def finish(self):
                 try: code = self.process.stop(timeout=300)
                 finally: self.log.close()
                 require(self.report.is_file(), "synchronous shutdown report missing")
                 report = json.loads(self.report.read_text(encoding="utf-8"))
                 observed = {name: report[name] for name in ("saved", "skipped", "refused", "complete")}
+                require((code == 0) == observed["complete"], "Stop exit status disagrees with its report")
+                return observed
+            def stop(self, expected):
+                # expected: one exact report, or a tuple of acceptable exact reports.
+                observed = self.finish()
                 allowed = expected if isinstance(expected, tuple) else (expected,)
-                require(observed in allowed and (code == 0) == observed["complete"], "unexpected Stop result or exit status")
+                require(observed in allowed, "unexpected Stop result or exit status")
                 return observed
             def receipts(self):
-                values = []
-                for line in self.log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    try: value = json.loads(line)
-                    except ValueError: continue
-                    if isinstance(value, dict) and value.get("schema") == "ninfer-durable-operation/1": values.append(value)
-                return values
+                return durable_receipts(self.log_path.read_text(encoding="utf-8", errors="replace"))
         def seed(which):
             code, value = request("POST", "/v1/responses", {"model": "shutdown-capacity-proof",
                 "prompt_cache_key": cache_keys[which], "input": prompts[which], "temperature": 0,
@@ -261,9 +327,17 @@ def main() -> int:
                                       for name, shape in (("a", a), ("b", b), ("continuation", next_b))}
             receipt["host_capacity_bytes"] = capacity
             checkpoints = root / "pressure"
-            active = Server(2, checkpoints, capacity)
+            active = Server(2, checkpoints, capacity, args.pending_timeout_ms if args.n89 else None)
             a_seed = seed(0); save(0)
             require(payload_shape(checkpoints, sessions[0]) == a, "A calibration changed under constrained capacity")
+            if args.n89 and args.occupant == "deleted":
+                # Deleting A's only response erases its generation and records. A's named native state
+                # stays Host-resident: no Automatic save may reclaim it and it is no provable Final victim.
+                code, value = request("DELETE", "/v1/responses/" + a_seed["id"], capability=sessions[0])
+                require(code == 200 and value.get("deleted") is True, "occupant response deletion failed")
+                code, status = request("GET", "/v1/ninfer/checkpoints/status", capability=sessions[0])
+                require(code == 200 and status.get("state") == "missing", "deleted occupant kept its generation")
+            seeded = len(active.receipts())
             actual_b = seed(1)
             require(semantic_text(actual_b) == semantic_text(b_seed), "B calibration changed under constrained capacity")
             code, status = request("GET", "/v1/ninfer/checkpoints/status", capability=sessions[1])
@@ -275,8 +349,46 @@ def main() -> int:
             receipt["before_stop"] = metrics
             receipt["host_shortage_bytes"] = shortage
             pointer = checkpoints / "sessions" / sessions[0] / "current"
-            a_pointer = digest_file(pointer)
-            if defect_mode:
+            a_pointer = None if args.n89 else digest_file(pointer)
+            if args.n89:
+                # B's continuation forks B's newest image into a Device slot. When no slot is free and
+                # none can take a demotion, only releasing one of B's images frees one, and B (named,
+                # unsaved) must be saved first while its State images are Device-only. Then Stop saves
+                # B's newest turn under the same Host shortage.
+                shapes = {"seed": b, "continuation": next_b}
+                def saved_b():
+                    # B's current generation against the calibrated Host-route save of the same frontier.
+                    if not (checkpoints / "sessions" / sessions[1] / "current").is_file(): return None
+                    shape = payload_shape(checkpoints, sessions[1])
+                    match = next((name for name, value in shapes.items() if value["frontier"] == shape["frontier"]), None)
+                    return {"generation": match, "frontier": shape["frontier"], "state_digests": shape["state_digests"],
+                            "state_digests_equal": match is not None and
+                                                   shape["state_digests"] == shapes[match]["state_digests"]}
+                started = time.monotonic()
+                code, value = request("POST", "/v1/responses", continuation)
+                outcome = {"status": code, "seconds": round(time.monotonic() - started, 3)}
+                if code == 200:
+                    text = semantic_text(value)
+                    staged = saved_b()
+                    outcome |= {"text_equal": text == semantic_text(reference),
+                                "sha256": hashlib.sha256(text.encode()).hexdigest(), "saved": staged,
+                                "state_digests_equal": staged is not None and staged["state_digests_equal"]}
+                else:
+                    outcome["error_code"] = (value.get("error") or {}).get("code")
+                receipt["continuation"] = outcome
+                pending = active.receipts()[seeded:]
+                code, text = request("GET", "/metrics", text=True)
+                require(code == 200, "occupancy metrics unavailable")
+                receipt["after_continuation"] = read_metrics(text)
+                server, active = active, None
+                receipt["stop"] = server.finish()
+                stopping = server.receipts()[seeded + len(pending):]
+                summaries = {"pending": receipt_summary(pending), "stop": receipt_summary(stopping)}
+                receipt["receipts"] = {"pending": pending, "stop": stopping, "summary": summaries,
+                                       "transaction_busy": sum(s["transaction_busy"] for s in summaries.values())}
+                receipt["final_generation"] = saved_b()
+                n89_verdict(args.n89, args.occupant, outcome, receipt["stop"], pending, stopping)
+            elif defect_mode:
                 receipt["stop"] = active.stop({"saved": 0, "skipped": 1, "refused": 1, "complete": False})
                 if args.classify:
                     classification = extract_classification(
@@ -330,10 +442,22 @@ def main() -> int:
                 active = None
                 require(digest_file(pointer) == a_pointer, "loading A changed its covered generation")
             receipt["passed"] = True
+        except BaseException as error:
+            if args.n89:
+                receipt["passed"] = False
+                receipt["failure"] = f"{type(error).__name__}: {error}"
+            raise
         finally:
             if active is not None:
                 try: active.process.stop(timeout=300)
                 finally: active.log.close()
+            if args.n89 and args.evidence_dir:
+                # The reproduction keeps every receipt: server logs and Stop reports, pass or fail.
+                args.evidence_dir.mkdir(parents=True, exist_ok=True)
+                for path in sorted(root.glob("server-*.log")) + sorted(root.glob("shutdown-*.json")):
+                    shutil.copy2(path, args.evidence_dir / path.name)
+            if args.n89 and args.receipt and not receipt.get("passed"):
+                args.receipt.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     encoded = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
     if args.receipt: args.receipt.write_text(encoded, encoding="utf-8")
     print(encoded, end="")
