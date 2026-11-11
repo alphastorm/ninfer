@@ -7,6 +7,7 @@
 #include "cuda_interpose.h"
 #include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/engine/context_cache/context_cost.h"
+#include "serve/automatic_checkpoint_queue.h"
 #include "text/grammar.h"
 
 #include <cuda_runtime.h>
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -984,8 +986,12 @@ public:
         ImportReservation(Program& program, std::uint32_t points) noexcept
             : program_(&program), points_(points) {}
 
+        // A refused preparation reserves nothing.
+        explicit ImportReservation(rt::DurableReason refusal) noexcept : refusal_(refusal) {}
+
         ImportReservation(ImportReservation&& other) noexcept
-            : program_(std::exchange(other.program_, nullptr)), points_(other.points_) {}
+            : program_(std::exchange(other.program_, nullptr)), points_(other.points_),
+              refusal_(other.refusal_) {}
 
         ImportReservation& operator=(ImportReservation&&) = delete;
 
@@ -994,10 +1000,11 @@ public:
         }
 
         [[nodiscard]] rt::DurablePrepareState state() const noexcept {
-            return rt::DurablePrepareState::Prepared;
+            return refusal_ == rt::DurableReason::None ? rt::DurablePrepareState::Prepared
+                                                       : rt::DurablePrepareState::CapacityRefused;
         }
 
-        [[nodiscard]] rt::DurableReason reason() const noexcept { return rt::DurableReason::None; }
+        [[nodiscard]] rt::DurableReason reason() const noexcept { return refusal_; }
 
         [[nodiscard]] rt::DurableCheckpointStats stats() const noexcept { return durable_stats(); }
 
@@ -1005,6 +1012,7 @@ public:
         friend class Program;
         Program* program_     = nullptr;
         std::uint32_t points_ = 0;
+        rt::DurableReason refusal_ = rt::DurableReason::None;
     };
 
     enum class HostKind { Prepared, Busy, NoHostArena, HostCapacity, HostContiguity };
@@ -1023,6 +1031,12 @@ public:
         ExportLease(Program& program, std::span<const Checkpoint> points)
             : program_(&program), points_(points.begin(), points.end()) {
             ++program.prepare_calls;
+            // Like native preparation, a busy context transaction refuses retryably.
+            if (program.busy_during_context && program.operation_) {
+                kind_   = HostKind::Busy;
+                reason_ = rt::DurableReason::TransactionBusy;
+                return;
+            }
             const auto used = program.physical_usage().occupied.host_bytes;
             if (program.forced_refusal || used + kCheckpointHostBytes > program.host_capacity) {
                 kind_ = program.forced_refusal.value_or(HostKind::HostCapacity);
@@ -1097,6 +1111,8 @@ public:
     [[nodiscard]] ImportReservation prepare_checkpoint_import(const rt::DurableCheckpointSet& set,
                                                               const rt::ContinuationCheckpointReader&,
                                                               const rt::DurableLimits&) {
+        // Like native preparation, a busy context transaction refuses retryably.
+        if (busy_during_context && operation_) { return ImportReservation(rt::DurableReason::TransactionBusy); }
         const auto points = static_cast<std::uint32_t>(set.points.size());
         reserved_points_ += points;
         gate_->changed();
@@ -1121,6 +1137,7 @@ public:
     }
 
     bool pause_needs_host = false;
+    bool busy_during_context  = false;
 
 private:
     struct Lane {
@@ -2373,6 +2390,397 @@ void e89_export_pins_retire_when_stopped_mid_write() {
 
 // ---- end E89 block ----
 
+// ---- ESAVE block (fork #89 class, busy causes): a save never meets an in-flight context
+// operation and a busy refusal never parks a pressure save. ESAVE-owned. ----
+
+[[nodiscard]] std::string esave_reason(rt::DurableReason reason) {
+    return std::string(rt::durable_reason_name(reason));
+}
+
+[[nodiscard]] std::string esave_state(rt::DurableExportState state) {
+    return state == rt::DurableExportState::Exported ? "exported"
+           : state == rt::DurableExportState::Refused ? "refused"
+                                                      : "stale";
+}
+
+// How a request ended, for failure messages that record the observed behaviour.
+[[nodiscard]] std::string esave_outcome(const Outcome& outcome) {
+    if (!outcome.error) {
+        if (!outcome.result) { return "none"; }
+        return outcome.result->finish_reason == FinishReason::OutputLimit ? "OutputLimit"
+               : outcome.result->finish_reason == FinishReason::Cancelled ? "Cancelled"
+                                                                           : "other finish";
+    }
+    try {
+        std::rethrow_exception(outcome.error);
+    } catch (const RequestError& error) {
+        return error.kind() == RequestErrorKind::QueueTimeout ? "QueueTimeout" : "RequestError";
+    } catch (const std::exception& error) {
+        return std::string("error: ") + error.what();
+    } catch (...) {
+        return "error";
+    }
+}
+
+// The production coordinator as the Engine's pressure handler. Its save exports through the
+// Engine as the checkpoint service does, and every attempt's outcome is recorded.
+class ESaveCoordinator final : public rt::PressureCheckpointHandler {
+public:
+    struct Counts {
+        unsigned requests = 0, calls = 0, busy = 0, completed = 0;
+        rt::DurableReason last = rt::DurableReason::None;
+        // Answers to requests made after a probe was installed, and the probe value at each
+        // Pending answer.
+        unsigned pending_answers = 0, settled_answers = 0;
+        std::vector<std::uint64_t> pending_probes;
+    };
+
+    explicit ESaveCoordinator(Harness& harness)
+        : harness_(harness),
+          coordinator_(
+              [this](std::string_view session, std::optional<std::string_view> tag) {
+                  NullWriter writer;
+                  const auto result =
+                      harness_.core().export_session(session, tag.value_or(""), writer, {});
+                  record([&](Counts& counts) {
+                      ++counts.calls;
+                      counts.busy += result.reason == rt::DurableReason::TransactionBusy ? 1U : 0U;
+                      counts.last = result.reason;
+                  });
+                  return ninfer::serve::AutomaticCheckpointResult{std::string(tag.value_or("")),
+                                                                  result.reason};
+              },
+              [this] {
+                  return ninfer::serve::CheckpointSaveProgress{harness_.core().checkpoint_progress()};
+              },
+              [this] {
+                  harness_.core().notify_checkpoint_progress();
+                  record([](Counts& counts) { ++counts.completed; });
+              }) {}
+
+    void save_before_eviction(std::span<rt::PressureCheckpointVictim> victims) noexcept override {
+        coordinator_.save_before_eviction(victims);
+        std::function<std::uint64_t()> probe;
+        {
+            std::lock_guard lock(mutex_);
+            probe = probe_;
+        }
+        const auto value = probe ? probe() : 0;
+        record([&](Counts& counts) {
+            ++counts.requests;
+            if (!probe) { return; }
+            for (const auto& victim : victims) {
+                if (victim.outcome == rt::PressureCheckpointOutcome::Settled) {
+                    ++counts.settled_answers;
+                } else {
+                    ++counts.pending_answers;
+                    counts.pending_probes.push_back(value);
+                }
+            }
+        });
+    }
+
+    // Every later request is answered and then probed on the requesting (worker) thread.
+    void probe_requests(std::function<std::uint64_t()> probe) {
+        std::lock_guard lock(mutex_);
+        probe_ = std::move(probe);
+    }
+
+    [[nodiscard]] Counts counts() {
+        std::lock_guard lock(mutex_);
+        return counts_;
+    }
+
+    // Whether the predicate held before the timeout.
+    template <class Predicate>
+    bool wait(Predicate predicate, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, timeout, [&] { return predicate(counts_); });
+    }
+
+    void drain() noexcept { coordinator_.drain(); }
+
+private:
+    template <class Update>
+    void record(Update update) noexcept {
+        {
+            std::lock_guard lock(mutex_);
+            update(counts_);
+        }
+        changed_.notify_all();
+    }
+
+    Harness& harness_;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    Counts counts_;
+    std::function<std::uint64_t()> probe_;
+    // Last: its worker uses every member above, and it is destroyed (drained) first.
+    ninfer::serve::AutomaticCheckpointCoordinator coordinator_;
+};
+
+// An export that meets an in-flight context operation is neither refused nor prepared while the
+// operation runs; it prepares exactly once at the next operation-free boundary.
+void esave_export_waits_for_operation_free_boundary() {
+    Harness h(2, true);
+    acknowledged_turn(h, kSession, "saved");
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto held = h.submit(Script::HoldBinding, 1);
+    h.events().await([](const Events::State& state) { return state.binding_held; },
+                     "the held binding");
+    std::uint64_t before = 0, during = 0, after = 0;
+    h.configure([&](Program& p) { before = p.prepare_calls; });
+    auto saving = std::async(std::launch::async, [&] { return h.save("saved"); });
+    const bool waited = saving.wait_for(300ms) == std::future_status::timeout;
+    h.configure([&](Program& p) { during = p.prepare_calls; });
+    // Cancellation ends the binding's operation; its completion is the next boundary.
+    const auto binding = h.await(held, true);
+    const auto saved   = saving.get();
+    h.configure([&](Program& p) { after = p.prepare_calls; });
+    require_finished(binding, FinishReason::Cancelled, "held binding");
+    require(waited && during == before && saved.state == rt::DurableExportState::Exported &&
+                saved.reason == rt::DurableReason::None && after == before + 1,
+            "export during an in-flight context operation: waited=" + std::to_string(waited) +
+                " prepared while in flight=" + std::to_string(during - before) +
+                " result=" + esave_state(saved.state) + "/" + esave_reason(saved.reason) +
+                " prepares=" + std::to_string(after - before));
+    require_membership(h.observed_stats(), {}, "held export cleanup");
+}
+
+// A Final save issued while a context operation is in flight terminates at shutdown: the stop
+// drain ends the operation and the save is prepared at that boundary instead of being refused.
+void esave_final_save_waits_out_operation_at_stop() {
+    Harness h(2, true);
+    acknowledged_turn(h, kSession, "final");
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto held = h.submit(Script::HoldBinding, 1);
+    h.events().await([](const Events::State& state) { return state.binding_held; },
+                     "the held binding");
+    auto saving = std::async(std::launch::async, [&] {
+        return h.save("final", kSession, rt::DurableSaveIntent::Final);
+    });
+    const bool waited = saving.wait_for(300ms) == std::future_status::timeout;
+    h.core().request_stop();
+    const bool terminated = saving.wait_for(kEventTimeout) == std::future_status::ready;
+    require(terminated, "a Final save did not terminate while the stop drained a context operation");
+    const auto saved = saving.get();
+    (void)h.await(held);
+    require(waited && saved.state == rt::DurableExportState::Exported &&
+                saved.reason == rt::DurableReason::None,
+            "Final save during an in-flight context operation: waited=" + std::to_string(waited) +
+                " result=" + esave_state(saved.state) + "/" + esave_reason(saved.reason));
+}
+
+// Fork #89 with a busy cause. A pressure save is requested while a context operation is in
+// flight and other sessions keep completing turns (observed Engine progress). At F3 every
+// attempt is refused as a busy transaction until the retry budget is spent; the save then stays
+// Pending for good, the victim is never released and a fresh request behind it expires. Fixed:
+// the save waits for the operation, exports once at the next operation-free boundary, the victim
+// is released when a pause needs its Host room, and the fresh request is served.
+void esave_pressure_save_outlasts_busy_operation() {
+    Harness h(3, true);
+    acknowledged_turn(h, "victim", "saved");
+    auto handler = std::make_shared<ESaveCoordinator>(h);
+    h.core().set_pressure_checkpoint_handler(handler);
+    h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+    // On every exit: the stop drain ends any operation a held save waits for, then the
+    // coordinator stops before the Engine it saves through.
+    struct Stop {
+        Harness& h;
+        ESaveCoordinator& coordinator;
+        ~Stop() {
+            h.core().request_stop();
+            coordinator.drain();
+        }
+    } stop{h, *handler};
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto held = h.submit(Script::HoldBinding, 1);
+    h.events().await([](const Events::State& state) { return state.binding_held; },
+                     "the held binding");
+    std::uint64_t prepares_before = 0, prepares_during = 0;
+    h.configure([&](Program& p) { prepares_before = p.prepare_calls; });
+    // A reclaim that needs the named victim released asks for its save, as checkpoint_pressure does.
+    rt::PressureCheckpointVictim request{"victim", "saved"};
+    handler->save_before_eviction({&request, 1});
+    (void)handler->wait([](const auto& counts) { return counts.completed != 0; }, 500ms);
+    for (unsigned turn = 0; turn != ninfer::serve::kTransientCheckpointRetries + 2; ++turn) {
+        const auto seen = handler->counts().completed;
+        h.core().response_stored("other-session", "turn");
+        (void)handler->wait([&](const auto& counts) { return counts.completed > seen; }, 200ms);
+    }
+    const auto during = handler->counts();
+    h.configure([&](Program& p) { prepares_during = p.prepare_calls; });
+    const auto binding = h.await(held, true);
+    (void)handler->wait([](const auto& counts) {
+        return counts.completed != 0 && counts.last == rt::DurableReason::None;
+    }, 2s);
+    const auto saved = handler->counts();
+
+    // The paused victim's Host room requires releasing the named victim checkpoint (E89 pattern).
+    h.configure([](Program& p) {
+        p.host_capacity    = kCheckpointHostBytes;
+        p.pause_needs_host = true;
+    });
+    auto owner  = h.submit(Script::Pressure, 1);
+    auto paused = h.submit(Script::VictimResume, 1);
+    (void)handler->wait([&](const auto& counts) { return counts.requests > saved.requests; },
+                        kEventTimeout);
+    auto fresh = h.submit(Script::Complete, 1, false, Clock::now() + 2s);
+    h.release_stalls();
+    const auto arrival = h.await(fresh);
+    const bool served  = !arrival.error;
+    const auto owner_outcome  = h.await(owner, !served);
+    const auto paused_outcome = h.await(paused, !served);
+    bool victim_kept = true;
+    h.configure([&](Program& p) { victim_kept = p.valid_checkpoint({1}); });
+    const auto final_counts = handler->counts();
+    require_finished(binding, FinishReason::Cancelled, "held binding");
+    require(during.busy == 0 && during.completed == 0 && prepares_during == prepares_before &&
+                final_counts.calls == 1 && final_counts.busy == 0 &&
+                final_counts.last == rt::DurableReason::None && served && !victim_kept &&
+                esave_outcome(owner_outcome) == "OutputLimit" &&
+                esave_outcome(paused_outcome) == "OutputLimit",
+            "observed: busy refusals while in flight=" + std::to_string(during.busy) +
+                " save attempts=" + std::to_string(final_counts.calls) +
+                " last=" + esave_reason(final_counts.last) +
+                " prepared while in flight=" + std::to_string(prepares_during - prepares_before) +
+                " arrival=" + esave_outcome(arrival) + " victim kept=" + std::to_string(victim_kept) +
+                " owner=" + esave_outcome(owner_outcome) + " paused=" + esave_outcome(paused_outcome));
+}
+
+// A pressure owner that would start an operation at every reservation (it pauses a victim) and a
+// pressure save requested while an operation is in flight. While the save is held no reservation
+// starts an operation, no reservation asks for the victim before the save has prepared, and the
+// victim is released after at most one Pending answer (the race with the coordinator recording
+// the finished save).
+void esave_pressure_save_prepared_before_resident_reserves() {
+    Harness h(3, true);
+    acknowledged_turn(h, "victim", "saved");
+    auto handler = std::make_shared<ESaveCoordinator>(h);
+    h.core().set_pressure_checkpoint_handler(handler);
+    h.core().set_reclaimable_session_oracle(std::make_shared<VictimOracle>());
+    struct Stop {
+        Harness& h;
+        ESaveCoordinator& coordinator;
+        ~Stop() {
+            h.core().request_stop();
+            coordinator.drain();
+        }
+    } stop{h, *handler};
+    h.configure([](Program& p) {
+        p.busy_during_context = true;
+        p.host_capacity       = kCheckpointHostBytes;
+        p.pause_needs_host    = true;
+    });
+    // The older victim needs the named checkpoint's Host room to pause; the younger one's pause,
+    // started first, stays in flight until it is cancelled.
+    auto resumable = h.submit(Script::VictimResume, 1);
+    auto holding   = h.submit(Script::VictimHold, 1);
+    auto owner     = h.submit(Script::Pressure, 1);
+    h.events().await([](const Events::State& state) { return state.pause_started; },
+                     "the held victim pause");
+    std::uint64_t before = 0;
+    h.configure([&](Program& p) { before = p.prepare_calls; });
+    rt::PressureCheckpointVictim request{"victim", "saved"};
+    handler->save_before_eviction({&request, 1});
+    const bool held = !handler->wait([](const auto& counts) { return counts.completed != 0; }, 300ms);
+    handler->probe_requests([&h] {
+        std::uint64_t calls = 0;
+        h.configure([&](Program& p) { calls = p.prepare_calls; });
+        return calls;
+    });
+    const auto cancelled = h.await(holding, true);
+    (void)handler->wait([](const auto& counts) { return counts.settled_answers != 0; }, kEventTimeout);
+    h.events().await([](const Events::State& state) { return state.paused; },
+                     "the resumable victim's pause");
+    h.release_stalls();
+    const auto owner_outcome     = h.await(owner);
+    const auto resumable_outcome = h.await(resumable);
+    bool victim_kept = true;
+    h.configure([&](Program& p) { victim_kept = p.valid_checkpoint({1}); });
+    const auto counts = handler->counts();
+    const bool prepared_first =
+        std::all_of(counts.pending_probes.begin(), counts.pending_probes.end(),
+                    [&](std::uint64_t calls) { return calls == before + 1; });
+    require_finished(cancelled, FinishReason::Cancelled, "held victim pause");
+    require(held && counts.busy == 0 && counts.calls == 1 && counts.pending_answers <= 1 &&
+                prepared_first && counts.settled_answers != 0 && !victim_kept &&
+                esave_outcome(owner_outcome) == "OutputLimit" &&
+                esave_outcome(resumable_outcome) == "OutputLimit",
+            "observed: held=" + std::to_string(held) + " busy refusals=" + std::to_string(counts.busy) +
+                " attempts=" + std::to_string(counts.calls) +
+                " pending answers=" + std::to_string(counts.pending_answers) +
+                " prepared before every pending answer=" + std::to_string(prepared_first) +
+                " victim kept=" + std::to_string(victim_kept) + " owner=" + esave_outcome(owner_outcome) +
+                " resumable=" + esave_outcome(resumable_outcome));
+}
+
+// A restore that meets an in-flight context operation waits for the next operation-free boundary
+// and commits; the restored continuation is the session's live, exportable endpoint. Before, the
+// import was refused as a busy transaction once, with no retry: the service then publishes no
+// Responses lineage and the arriving continuation fails with response_not_found.
+void esave_restore_waits_for_operation_free_boundary() {
+    Harness h(2, true);
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto held = h.submit(Script::HoldBinding, 1);
+    h.events().await([](const Events::State& state) { return state.binding_held; },
+                     "the held binding");
+    struct Restored {
+        rt::DurablePrepareState prepared = rt::DurablePrepareState::PolicyDisabled;
+        rt::DurableReason reason         = rt::DurableReason::None;
+        rt::DurableImportState committed = rt::DurableImportState::PolicyDisabled;
+    };
+    auto restoring = std::async(std::launch::async, [&] {
+        auto restore = h.prepare_restore();
+        Restored result{restore.prepared.state, restore.prepared.reason};
+        if (restore.prepared.state == rt::DurablePrepareState::Prepared) {
+            result.committed = restore.prepared.commit().state;
+        }
+        return result;
+    });
+    const bool waited  = restoring.wait_for(300ms) == std::future_status::timeout;
+    const auto binding = h.await(held, true);
+    const auto result  = restoring.get();
+    const auto stats   = h.observed_stats();
+    require_finished(binding, FinishReason::Cancelled, "held binding");
+    require(waited && result.prepared == rt::DurablePrepareState::Prepared &&
+                result.committed == rt::DurableImportState::Imported,
+            "restore during an in-flight context operation: waited=" + std::to_string(waited) +
+                " reason=" + esave_reason(result.reason) +
+                " imported=" + std::to_string(result.committed == rt::DurableImportState::Imported));
+    require_durable(stats, {.catalog = 1, .host = 1}, "restore after the held import");
+    require(h.save("restored").state == rt::DurableExportState::Exported,
+            "the restored continuation is not the session's live endpoint");
+}
+
+// An Engine failure while a prepare is held releases it: the failed Engine runs it at once and its
+// caller returns io_unavailable instead of waiting for an operation nothing will complete.
+void esave_held_export_returns_after_engine_failure() {
+    StderrCapture capture;
+    Harness h(2, true);
+    acknowledged_turn(h, kSession, "saved");
+    h.configure([](Program& p) { p.busy_during_context = true; });
+    auto failing = h.submit(Script::DecodeFailure, 4);
+    h.events().await([](const Events::State& state) { return state.bound >= 2; },
+                     "the failing resident's binding");
+    auto held = h.submit(Script::HoldBinding, 1);
+    h.events().await([](const Events::State& state) { return state.binding_held; },
+                     "the held binding");
+    auto saving = std::async(std::launch::async, [&] { return h.save("saved"); });
+    const bool waited = saving.wait_for(300ms) == std::future_status::timeout;
+    h.release_stalls();
+    const bool returned = saving.wait_for(kEventTimeout) == std::future_status::ready;
+    require(returned, "a held export did not return after the Engine failed");
+    const auto saved = saving.get();
+    (void)h.await(failing);
+    (void)h.await(held);
+    require(waited && saved.reason == rt::DurableReason::IoUnavailable && !h.core().is_available(),
+            "held export at an Engine failure: waited=" + std::to_string(waited) +
+                " result=" + esave_state(saved.state) + "/" + esave_reason(saved.reason));
+}
+
+// ---- end ESAVE block ----
+
 } // namespace
 
 int main() {
@@ -2423,6 +2831,19 @@ int main() {
         // E89 block cases.
         Case{"e89_pending_capacity_save_defers_fresh_request", e89_pending_capacity_save_defers_fresh_request},
         Case{"e89_export_pins_retire_when_stopped_mid_write", e89_export_pins_retire_when_stopped_mid_write},
+        // ESAVE block cases.
+        Case{"esave_export_waits_for_operation_free_boundary",
+             esave_export_waits_for_operation_free_boundary},
+        Case{"esave_final_save_waits_out_operation_at_stop",
+             esave_final_save_waits_out_operation_at_stop},
+        Case{"esave_pressure_save_outlasts_busy_operation",
+             esave_pressure_save_outlasts_busy_operation},
+        Case{"esave_pressure_save_prepared_before_resident_reserves",
+             esave_pressure_save_prepared_before_resident_reserves},
+        Case{"esave_restore_waits_for_operation_free_boundary",
+             esave_restore_waits_for_operation_free_boundary},
+        Case{"esave_held_export_returns_after_engine_failure",
+             esave_held_export_returns_after_engine_failure},
     };
     int failures = 0;
     for (const auto& test : cases) {

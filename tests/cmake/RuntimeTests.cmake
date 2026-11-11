@@ -30,7 +30,7 @@ ninfer_add_test(ninfer_engine_checkpoint_adapter_test
 ninfer_add_test(ninfer_engine_core_test
   HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
-  LIBRARIES ninfer_runtime_support ninfer_core Threads::Threads)
+  LIBRARIES ninfer_runtime_support ninfer_core ninfer_session_checkpoint_store Threads::Threads)
 # DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA
 # runtime so a GPU-less host runs the production EngineCore without CUDA work.
 ninfer_cuda_test_interposition(ninfer_engine_core_test ninfer_runtime_support)

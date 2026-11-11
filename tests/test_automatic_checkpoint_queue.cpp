@@ -3,6 +3,7 @@
 #include "runtime/engine/checkpoint_control.h"
 #include "checkpoint_write_fault.h"
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -133,9 +135,9 @@ struct ProgressFixture {
     Reason refusal = Reason::TransactionBusy;
     bool publishing = false;
 
-    bool wait(const std::function<bool()>& predicate) {
+    bool wait(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = 2s) {
         std::unique_lock lock(mutex);
-        return cv.wait_for(lock, 2s, predicate);
+        return cv.wait_for(lock, timeout, predicate);
     }
     CheckpointSaveProgress observe() {
         std::lock_guard lock(mutex);
@@ -197,37 +199,146 @@ int automatic_retry_requires_matching_progress() {
     return failures;
 }
 
+// Capacity, I/O and the stale/tag races keep the bounded retry budget: once it is spent a
+// pressure save stays Pending with its reason and never permits destructive release.
 int automatic_retry_budget_and_terminal_refusal() {
+    int failures = 0;
+    for (const auto reason : {Reason::Capacity, Reason::IoUnavailable, Reason::StaleRevision,
+                              Reason::StalePublication, Reason::TagMismatch}) {
+        ProgressFixture f;
+        f.refusal = reason;
+        AutomaticCheckpointCoordinator coordinator(
+            [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+            [&] { return f.observe(); }, [&] { f.notify(); });
+        Victim victim{std::string(64, 'c'), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        for (unsigned count = 1; count <= kTransientCheckpointRetries + 1; ++count) {
+            failures += check(f.wait([&] { return f.completed == count; }), "bounded retry did not finish");
+            std::lock_guard lock(f.mutex);
+            if (reason == Reason::IoUnavailable) { ++f.progress.storage; } else { ++f.progress.engine; }
+        }
+        failures += check(!f.wait([&] { return f.completed > kTransientCheckpointRetries + 1; }, 300ms),
+                          "an exhausted retryable pressure save retried without a new turn");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending && victim.reason == reason,
+                          "retry exhaustion permitted destructive release");
+        // A new completed turn resets the bounded attempt state.
+        { std::lock_guard lock(f.mutex); f.refusal = Reason::UnsupportedCodec; }
+        failures += check(coordinator.enqueue(victim.session_sha256, true) !=
+                              AutomaticCheckpointEnqueueResult::Dropped,
+                          "short completed turn did not rearm outstanding pressure work");
+        failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 2; }),
+                          "new completed turn did not restart checkpoint work");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 3; }),
+                          "terminal pressure refusal never completed");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::UnsupportedCodec,
+                          "reported nonretryable pressure refusal did not settle with its reason");
+        coordinator.drain();
+    }
+    return failures;
+}
+
+// A busy transaction is not an inability to save: a pressure save refused that way waits for each
+// observed progress change without spending the retry budget, so more busy refusals than the
+// budget allows still end in a settled save, and nothing retries without progress.
+int pressure_transaction_busy_waits_without_budget() {
     ProgressFixture f;
     AutomaticCheckpointCoordinator coordinator(
         [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
         [&] { return f.observe(); }, [&] { f.notify(); });
-    Victim victim{std::string(64, 'c'), "resp_retry"};
+    Victim victim{std::string(64, 'f'), "resp_retry"};
     coordinator.save_before_eviction(std::span(&victim, 1));
+    constexpr unsigned refusals = 2 * kTransientCheckpointRetries + 2;
     int failures = 0;
+    unsigned reached = 0;
+    for (unsigned count = 1; count <= refusals; ++count) {
+        if (!f.wait([&] { return f.completed == count; })) { break; }
+        reached = count;
+        failures += check(!f.wait([&] { return f.calls > count; }, 50ms),
+                          "a busy pressure save retried without observed progress");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::TransactionBusy,
+                          "a busy pressure save was not Pending with its reason");
+        std::lock_guard lock(f.mutex);
+        if (count == refusals) { f.refusal = Reason::None; }
+        // Engine and publication progress each end a busy wait.
+        if (count % 2) { ++f.progress.engine; } else { ++f.progress.publication; }
+    }
+    failures += check(reached == refusals,
+                      ("busy pressure save stopped retrying after " + std::to_string(reached) +
+                       " refusals").c_str());
+    failures += check(f.wait([&] { return f.completed == refusals + 1; }),
+                      "the save after the busy refusals never ran");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::None,
+                      "a pressure save refused busy past the retry budget did not settle once saved");
+    coordinator.drain();
+    return failures;
+}
+
+// Automatic saves keep the bounded budget for busy refusals: a dropped automatic save holds no
+// latch, and the session's next completed turn re-arms it.
+int automatic_transaction_busy_keeps_budget() {
+    ProgressFixture f;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); });
+    int failures = check(coordinator.enqueue(std::string(64, 'g')) == AutomaticCheckpointEnqueueResult::Enqueued,
+                         "automatic save was not enqueued");
     for (unsigned count = 1; count <= kTransientCheckpointRetries + 1; ++count) {
-        failures += check(f.wait([&] { return f.completed == count; }), "bounded retry did not finish");
+        failures += check(f.wait([&] { return f.completed == count; }), "bounded automatic retry did not finish");
         std::lock_guard lock(f.mutex);
         ++f.progress.engine;
     }
-    coordinator.save_before_eviction(std::span(&victim, 1));
-    failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::TransactionBusy,
-                      "retry exhaustion permitted destructive release");
-    // A new completed turn resets the bounded attempt state.
-    { std::lock_guard lock(f.mutex); f.refusal = Reason::UnsupportedCodec; }
-    failures += check(coordinator.enqueue(victim.session_sha256, true) !=
-                          AutomaticCheckpointEnqueueResult::Dropped,
-                      "short completed turn did not rearm outstanding pressure work");
-    failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 2; }),
-                      "new completed turn did not restart checkpoint work");
-    coordinator.save_before_eviction(std::span(&victim, 1));
-    failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 3; }),
-                      "terminal pressure refusal never completed");
-    coordinator.save_before_eviction(std::span(&victim, 1));
-    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::UnsupportedCodec,
-                      "reported nonretryable pressure refusal did not settle with its reason");
+    failures += check(!f.wait([&] { return f.completed > kTransientCheckpointRetries + 1; }, 300ms),
+                      "an automatic busy save retried past its budget");
     coordinator.drain();
     return failures;
+}
+
+// Engine progress can move every turn while a busy cause lasts (the session's own request, the
+// store's single save slot). A busy pressure save keeps retrying without a budget, but no faster
+// than the policy's busy spacing (100 ms, kBusyPressureRetrySpacing).
+int pressure_busy_retries_are_spaced() {
+    ProgressFixture f;
+    std::vector<std::chrono::steady_clock::time_point> attempts;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) {
+            {
+                std::lock_guard lock(f.mutex);
+                attempts.push_back(std::chrono::steady_clock::now());
+            }
+            return f.save(tag);
+        },
+        [&] { return f.observe(); }, [&] { f.notify(); });
+    std::atomic<bool> ticking{true};
+    std::thread clock([&] {
+        while (ticking.load()) {
+            {
+                std::lock_guard lock(f.mutex);
+                ++f.progress.engine;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+    });
+    Victim victim{std::string(64, 'h'), "resp_retry"};
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    std::this_thread::sleep_for(1050ms);
+    ticking.store(false);
+    clock.join();
+    coordinator.drain();
+    std::chrono::nanoseconds spacing = std::chrono::hours(1);
+    for (std::size_t index = 1; index < attempts.size(); ++index) {
+        spacing = std::min<std::chrono::nanoseconds>(spacing, attempts[index] - attempts[index - 1]);
+    }
+    return check(attempts.size() >= 5 && attempts.size() <= 12 &&
+                     spacing >= 90ms,
+                 ("busy pressure retries under per-millisecond progress: attempts=" +
+                  std::to_string(attempts.size()) + " minimum spacing ms=" +
+                  std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(spacing).count()))
+                     .c_str());
 }
 
 int partially_reclaiming_refusal_does_not_self_wake() {
@@ -507,6 +618,105 @@ int durable_delete_retains_disk_only_records() {
         "last RAM record deletion failed to retain disk-only replay survivors");
     return failures;
 }
+
+// The store's single save slot. A pressure save refused as busy because a competing save holds
+// the slot through more than six progress ticks keeps waiting, and settles once that save ends.
+int pressure_save_waits_out_competing_store_save() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("ninfer-busy-slot-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } cleanup{root};
+    nlohmann::json manifest;
+    std::ifstream(std::filesystem::path(NINFER_SOURCE_DIR) / "tests/fixtures/durable/manifest-text.json")
+        >> manifest;
+    const auto fingerprint = manifest.at("runtime_fingerprint");
+    SessionCheckpointStoreOptions options{.root = root, .origin_mac_key = std::string(32, 'k'),
+                                          .require_origin_auth = true,
+                                          .read_queue = std::make_shared<FileReadQueue>()};
+    SessionCheckpointStore disk(options);
+    OpenAIResponsesStore responses(8, 1ULL << 20);
+    const std::string competitor(64, 'a'), victim(64, 'b');
+    responses.put(record("resp_competitor", competitor, 1));
+    responses.put(record("resp_victim", victim, 2));
+    const auto exporter = [](ninfer::runtime::ContinuationCheckpointWriter& writer) {
+        const std::array<std::byte, 1> payload{std::byte{7}};
+        const bool written = writer.write_file("engine/index.cbor", 0, 0, {}, 1) &&
+            writer.write_file("engine/state/0.bin", 0, payload.size(), payload, 1);
+        return ninfer::runtime::DurableExportResult{
+            .state = written ? ninfer::runtime::DurableExportState::Exported
+                             : ninfer::runtime::DurableExportState::Refused,
+            .stats = {.frontier_tokens = 1, .restored_tokens = 1,
+                      .payload_bytes = 1, .points = 1, .states = 1}};
+    };
+    const auto publish = [](ninfer::runtime::DurableSessionEpoch, const std::function<bool()>& commit) {
+        return ninfer::runtime::DurablePublicationResult{
+            .state = commit() ? ninfer::runtime::DurableExportState::Exported
+                              : ninfer::runtime::DurableExportState::Refused};
+    };
+    // The competing save holds the slot inside its exporter until released.
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    const std::shared_future<void> released = release.get_future().share();
+    auto competing = std::async(std::launch::async, [&] {
+        return disk.save(*responses.snapshot_session(competitor), fingerprint,
+            [&](ninfer::runtime::ContinuationCheckpointWriter& writer) {
+                entered.set_value();
+                released.wait();
+                return exporter(writer);
+            }, publish);
+    });
+    struct Release {
+        std::promise<void>& promise;
+        bool done = false;
+        void now() { if (!std::exchange(done, true)) { promise.set_value(); } }
+        ~Release() { now(); }
+    } guard{release};
+    entered_future.wait();
+    ProgressFixture f;
+    unsigned busy = 0;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            ninfer::runtime::SessionCheckpointSkipDetail skip;
+            const auto saved = disk.save(*responses.snapshot_session(session), fingerprint, exporter,
+                                         publish, &skip);
+            std::lock_guard lock(f.mutex);
+            ++f.calls;
+            busy += !saved && skip.durable_reason == Reason::TransactionBusy ? 1U : 0U;
+            return AutomaticCheckpointResult{std::string(*tag), saved ? Reason::None : skip.durable_reason};
+        },
+        [&] { return f.observe(); }, [&] { f.notify(); });
+    Victim pressure{victim, "resp_victim"};
+    coordinator.save_before_eviction(std::span(&pressure, 1));
+    constexpr unsigned refusals = kTransientCheckpointRetries + 4;
+    unsigned reached = 0;
+    for (unsigned count = 1; count <= refusals; ++count) {
+        if (!f.wait([&] { return f.completed == count; })) { break; }
+        reached = count;
+        if (count != refusals) {
+            std::lock_guard lock(f.mutex);
+            ++f.progress.engine;
+        }
+    }
+    guard.now();
+    int failures = check(competing.get().has_value(), "competing save did not complete");
+    { std::lock_guard lock(f.mutex); ++f.progress.engine; }
+    failures += check(f.wait([&] { return f.completed == refusals + 1; }),
+                      "the pressure save did not run after the competing save ended");
+    coordinator.save_before_eviction(std::span(&pressure, 1));
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(reached == refusals && busy == refusals && f.calls == refusals + 1 &&
+                              pressure.outcome == Outcome::Settled && pressure.reason == Reason::None,
+                          ("pressure save behind the store's save slot: busy refusals=" +
+                           std::to_string(busy) + " attempts=" + std::to_string(f.calls) +
+                           " settled=" + std::to_string(pressure.outcome == Outcome::Settled))
+                              .c_str());
+    }
+    coordinator.drain();
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -514,10 +724,14 @@ int main() {
     failures += pressure_callback_does_not_wait_for_restore_commit();
     failures += automatic_retry_requires_matching_progress();
     failures += automatic_retry_budget_and_terminal_refusal();
+    failures += pressure_transaction_busy_waits_without_budget();
+    failures += automatic_transaction_busy_keeps_budget();
+    failures += pressure_busy_retries_are_spaced();
     failures += partially_reclaiming_refusal_does_not_self_wake();
     failures += publication_abandonment_completes_pressure();
     failures += durable_record_delete_preserves_survivors();
     failures += durable_delete_retains_disk_only_records();
+    failures += pressure_save_waits_out_competing_store_save();
     if (!failures) { std::cout << "automatic checkpoint remediation tests passed\n"; }
     return failures ? 1 : 0;
 }

@@ -115,11 +115,21 @@ struct ExportProgram {
     bool off_worker_retirement = false;
     unsigned staged_prepares = 0;
     static constexpr unsigned device_capacity = 3;
+    // A native context operation in flight: preparation refuses as a busy transaction, as
+    // checkpoint_api.cpp does for exports and imports alike.
+    bool operation_in_flight = false;
+    unsigned export_prepares = 0;
+    unsigned import_prepares = 0;
+    bool has_context_operation() const { return operation_in_flight; }
 
     struct Reservation {
         std::size_t count;
-        DurablePrepareState state() const { return DurablePrepareState::Prepared; }
-        DurableReason reason() const { return DurableReason::None; }
+        DurableReason refusal = DurableReason::None;
+        DurablePrepareState state() const {
+            return refusal == DurableReason::None ? DurablePrepareState::Prepared
+                                                  : DurablePrepareState::CapacityRefused;
+        }
+        DurableReason reason() const { return refusal; }
         DurableCheckpointStats stats() const { return checkpoint_stats(); }
     };
 
@@ -132,9 +142,11 @@ struct ExportProgram {
         bool pinned = false;
         std::size_t staged_states = 0;
         Lease(ExportProgram& program, std::span<const int> points, bool device_staging = false) {
+            ++program.export_prepares;
             // A Device-staged attempt reads Device-only images from Device: no Host shortage.
             host_refusal = program.host_refusal && !device_staging;
-            busy = program.serialize_exports && program.export_acquisitions != program.export_retirements;
+            busy = program.operation_in_flight ||
+                   (program.serialize_exports && program.export_acquisitions != program.export_retirements);
             if (busy) { return; }
             if (program.refuse_export) { return; }
             if (host_refusal) { return; }
@@ -197,7 +209,8 @@ struct ExportProgram {
     Reservation prepare_checkpoint_import(const DurableCheckpointSet& set,
                                             const ContinuationCheckpointReader&,
                                             const DurableLimits&) {
-        return {set.points.size()};
+        ++import_prepares;
+        return {set.points.size(), operation_in_flight ? DurableReason::TransactionBusy : DurableReason::None};
     }
     // This fixture never reclaims a disk victim during Host-only import.
     struct Validation {
@@ -1002,10 +1015,11 @@ void staged_busy_export_retries_after_first_retires() {
     coordinator.drain();
 }
 
-// E89 (plan correction 3), characterization of a same-class latch: a pressure save refused with
-// TransactionBusy spends the transient retry budget; once it is spent the victim stays Pending,
-// even after the busy cause clears, until its session completes another turn. Reported, unfixed.
-void transaction_busy_budget_leaves_pressure_save_pending() {
+// A pressure save refused as a busy transaction (here another export holds the native
+// transaction) waits for each observed progress change without spending the retry budget: it is
+// retried past the budget, and once the busy cause clears it saves and settles. (Replaces E89's
+// characterization of the busy budget latch; Capacity keeps its budget.)
+void transaction_busy_pressure_save_settles_past_budget() {
     ExportProgram program;
     AdapterFixture<ExportContract> core(program);
     core.restore("first");
@@ -1040,23 +1054,120 @@ void transaction_busy_budget_leaves_pressure_save_pending() {
         });
     PressureCheckpointVictim victim{"second", "turn"};
     coordinator.save_before_eviction({&victim, 1});
-    constexpr unsigned attempts = ninfer::serve::kTransientCheckpointRetries + 1;
-    for (unsigned attempt = 1; attempt <= attempts; ++attempt) {
-        require(wait([&] { return completed == attempt; }, 2s), "TransactionBusy pressure save attempt did not run");
-        core.admission_progress();
+    constexpr unsigned refusals = 2 * ninfer::serve::kTransientCheckpointRetries;
+    unsigned reached = 0;
+    for (unsigned attempt = 1; attempt <= refusals; ++attempt) {
+        if (!wait([&] { return completed == attempt; }, 2s)) { break; }
+        reached = attempt;
+        // Observed progress ends each busy wait; the last refusal waits for the export's retirement.
+        if (attempt != refusals) { core.admission_progress(); }
     }
     writer.release();
     require(saving.get().state == DurableExportState::Exported, "busy-causing export did not finish");
-    require(!wait([&] { return completed > attempts; }, 300ms),
-            "an exhausted TransactionBusy pressure save retried without a new turn");
+    const bool retried = wait([&] { return completed == refusals + 1; }, 2s);
     coordinator.save_before_eviction({&victim, 1});
     {
         std::lock_guard lock(mutex);
-        require(calls == attempts && busy == attempts && victim.outcome == PressureCheckpointOutcome::Pending &&
-                    victim.reason == DurableReason::TransactionBusy,
-                "exhausted TransactionBusy pressure save did not stay Pending after its cause cleared");
+        require(reached == refusals && retried && calls == refusals + 1 && busy == refusals &&
+                    victim.outcome == PressureCheckpointOutcome::Settled &&
+                    victim.reason == DurableReason::None,
+                ("busy pressure save: busy refusals=" + std::to_string(busy) + " attempts=" +
+                 std::to_string(calls) + " settled=" +
+                 std::to_string(victim.outcome == PressureCheckpointOutcome::Settled))
+                    .c_str());
     }
     coordinator.drain();
+}
+
+// An export command that meets an in-flight context operation is held: neither refused nor
+// prepared until the operation completes, then prepared once at that boundary.
+void export_waits_for_operation_free_boundary() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.on_worker([&] { program.operation_in_flight = true; });
+    NullWriter writer;
+    auto saving = std::async(std::launch::async, [&] { return core.save(writer); });
+    const bool held = saving.wait_for(300ms) == std::future_status::timeout;
+    const auto during = core.on_worker([&] { return program.export_prepares; });
+    core.on_worker([&] { program.operation_in_flight = false; });
+    const auto result = saving.get();
+    const auto prepares = core.on_worker([&] { return program.export_prepares; });
+    require(held && during == 0 && result.state == DurableExportState::Exported &&
+                result.reason == DurableReason::None && prepares == 1 && core.exports_in_flight() == 0,
+            ("export during an in-flight operation: held=" + std::to_string(held) + " reason=" +
+             std::string(durable_reason_name(result.reason)) + " prepares=" + std::to_string(prepares))
+                .c_str());
+}
+
+// A restore-on-demand import that meets an in-flight context operation waits for the next
+// operation-free boundary instead of being refused as a busy transaction (a refused restore
+// leaves the continuation's parent response missing).
+void import_waits_for_operation_free_boundary() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.on_worker([&] { program.operation_in_flight = true; });
+    auto restoring = std::async(std::launch::async, [&] {
+        return core.restore_captured("first", core.lookup("first"));
+    });
+    const bool held = restoring.wait_for(300ms) == std::future_status::timeout;
+    const auto during = core.on_worker([&] { return program.import_prepares; });
+    core.on_worker([&] { program.operation_in_flight = false; });
+    const auto reason = restoring.get();
+    const auto prepares = core.on_worker([&] { return program.import_prepares; });
+    require(held && during == 0 && reason == DurableReason::None && prepares == 1,
+            ("import during an in-flight operation: held=" + std::to_string(held) + " reason=" +
+             std::string(durable_reason_name(reason)) + " prepares=" + std::to_string(prepares))
+                .c_str());
+}
+
+// A finished export's retirement is never held: it runs while another export waits for an
+// in-flight context operation, and the waiting export prepares only once the operation ends.
+void retirement_runs_while_an_export_is_held() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.restore("second");
+    BlockingWriter writer;
+    auto first = std::async(std::launch::async, [&] { return core.save("first", writer); });
+    ReleaseWriter release{writer};
+    writer.wait_until_blocked();
+    core.on_worker([&] { program.operation_in_flight = true; });
+    NullWriter output;
+    auto second = std::async(std::launch::async, [&] { return core.save("second", output); });
+    const bool held = second.wait_for(300ms) == std::future_status::timeout;
+    writer.release();
+    const auto saved = first.get();
+    const auto in_flight = core.exports_in_flight();
+    const bool still_held = second.wait_for(100ms) == std::future_status::timeout;
+    core.on_worker([&] { program.operation_in_flight = false; });
+    const auto later = second.get();
+    require(held && saved.state == DurableExportState::Exported && in_flight == 0 && still_held &&
+                later.state == DurableExportState::Exported,
+            ("retirement beside a held export: held=" + std::to_string(held) + " in flight after retirement=" +
+             std::to_string(in_flight) + " still held=" + std::to_string(still_held))
+                .c_str());
+}
+
+// An export made inline on the worker (a synchronous pressure callback does this) is never held:
+// it would wait on its own thread. It keeps the native busy refusal and returns at once.
+void inline_worker_export_is_never_held() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.on_worker([&] { program.operation_in_flight = true; });
+    auto inline_save = std::async(std::launch::async, [&] {
+        return core.on_worker([&] {
+            NullWriter writer;
+            return core.save(writer);
+        });
+    });
+    const bool returned = inline_save.wait_for(2s) == std::future_status::ready;
+    require(returned, "an inline worker export was held behind an operation on its own thread");
+    const auto result = inline_save.get();
+    require(result.state != DurableExportState::Exported && result.reason == DurableReason::TransactionBusy &&
+                core.exports_in_flight() == 0,
+            "an inline worker export during an operation did not keep the native busy refusal");
 }
 }
 
@@ -1086,7 +1197,11 @@ int main() {
         {"e89_host_route_first_never_stages", host_route_first_never_stages},
         {"e89_staged_writer_failure_retires_pins", staged_pins_retire_on_writer_failure},
         {"e89_staged_busy_retries_after_retirement", staged_busy_export_retries_after_first_retires},
-        {"e89_transaction_busy_budget_latch", transaction_busy_budget_leaves_pressure_save_pending},
+        {"esave_transaction_busy_pressure_save_settles", transaction_busy_pressure_save_settles_past_budget},
+        {"esave_export_waits_for_operation_free_boundary", export_waits_for_operation_free_boundary},
+        {"esave_import_waits_for_operation_free_boundary", import_waits_for_operation_free_boundary},
+        {"esave_retirement_runs_while_an_export_is_held", retirement_runs_while_an_export_is_held},
+        {"esave_inline_worker_export_is_never_held", inline_worker_export_is_never_held},
     };
     unsigned failures = 0;
     for (const auto& [name, run] : cases) {
