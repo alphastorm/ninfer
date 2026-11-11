@@ -1097,6 +1097,7 @@ curl http://127.0.0.1:8080/metrics
 | `ninfer_prefill_tokens_total`, `ninfer_replayed_tokens_total` | Actual initial prefill and separate recovery recomputation |
 | `ninfer_paced_prefill_steps_total`, `ninfer_paced_prefill_deferred_tokens_total` | Steps executed with a shortened budget cap, and nominal tokens left for later by those steps (including earlier capture boundaries) |
 | `ninfer_prefill_cadence_deferrals_total`, `ninfer_prefill_budget_overruns_total` | Ready prefill units deferred for decode cadence; text steps beside a generating request exceeding the enabled budget |
+| `ninfer_fresh_admission_context_refusals_total`, `ninfer_fresh_admission_priority_{attempts,admissions}_total` | Fresh admission scans refused while a context operation was in flight; bounded retries of the oldest waiting request at context-operation boundaries, and those that started its binding |
 | `ninfer_generation_tokens_total`, `ninfer_decode_tokens_total` | All committed outputs, or decode/control outputs excluding the first token; include thinking and injected control tokens |
 | `ninfer_spec_decode_{rounds,draft_tokens,accepted_tokens,fallback_steps}_total` | Live native speculative work, including MTP and DFlash/DFlash2 |
 | `ninfer_{preemptions,snapshot_restores,replay_restores}_total` | Pressure pauses and recovery routes |

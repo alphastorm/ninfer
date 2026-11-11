@@ -192,6 +192,12 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
             "Ready prefill units deferred for configured decode rounds.");
     COUNTER(prefill_budget_overruns, "prefill_budget_overruns_total",
             "Text-prefill steps beside a generating request exceeding the enabled budget.");
+    COUNTER(fresh_admission_context_refusals, "fresh_admission_context_refusals_total",
+            "Fresh admission scans refused while a context operation was in flight.");
+    COUNTER(fresh_admission_priority_attempts, "fresh_admission_priority_attempts_total",
+            "Bounded fresh admission attempts at context-operation boundaries.");
+    COUNTER(fresh_admission_priority_admissions, "fresh_admission_priority_admissions_total",
+            "Boundary admission attempts that started a fresh binding.");
     COUNTER(preemptions, "preemptions_total", "Resource-pressure pauses.");
     COUNTER(snapshot_restores, "snapshot_restores_total",
             "Restores from complete paused snapshots.");

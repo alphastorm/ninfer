@@ -630,6 +630,18 @@ private:
         typename ResourceManagement::ReclaimCursor reclaim;
     };
 
+    // One waiting fresh request whose scan a context operation refused may be retried at safe
+    // boundaries: no context operation in flight and no resident reservation since the last
+    // completion. Each attempt is one ordinary try_admit_one under every admission guard.
+    struct FreshPriority {
+        std::uint64_t request  = 0;
+        std::uint32_t attempts = 0;
+        bool armed             = false;
+    };
+
+    // Priority attempts per request lifetime; exhausting them restores the ordinary wait.
+    static constexpr std::uint32_t kFreshPriorityAttempts = 4;
+
     struct CaptureDecision {
         SequenceHandle sequence;
         std::uint32_t frontier = 0;
@@ -2093,7 +2105,12 @@ private:
                                                       ? std::span<const Checkpoint>(&*protected_source, 1)
                                                       : std::span<const Checkpoint>{};
                     if (reclaim(shortage, restoring, excluded, &decision.reclaim)) {
-                        if (instance_.program->has_context_operation()) { return true; }
+                        if (instance_.program->has_context_operation()) {
+                            // What this reclaim frees must reach this request before the
+                            // resident's next reservation can take it.
+                            if (!restoring) { arm_fresh_priority(request->id); }
+                            return true;
+                        }
                         continue;
                     }
                     if (checkpoints_.pending()) {
@@ -2224,6 +2241,98 @@ private:
         request_admission_check();
         finalize_error(request);
         publish_and_deliver(request, std::move(error));
+    }
+
+    [[nodiscard]] bool recovery_running() const noexcept {
+        return std::any_of(slots_.begin(), slots_.end(),
+                           [](const auto& r) { return r && r->recovery_pending; }) ||
+               (materializing_ && materializing_->resumed);
+    }
+
+    // Admission, cancellation, expiry and isolated refusal all remove a request from this queue.
+    [[nodiscard]] bool fresh_request_waiting(std::uint64_t request) const {
+        std::lock_guard lock(queue_mutex_);
+        return std::any_of(pending_.begin(), pending_.end(), [request](const auto& waiting) {
+            return waiting->id == request && !waiting->cancelled.load(std::memory_order_acquire);
+        });
+    }
+
+    // One request holds the slot while it waits; its attempts persist across re-arming.
+    void arm_fresh_priority(std::uint64_t request) {
+        if (scheduler_.progress_owner()) { return; }
+        if (fresh_priority_ && fresh_priority_->request != request &&
+            fresh_request_waiting(fresh_priority_->request)) {
+            return;
+        }
+        if (!fresh_priority_ || fresh_priority_->request != request) {
+            fresh_priority_ = FreshPriority{.request = request};
+        }
+        fresh_priority_->armed = fresh_priority_->attempts < kFreshPriorityAttempts;
+    }
+
+    // The ordinary scan returned at try_admit_one's context-operation gate. When this turn's
+    // resident reservation started that operation, the oldest waiting fresh request is armed.
+    void fresh_scan_refused(bool resident_started_context) {
+        std::optional<std::uint64_t> waiting;
+        if (admission_decision_ && !admission_decision_->restoring) {
+            waiting = admission_decision_->request->id;
+        } else {
+            std::lock_guard lock(queue_mutex_);
+            const auto head = std::find_if(pending_.begin(), pending_.end(), [](const auto& r) {
+                return !r->cancelled.load(std::memory_order_acquire);
+            });
+            if (head != pending_.end()) { waiting = (*head)->id; }
+        }
+        if (!waiting) { return; }
+        ++cumulative_stats_.fresh_admission_context_refusals;
+        if (resident_started_context) { arm_fresh_priority(*waiting); }
+    }
+
+    // A taken operation boundary (a Pending pressure save or a durable prepare held for the next
+    // operation-free boundary) or a prepared export lease defers fresh admission without
+    // spending the priority bound: each can outlast every boundary of a staged write or of the
+    // operation a held prepare waits for. A priority attempt never starts an operation first.
+    [[nodiscard]] bool checkpoint_deferral() const noexcept {
+        return operation_boundary_taken() || checkpoint_exports_in_flight_ != 0;
+    }
+
+    // Runs at safe boundaries, before the next resident reservation. Every completed context
+    // operation is a new boundary, so capacity the arrival's own reclaim freed reaches it first.
+    // While any admission guard holds the attempt is skipped, not counted.
+    bool service_fresh_priority(HostPhaseMeasurement& boundary, bool turn_began_pending) {
+        bool executed = false;
+        while (fresh_priority_ && fresh_priority_->armed && !materializing_ &&
+               !instance_.program->has_context_operation()) {
+            if (!fresh_request_waiting(fresh_priority_->request)) {
+                fresh_priority_.reset();
+                break;
+            }
+            if (scheduler_.progress_owner()) {
+                fresh_priority_->armed = false;
+                break;
+            }
+            if (turn_began_pending || checkpoint_deferral() || !paused_.empty() ||
+                recovery_running() || !free_lane() ||
+                (admission_decision_ && admission_decision_->restoring)) {
+                break;
+            }
+            if (!admission_decision_ && consume_admission_check()) {
+                ++admission_generation_;
+                scheduler_.begin_admission_scan();
+            }
+            if (!admission_decision_ && !scheduler_.admission_scan_pending()) { break; }
+            const bool started = try_admit_one(false);
+            // A deferral that stopped the scan from inside spends none of the bound.
+            if (started || !checkpoint_deferral()) {
+                fresh_priority_->armed = ++fresh_priority_->attempts < kFreshPriorityAttempts;
+                ++cumulative_stats_.fresh_admission_priority_attempts;
+            }
+            // Nothing was materializing at entry, so a binding now in flight is this attempt's.
+            if (materializing_) { ++cumulative_stats_.fresh_admission_priority_admissions; }
+            if (!progress_context_operation(boundary)) { break; }
+            executed = true;
+        }
+        return executed;
     }
 
     void observe_scheduling(const std::shared_ptr<Request>& request,
@@ -2609,6 +2718,7 @@ private:
         instance_.program->fail_all_cleanup();
         materializing_.reset();
         admission_decision_.reset();
+        fresh_priority_.reset();
         for (auto& decision : capture_decisions_) { decision.reset(); }
         context_owner_.reset();
         std::vector<std::shared_ptr<Request>> paused;
@@ -2677,6 +2787,9 @@ private:
             std::unique_lock execution_lock(execution_mutex_);
             checkpoint_execution_lock_ = &execution_lock;
             checkpoints_.retire_release_pins();
+            // The resident reservation that retries a pressure save left Pending last turn goes
+            // before this turn's first priority attempt, even when progress clears the latch.
+            const bool save_pending_at_turn = checkpoints_.pending();
             checkpoints_.begin_turn();
             run_checkpoint_commands();
             if (failed_) {
@@ -2750,10 +2863,7 @@ private:
                     request_admission_check();
                     retire_detached_cancelled(request);
                 }
-                const bool recovering =
-                    std::any_of(slots_.begin(), slots_.end(),
-                                [](const auto& r) { return r && r->recovery_pending; }) ||
-                    (materializing_ && materializing_->resumed);
+                const bool recovering = recovery_running();
                 if (!paused_.empty() && !scheduler_.progress_owner()) {
                     scheduler_.require_progress(paused_.front()->id);
                 }
@@ -2791,7 +2901,12 @@ private:
                     (void)try_admit_one(true);
                     executed |= progress_context_operation(boundary);
                 }
+                // A context operation completed since the last resident reservation (fork #102).
+                executed |= service_fresh_priority(boundary, save_pending_at_turn);
+                const bool context_before_reservation = instance_.program->has_context_operation();
                 reserve_resident_units();
+                const bool resident_started_context =
+                    !context_before_reservation && instance_.program->has_context_operation();
                 bool refresh_resident_units = false;
                 // Already-admitted pressure turns precede fresh arrivals; their original
                 // queue deadline still expires at the start of every cycle.
@@ -2802,12 +2917,15 @@ private:
                         scheduler_.begin_admission_scan();
                     }
                     if (admission_decision_ || scheduler_.admission_scan_pending()) {
+                        const bool context_refused = instance_.program->has_context_operation();
                         (void)try_admit_one(false);
                         refresh_resident_units = true;
+                        if (context_refused) { fresh_scan_refused(resident_started_context); }
                     }
                 }
                 if (instance_.program->has_context_operation()) {
                     executed |= progress_context_operation(boundary);
+                    executed |= service_fresh_priority(boundary, false);
                     refresh_resident_units = true;
                 }
                 if (refresh_resident_units) {
@@ -2866,6 +2984,7 @@ private:
                     set_host_work_class(HostWorkClass::Control);
                     auto progress_boundary = begin_host_phase();
                     executed |= progress_context_operation(progress_boundary);
+                    executed |= service_fresh_priority(progress_boundary, false);
                     // Control/Decode may have started another binding. Even while it remains
                     // in flight, its pins can change an unexecuted Prefill/Replay permit.
                     // Already-consumed Control/Decode permits must not be reserved again.
@@ -2981,6 +3100,7 @@ private:
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
     std::optional<AdmissionDecision> admission_decision_;
+    std::optional<FreshPriority> fresh_priority_;
     std::uint64_t admission_generation_ = 1;
     std::array<std::optional<CaptureDecision>, kMaximumConcurrency> capture_decisions_;
     std::shared_ptr<Request> context_owner_;

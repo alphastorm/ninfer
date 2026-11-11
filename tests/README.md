@@ -100,6 +100,16 @@ the bounded rotation window without an additional resident preemption. Scheduler
 window to one insertion per full service cycle and forbid it during protected recovery.
 It also bounds isolated-restore refusal and verifies that its retained fresh-admission notification
 admits queued work exactly once after the impossible paused owner is retired.
+The context-operation boundary cases keep a resident demoting catalog history before every unit:
+a short arrival, a prefix-reusing arrival and one that needs its own demotion bind at the next safe
+boundary while the resident keeps prefilling. A Pending pressure save still keeps arrivals out,
+attempts stay bounded at four per request, and an arrival that departed or used up its attempts does
+not hold back the next one. While an export lease is held, including a Device-staged one, the armed
+arrival is not attempted, so the write spends none of its bound, and it binds after the lease retires.
+A save requested while a priority binding is in flight is held, not refused: it returns only after
+the binding completes, it is prepared before any other operation starts, and no priority attempt is
+charged while it waits. An arrival whose next attempt is ready when the operation a held prepare
+waits for completes yields that boundary to the prepare without spending an attempt.
 `ninfer_operational_failure_test` links the real log renderers and request-event classification
 without Engine/CUDA or dead-section linker flags; the live capacity logger is a separate source.
 

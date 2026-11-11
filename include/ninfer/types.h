@@ -1123,6 +1123,12 @@ struct RuntimeStats {
     std::uint64_t paced_prefill_deferred_tokens = 0;
     std::uint64_t prefill_cadence_deferrals = 0;
     std::uint64_t prefill_budget_overruns   = 0;
+    // Fresh admission at context-operation boundaries: ordinary scans refused while a context
+    // operation was in flight, bounded priority attempts at safe boundaries, and those attempts
+    // that started a fresh binding.
+    std::uint64_t fresh_admission_context_refusals    = 0;
+    std::uint64_t fresh_admission_priority_attempts   = 0;
+    std::uint64_t fresh_admission_priority_admissions = 0;
     std::uint32_t running_requests          = 0;
     std::uint32_t prefilling_requests       = 0;
     std::uint32_t decode_ready_requests     = 0;

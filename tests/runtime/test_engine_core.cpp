@@ -2383,6 +2383,16 @@ void resident_waits_for_pending_pressure_save() { pending_pressure_save(false); 
 void pending_pressure_save_preserves_older_resident() { pending_pressure_save(true); }
 
 // --- Fork #102: bounded fresh admission at context-operation boundaries -----------------------
+// Bounded priority attempts and the admissions they started, read with the arrival's response.
+void require_boundary_counters(const ninfer::RuntimeStats& stats, std::uint64_t attempts,
+                               std::uint64_t admissions, const std::string& label) {
+    require(stats.fresh_admission_priority_attempts == attempts &&
+                stats.fresh_admission_priority_admissions == admissions,
+            label + ": priority attempts=" +
+                std::to_string(stats.fresh_admission_priority_attempts) +
+                " admissions=" + std::to_string(stats.fresh_admission_priority_admissions));
+}
+
 // A resident whose every unit needs a page group demotes catalog history each turn, so Native's
 // single context slot is occupied whenever the ordinary fresh scan follows the resident
 // reservation. Seeds that history, starts the resident and returns once it is progressing
@@ -2422,6 +2432,9 @@ void fresh_arrival_during_resident_demotion() {
     require(outcome.result->scheduling.preemptions == 0 && outcome.stats.preemptions == 0 &&
                 outcome.stats.running_requests == 1 && outcome.stats.prefilling_requests == 1,
             "the arrival's admission paused or displaced the prefilling resident");
+    require(outcome.stats.fresh_admission_context_refusals >= 1,
+            "the refused fresh scan was not counted");
+    require_boundary_counters(outcome.stats, 1, 1, "fresh arrival during resident demotion");
     require_membership(harness.observed_stats(), {}, "resident demotion cleanup");
 }
 
@@ -2440,6 +2453,7 @@ void fresh_arrival_rebinds_after_its_own_demotion() {
     require(outcome.stats.preemptions == 0 && outcome.stats.running_requests == 1 &&
                 outcome.stats.prefilling_requests == 1,
             "the arrival's own demotion paused or displaced the prefilling resident");
+    require_boundary_counters(outcome.stats, 2, 1, "arrival that needs its own demotion");
     require_membership(harness.observed_stats(), {}, "own demotion cleanup");
 }
 
@@ -2457,6 +2471,7 @@ void fresh_arrival_keeps_its_preferred_source() {
                 outcome.result->computed_prefill_tokens == 1 &&
                 outcome.result->admission.fallback_reason == ninfer::AdmissionFallbackReason::None,
             "the arrival did not bind its preferred source");
+    require_boundary_counters(outcome.stats, 1, 1, "arrival preferring a retained prefix");
     require_membership(harness.observed_stats(), {}, "preferred source cleanup");
 }
 
@@ -2486,6 +2501,9 @@ void pending_pressure_save_blocks_fresh_arrival() {
     require(settled.bound == pending.bound && settled.demoting_steps == pending.demoting_steps &&
                 settled.pressure_save_named && settled.pause_lanes.empty(),
             "a Pending pressure save admitted the arrival, ran the resident or paused it");
+    require(outcome.stats.fresh_admission_context_refusals == 0,
+            "a fresh scan ran while a pressure save was Pending");
+    require_boundary_counters(outcome.stats, 0, 0, "fresh arrival during a Pending pressure save");
     require_membership(harness.observed_stats(), {}, "pending pressure save cleanup");
 }
 
@@ -2500,9 +2518,10 @@ void fresh_priority_attempts_are_bounded() {
     const auto settled = harness.events().snapshot();
     finish_demoting_resident(harness, resident, settled);
     require_request_error(outcome, RequestErrorKind::QueueTimeout, "arrival that can never bind");
-    require(settled.state_binds <= kPriorityAttempts &&
+    require(settled.state_binds == kPriorityAttempts &&
                 settled.demoting_steps > before.demoting_steps,
             "arrival attempts exceeded their bound or stopped the resident");
+    require_boundary_counters(outcome.stats, kPriorityAttempts, 0, "arrival that can never bind");
     require_membership(harness.observed_stats(), {}, "bounded attempts cleanup");
 }
 
@@ -2533,6 +2552,7 @@ void departed_priority_request_spares_the_next_arrival() {
         require_finished(held, FinishReason::OutputLimit, "lane holder");
         require_finished(admitted, FinishReason::OutputLimit,
                          "arrival after the earlier waiting arrival departed");
+        require_boundary_counters(admitted.stats, 1, 1, "arrival after a departed arrival");
         require_membership(harness.observed_stats(), {}, "departed arrival cleanup");
     }
 }
@@ -2551,8 +2571,10 @@ void exhausted_priority_request_spares_the_next_arrival() {
     require_request_error(expired, RequestErrorKind::QueueTimeout, "arrival that can never bind");
     require_finished(admitted, FinishReason::OutputLimit,
                      "arrival after an exhausted arrival expired");
-    require(settled.state_binds <= kPriorityAttempts && settled.credit_shortages == 1,
+    require(settled.state_binds == kPriorityAttempts && settled.credit_shortages == 1,
             "attempts leaked between arrivals or the resident took the freed page group");
+    require_boundary_counters(admitted.stats, kPriorityAttempts + 2, 1,
+                              "arrival after an exhausted arrival");
     require_membership(harness.observed_stats(), {}, "exhausted arrival cleanup");
 }
 
@@ -2581,6 +2603,10 @@ void fresh_priority_waits_out_an_export() {
     require(during.bound == submitted.bound && during_stats.waiting_requests == 1,
             "the arrival bound while an export lease was held");
     require_finished(outcome, FinishReason::OutputLimit, "arrival after the export lease retired");
+    require(during_stats.fresh_admission_context_refusals >= 1,
+            "the arrival's refused scans were not counted during the export");
+    require_boundary_counters(during_stats, 0, 0, "arrival while an export lease was held");
+    require_boundary_counters(outcome.stats, 1, 1, "arrival after the export lease retired");
     require_membership(harness.observed_stats(), {}, "export lease cleanup");
 }
 
@@ -2616,6 +2642,10 @@ void fresh_priority_waits_out_a_device_staged_export() {
     require(during.bound == submitted.bound && during_stats.waiting_requests == 1,
             "the arrival bound while a Device-staged export held its lease");
     require_finished(outcome, FinishReason::OutputLimit, "arrival after the staged export retired");
+    require(during_stats.fresh_admission_context_refusals >= 1,
+            "the arrival's refused scans were not counted during the staged write");
+    require_boundary_counters(during_stats, 0, 0, "arrival while a staged export was written");
+    require_boundary_counters(outcome.stats, 1, 1, "arrival after the staged export retired");
     require_membership(harness.observed_stats(), {}, "staged export cleanup");
 }
 
@@ -2637,6 +2667,7 @@ void priority_binding_defers_a_save_until_it_completes() {
     auto saving = std::async(std::launch::async, [&] { return harness.save("saved"); });
     const bool held = saving.wait_for(300ms) == std::future_status::timeout;
     harness.configure([&](Program& p) { during = p.prepare_calls; });
+    const auto held_stats = harness.observed_stats();
     harness.release_hold();
     const auto saved   = saving.get();
     const auto outcome = harness.await(arrival);
@@ -2655,6 +2686,9 @@ void priority_binding_defers_a_save_until_it_completes() {
                 settled.demotes_at_prepare == settled.demotes_at_held_binding,
             "another operation started between the binding's completion and the held save");
     require_finished(outcome, FinishReason::OutputLimit, "arrival whose binding was held");
+    // The attempt that started the binding is the only one: none is charged while the save waits.
+    require_boundary_counters(held_stats, 1, 1, "arrival whose binding holds a save");
+    require_boundary_counters(outcome.stats, 1, 1, "arrival whose binding was held");
     require_membership(harness.observed_stats(), {}, "held save cleanup");
 }
 
@@ -2685,6 +2719,17 @@ void priority_attempt_yields_to_a_held_prepare() {
     require(settled.prepares == 1 && settled.prepares_at_arrival_bind == 1,
             "the arrival's next attempt started an operation before the held prepare ran");
     require_finished(outcome, FinishReason::OutputLimit, "arrival that yielded to a held prepare");
+    // Only the attempt that started the arrival's own demotion went unrewarded: the boundary it
+    // yielded to the prepare charged nothing. The arrival then binds through its next priority
+    // attempt (2, 1) or, if the boundary after the prepare is a quiet ordinary scan, through
+    // that scan (1, 0).
+    const auto& stats = outcome.stats;
+    require(stats.fresh_admission_priority_attempts <= 2 &&
+                stats.fresh_admission_priority_attempts -
+                        stats.fresh_admission_priority_admissions == 1,
+            "arrival that yielded to a held prepare: priority attempts=" +
+                std::to_string(stats.fresh_admission_priority_attempts) +
+                " admissions=" + std::to_string(stats.fresh_admission_priority_admissions));
     require_membership(harness.observed_stats(), {}, "yielded attempt cleanup");
 }
 // --- End fork #102 ------------------------------------------------------------------------------

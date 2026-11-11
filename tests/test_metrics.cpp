@@ -156,5 +156,23 @@ int main() {
     check(without_warmup.render({}, true).find(
               "ninfer_spec_decode_position_tokens_total{position=") == std::string::npos,
           "ordinary decoding must not fabricate speculative position series");
+    // Fork #102 fresh-admission counters are live and exclude startup warmup.
+    RuntimeStats boundary_warmup;
+    boundary_warmup.fresh_admission_context_refusals    = 2;
+    boundary_warmup.fresh_admission_priority_attempts   = 1;
+    boundary_warmup.fresh_admission_priority_admissions = 1;
+    Metrics boundary_metrics;
+    boundary_metrics.configure("boundary", options, memory, boundary_warmup);
+    RuntimeStats boundary_live = boundary_warmup;
+    boundary_live.fresh_admission_context_refusals += 7;
+    boundary_live.fresh_admission_priority_attempts += 3;
+    boundary_live.fresh_admission_priority_admissions += 2;
+    const auto boundary = boundary_metrics.render(boundary_live, true);
+    check(boundary.find("ninfer_fresh_admission_context_refusals_total 7\n") != std::string::npos &&
+              boundary.find("ninfer_fresh_admission_priority_attempts_total 3\n") !=
+                  std::string::npos &&
+              boundary.find("ninfer_fresh_admission_priority_admissions_total 2\n") !=
+                  std::string::npos,
+          "fresh-admission boundary counters must be live and exclude startup warmup");
     return failures == 0 ? 0 : 1;
 }
