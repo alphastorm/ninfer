@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -705,6 +706,21 @@ class MultiGpuHostTests(unittest.TestCase):
             "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used",
             "--format=csv,noheader,nounits",
         ])
+
+    def test_gpu_metrics_samples_the_power_cap_with_the_draw(self) -> None:
+        uuid = "GPU-00000000-0000-0000-0000-000000000001"
+        row = "352.00, 48.94, 99, 12000, 350.00, 350.00\n"
+        with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout=row)) as run:
+            self.assertEqual(qualify_native.gpu_metrics(uuid, power_limits=True),
+                             (352.0, 48.94, 99, 12000, 350.0, 350.0))
+        run.assert_called_once_with([
+            "nvidia-smi", "-i", uuid,
+            "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used,enforced.power.limit,power.limit",
+            "--format=csv,noheader,nounits",
+        ])
+        with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="352.00, 48.94, 99, 12000\n")), \
+                self.assertRaises(qualify_native.LaneError):
+            qualify_native.gpu_metrics(uuid, power_limits=True)
 
     def test_predecessors_emit_attributable_startup_gpu_identity(self) -> None:
         for commit in ("075d442e", "03f56e58"):
@@ -2335,19 +2351,194 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(qualify_native.host_context_mib(spec), host_mib)
 
     def test_rtx3090_lane_serves_at_the_approved_350_w_cap(self) -> None:
-        # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W);
-        # the C1 qualification envelope keeps its 1 W sampling allowance above the cap, and the
-        # owner's 370 W default is still what release restores.
+        # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W),
+        # and the owner's 370 W default is still what release restores. C1 proves that cap on every
+        # sample; its draw envelope is the cap plus power.draw's documented +/-5 W accuracy.
         lane_dir = WINDOWS / "lanes/rtx3090"
         lane = qualify_native.Lane(
             "rtx3090", json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8")),
             json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8")),
         )
         self.assertEqual(lane.qualified_power_limit_w, 350)
-        self.assertEqual(lane.managed_power_envelope_w, 351.0)
+        self.assertEqual(lane.managed_power_envelope_w, 355.0)
         self.assertEqual(lane.owner_power_limit_w, 370)
         owner = lane.spec["lifecycle"]["gpu_owner_controller_protocol"]
         self.assertEqual(owner["prior_power_limit_range_w"], [100, 390])
+
+
+class ManagedC1PowerTests(unittest.TestCase):
+    """C1 proves the managed cap and bounds power.draw only by the reading's accuracy.
+
+    nvidia-smi power.draw is a 1-second average accurate to +/-5 W, and capped C1 runs read up
+    to about 350.5 W. The cap itself (enforced.power.limit and power.limit on every sample) is
+    the evidence; the draw bound is a gross check at the cap plus that accuracy."""
+
+    GPU = "GPU-00000000-0000-4000-8000-000000003090"
+    CAPPED = ("350.00", "350.00")
+
+    def lane_arguments(self, name: str) -> list[str]:
+        lane_dir = WINDOWS / "lanes" / name
+        subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+        subject.lane = qualify_native.Lane(
+            name, json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8")),
+            json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8")),
+        )
+        with patch.object(qualify_native.Orchestrator, "target_internal",
+                          return_value={"status": "passed"}) as internal:
+            subject.benchmark()
+        self.assertEqual(internal.call_args.args[0], "_benchmark")
+        return list(internal.call_args.args[1:])
+
+    def run_benchmark(self, directory: Path, arguments: list[str],
+                      samples: list[tuple[str, str, str]]) -> SimpleNamespace:
+        """Run the target-side C1 against scripted nvidia-smi rows of (power.draw,
+        enforced.power.limit, power.limit); the last row repeats until C1 completes."""
+        state_root, release_root, evidence = directory / "state", directory / "release", directory / "evidence"
+        (release_root / "logs").mkdir(parents=True)
+        state_root.mkdir()
+        key = directory / "operator.key"
+        key.write_text("fixture-key\n", encoding="ascii")
+        log = release_root / "logs" / "requests.jsonl"
+        log.write_text("", encoding="utf-8")
+        (state_root / "state.json").write_text(json.dumps({
+            "active_release": "candidate",
+            "releases": {"candidate": {
+                "gpu_uuid": self.GPU, "api_key_file": str(key), "host": "127.0.0.1", "port": 18211,
+                "release_root": str(release_root)}},
+        }), encoding="utf-8")
+        lock, served, commands, queries = threading.Lock(), threading.Event(), [], []
+
+        def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+            with lock:
+                commands.append(command)
+            if command[0] == "powershell":
+                return SimpleNamespace(stdout="")
+            self.assertEqual(command[:3], ["nvidia-smi", "-i", self.GPU])
+            fields = command[3].removeprefix("--query-gpu=").split(",")
+            with lock:
+                index = len(queries)
+                queries.append(fields)
+            if index >= len(samples) - 1:
+                served.set()
+            draw, enforced, limit = samples[min(index, len(samples) - 1)]
+            values = {"power.draw": draw, "temperature.gpu": "48.94", "utilization.gpu": "99",
+                      "memory.used": "12000", "enforced.power.limit": enforced, "power.limit": limit}
+            return SimpleNamespace(stdout=", ".join(values[field] for field in fields) + "\n")
+
+        def fake_request(base: str, key: str, method: str, path: str, body: dict, timeout: int = 1800) -> dict:
+            if body["max_tokens"] == 1024:
+                self.assertTrue(served.wait(30), "the C1 sampler never consumed the scripted rows")
+                record = {
+                    "event": "request_done", "artifact_type": "ninfer_serve_request_log", "schema_version": 30,
+                    "result": {"completion_tokens": 1024, "prompt_tokens": 4541, "computed_prefill_tokens": 4541},
+                    "timings_seconds": {"decode": 4.5, "prefill": 4.66},
+                    "speculative": {"accepted_tokens": 874, "drafted_tokens": 1040},
+                }
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record) + "\n")
+            return {}
+
+        args = qualify_native.internal_parser().parse_args([
+            "--state-root", str(state_root), "--evidence-root", str(evidence), "--gpu-uuid", self.GPU,
+            *arguments])
+        result, error = None, None
+        with patch.object(qualify_native, "run", side_effect=fake_run), \
+                patch.object(qualify_native, "request_json", side_effect=fake_request):
+            try:
+                result = qualify_native.internal_benchmark(args)
+            except qualify_native.LaneError as caught:
+                error = caught
+        written = evidence / "managed-c1.json"
+        receipt = json.loads(written.read_text(encoding="utf-8")) if written.is_file() else None
+        return SimpleNamespace(result=result, error=error, receipt=receipt, commands=commands, queries=queries)
+
+    def assert_cap_sampled_with_draw(self, queries: list[list[str]]) -> None:
+        self.assertTrue(queries)
+        for fields in queries:
+            self.assertLessEqual({"power.draw", "enforced.power.limit", "power.limit"}, set(fields))
+
+    def test_capped_draw_within_the_reading_accuracy_passes(self) -> None:
+        arguments = self.lane_arguments("rtx3090")
+        for peak in ("352.00", "355.00"):
+            with self.subTest(peak=peak), tempfile.TemporaryDirectory() as temporary:
+                outcome = self.run_benchmark(Path(temporary), arguments, [
+                    ("349.87", *self.CAPPED), (peak, *self.CAPPED), ("350.11", *self.CAPPED)])
+                self.assertIsNone(outcome.error)
+                receipt = outcome.receipt
+                self.assertEqual(outcome.result, receipt)
+                self.assertEqual(receipt["status"], "passed")
+                self.assertEqual(receipt["max_power_w"], float(peak))
+                self.assertEqual(receipt["qualified_power_limit_w"], 350)
+                self.assertEqual(receipt["power_envelope_w"], 355.0)
+                for name in ("min_enforced_power_limit_w", "max_enforced_power_limit_w",
+                             "min_power_limit_w", "max_power_limit_w"):
+                    self.assertEqual(receipt[name], 350.0, name)
+                self.assertGreaterEqual(receipt["power_samples"], 3)
+                self.assertEqual(receipt["power_samples_over_envelope"], 0)
+                self.assertEqual(receipt["power_limit_mismatched_samples"], 0)
+                self.assert_cap_sampled_with_draw(outcome.queries)
+        self.assertEqual(dict(zip(arguments[::2], arguments[1::2])),
+                         {"--qualified-power-limit-w": "350", "--power-envelope-w": "355.0"})
+
+    def test_any_sample_without_the_qualified_cap_fails_and_is_recorded(self) -> None:
+        arguments = self.lane_arguments("rtx3090")
+        for name, drifted, field, value in (
+                ("enforced above", ("345.00", "370.00", "350.00"), "max_enforced_power_limit_w", 370.0),
+                ("limit above", ("345.00", "350.00", "370.00"), "max_power_limit_w", 370.0),
+                ("both below", ("290.00", "300.00", "300.00"), "min_enforced_power_limit_w", 300.0)):
+            with self.subTest(drift=name), tempfile.TemporaryDirectory() as temporary:
+                outcome = self.run_benchmark(Path(temporary), arguments, [
+                    ("340.00", *self.CAPPED), drifted, ("341.00", *self.CAPPED)])
+                receipt = outcome.receipt
+                self.assertIsInstance(outcome.error, qualify_native.LaneError)
+                self.assertIsNotNone(receipt, "a failed power check must still write its receipt")
+                self.assertIn("350 W", str(outcome.error))
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(receipt["max_power_w"], 345.0 if name != "both below" else 341.0)
+                self.assertEqual(receipt["power_limit_mismatched_samples"], 1)
+                self.assertEqual(receipt["power_samples_over_envelope"], 0)
+                self.assertEqual(receipt[field], value)
+                self.assert_cap_sampled_with_draw(outcome.queries)
+
+    def test_draw_beyond_the_reading_accuracy_fails_and_is_recorded(self) -> None:
+        arguments = self.lane_arguments("rtx3090")
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = self.run_benchmark(Path(temporary), arguments, [
+                ("350.00", *self.CAPPED), ("355.50", *self.CAPPED), ("349.00", *self.CAPPED)])
+        receipt = outcome.receipt
+        self.assertIsInstance(outcome.error, qualify_native.LaneError)
+        self.assertIsNotNone(receipt, "a failed power check must still write its receipt")
+        self.assertIn("355 W", str(outcome.error))
+        self.assertIn("355.5 W", str(outcome.error))
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["max_power_w"], 355.5)
+        self.assertEqual(receipt["power_envelope_w"], 355.0)
+        self.assertEqual(receipt["power_samples_over_envelope"], 1)
+        self.assertEqual(receipt["power_limit_mismatched_samples"], 0)
+        self.assertEqual(receipt["max_enforced_power_limit_w"], 350.0)
+        self.assertGreaterEqual(receipt["power_samples"], 3)
+
+    def test_uncapped_lane_keeps_its_draw_only_receipt(self) -> None:
+        arguments = self.lane_arguments("rtx4090")
+        self.assertEqual(arguments, [])
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = self.run_benchmark(Path(temporary), arguments, [
+                ("440.00", "450.00", "450.00"), ("449.50", "450.00", "450.00")])
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.receipt["status"], "passed")
+        self.assertEqual(outcome.receipt["max_power_w"], 449.5)
+        self.assertEqual({tuple(fields) for fields in outcome.queries},
+                         {("power.draw", "temperature.gpu", "utilization.gpu", "memory.used")})
+        for name in ("power_envelope_w", "qualified_power_limit_w", "power_samples", "max_enforced_power_limit_w"):
+            self.assertNotIn(name, outcome.receipt)
+
+    def test_the_cap_and_its_envelope_are_given_together(self) -> None:
+        for arguments in (["--power-envelope-w", "355.0"], ["--qualified-power-limit-w", "350"]):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as temporary:
+                outcome = self.run_benchmark(Path(temporary), arguments, [("340.00", *self.CAPPED)])
+                self.assertIsInstance(outcome.error, qualify_native.LaneError)
+                self.assertEqual(outcome.commands, [], "refusal must precede Start and sampling")
+                self.assertIsNone(outcome.receipt)
 
 
 class PackagedStatusTests(unittest.TestCase):
