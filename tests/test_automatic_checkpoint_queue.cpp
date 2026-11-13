@@ -199,9 +199,9 @@ int automatic_retry_requires_matching_progress() {
     return failures;
 }
 
-// Capacity, I/O and the stale/tag races keep the bounded retry budget: once it is spent a
-// pressure save stays Pending with its reason and never permits destructive release.
-int automatic_retry_budget_and_terminal_refusal() {
+// A persistent refusal ends the pressure save once its retry budget is spent. The reported
+// reason permits release without claiming a durable copy, and stays stable across replanning.
+int pressure_retry_exhaustion_settles_with_reason() {
     int failures = 0;
     for (const auto reason : {Reason::Capacity, Reason::IoUnavailable, Reason::StaleRevision,
                               Reason::StalePublication, Reason::TagMismatch}) {
@@ -220,23 +220,123 @@ int automatic_retry_budget_and_terminal_refusal() {
         failures += check(!f.wait([&] { return f.completed > kTransientCheckpointRetries + 1; }, 300ms),
                           "an exhausted retryable pressure save retried without a new turn");
         coordinator.save_before_eviction(std::span(&victim, 1));
-        failures += check(victim.outcome == Outcome::Pending && victim.reason == reason,
-                          "retry exhaustion permitted destructive release");
-        // A new completed turn resets the bounded attempt state.
+        failures += check(victim.outcome == Outcome::Settled && victim.reason == reason,
+                          "exhausted persistent pressure save stayed Pending");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Settled && victim.reason == reason,
+                          "exhausted pressure answer disappeared on a second ask");
         { std::lock_guard lock(f.mutex); f.refusal = Reason::UnsupportedCodec; }
-        failures += check(coordinator.enqueue(victim.session_sha256, true) !=
+        const auto short_turn = coordinator.enqueue(victim.session_sha256, true);
+        failures += check(short_turn == AutomaticCheckpointEnqueueResult::Dropped,
+                          "short turn rearmed an already settled pressure answer");
+        // Let the predecessor's unwanted rearm finish so the remaining assertions are independent.
+        if (short_turn != AutomaticCheckpointEnqueueResult::Dropped) {
+            failures += check(f.wait([&] { return f.completed >= kTransientCheckpointRetries + 2; }),
+                              "unexpected short-turn rearm did not finish");
+        }
+        unsigned completed;
+        { std::lock_guard lock(f.mutex); completed = f.completed; }
+        failures += check(coordinator.enqueue(victim.session_sha256) !=
                               AutomaticCheckpointEnqueueResult::Dropped,
-                          "short completed turn did not rearm outstanding pressure work");
-        failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 2; }),
+                          "new completed turn did not queue checkpoint work");
+        failures += check(f.wait([&] { return f.completed >= completed + 1; }),
                           "new completed turn did not restart checkpoint work");
         coordinator.save_before_eviction(std::span(&victim, 1));
-        failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 3; }),
+        failures += check(f.wait([&] { return f.completed >= completed + 2; }),
                           "terminal pressure refusal never completed");
         coordinator.save_before_eviction(std::span(&victim, 1));
         failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::UnsupportedCodec,
                           "reported nonretryable pressure refusal did not settle with its reason");
         coordinator.drain();
     }
+    return failures;
+}
+
+int persistent_refusal_retries_without_progress() {
+    int failures = 0;
+    for (const bool automatic : {false, true}) {
+        ProgressFixture f;
+        f.refusal = automatic ? Reason::IoUnavailable : Reason::Capacity;
+        AutomaticCheckpointCoordinator coordinator(
+            [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+            [&] { return f.observe(); }, [&] { f.notify(); });
+        Victim victim{std::string(64, '1'), "resp_retry"};
+        if (automatic) {
+            failures += check(coordinator.enqueue(victim.session_sha256) !=
+                                  AutomaticCheckpointEnqueueResult::Dropped,
+                              "automatic I/O fixture did not queue");
+            failures += check(f.wait([&] { return f.completed >= 1; }),
+                              "automatic I/O refusal did not finish");
+        }
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending, "retry fixture was not Pending");
+        failures += check(f.wait([&] { return f.completed >= 2; }, 3s),
+                          automatic ? "automatic I/O deferral never fired without storage progress"
+                                    : "pressure capacity deferral never fired without engine progress");
+        coordinator.drain();
+    }
+    return failures;
+}
+
+int settled_entries_do_not_fill_the_table() {
+    ProgressFixture f;
+    f.refusal = Reason::UnsupportedCodec;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); });
+    const auto session = [](unsigned index) {
+        constexpr std::string_view digits = "0123456789abcdef";
+        return std::string(62, 'a') + digits[index / 16] + digits[index % 16];
+    };
+    for (unsigned index = 0; index < 64; ++index) {
+        Victim victim{session(index), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+    }
+    int failures = check(f.wait([&] { return f.completed >= 64; }),
+                         "settled-table fixture did not finish its first 64 saves");
+    Victim victim{session(64), "resp_retry"};
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(f.wait([&] { return f.completed >= 65; }),
+                      "retained settled entries prevented a new pressure attempt");
+    failures += check(coordinator.enqueue(session(65)) != AutomaticCheckpointEnqueueResult::Dropped,
+                      "retained settled entries prevented a new automatic save");
+    coordinator.drain();
+    return failures;
+}
+
+int settled_answer_survives_a_pending_peer() {
+    ProgressFixture f;
+    const std::string x(64, '2'), y(64, '3');
+    unsigned x_calls = 0;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            std::lock_guard lock(f.mutex);
+            ++f.calls;
+            if (session == x) { ++x_calls; }
+            return AutomaticCheckpointResult{std::string(*tag),
+                session == x ? Reason::UnsupportedCodec : f.refusal};
+        }, [&] { return f.observe(); }, [&] { f.notify(); });
+    std::array<Victim, 2> victims{{{x, "resp_x"}, {y, "resp_y"}}};
+    coordinator.save_before_eviction(victims);
+    int failures = check(f.wait([&] { return f.completed >= 2; }),
+                         "peer fixture did not finish both attempts");
+    coordinator.save_before_eviction(victims);
+    failures += check(victims[0].outcome == Outcome::Settled && victims[1].outcome == Outcome::Pending,
+                      "terminal peer did not settle beside a busy peer");
+    coordinator.save_before_eviction(victims);
+    failures += check(victims[0].outcome == Outcome::Settled,
+                      "terminal answer disappeared while its peer remained Pending");
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(x_calls == 1, "settled peer was saved again");
+        f.refusal = Reason::None;
+        ++f.progress.engine;
+    }
+    failures += check(f.wait([&] { return f.completed >= 3; }), "released busy peer was not retried");
+    coordinator.save_before_eviction(victims);
+    failures += check(victims[0].outcome == Outcome::Settled && victims[1].outcome == Outcome::Settled,
+                      "peer settlements never coincided");
+    coordinator.drain();
     return failures;
 }
 
@@ -720,18 +820,25 @@ int pressure_save_waits_out_competing_store_save() {
 } // namespace
 
 int main() {
-    int failures = queue_coalescing();
-    failures += pressure_callback_does_not_wait_for_restore_commit();
-    failures += automatic_retry_requires_matching_progress();
-    failures += automatic_retry_budget_and_terminal_refusal();
-    failures += pressure_transaction_busy_waits_without_budget();
-    failures += automatic_transaction_busy_keeps_budget();
-    failures += pressure_busy_retries_are_spaced();
-    failures += partially_reclaiming_refusal_does_not_self_wake();
-    failures += publication_abandonment_completes_pressure();
-    failures += durable_record_delete_preserves_survivors();
-    failures += durable_delete_retains_disk_only_records();
-    failures += pressure_save_waits_out_competing_store_save();
+    const auto run = [](const char* name, int failures) {
+        std::cout << (failures ? "FAIL " : "PASS ") << name << '\n';
+        return failures;
+    };
+    int failures = run("queue_coalescing", queue_coalescing());
+    failures += run("pressure_callback_does_not_wait_for_restore_commit", pressure_callback_does_not_wait_for_restore_commit());
+    failures += run("automatic_retry_requires_matching_progress", automatic_retry_requires_matching_progress());
+    failures += run("pressure_retry_exhaustion_settles_with_reason", pressure_retry_exhaustion_settles_with_reason());
+    failures += run("persistent_refusal_retries_without_progress", persistent_refusal_retries_without_progress());
+    failures += run("settled_entries_do_not_fill_the_table", settled_entries_do_not_fill_the_table());
+    failures += run("settled_answer_survives_a_pending_peer", settled_answer_survives_a_pending_peer());
+    failures += run("pressure_transaction_busy_waits_without_budget", pressure_transaction_busy_waits_without_budget());
+    failures += run("automatic_transaction_busy_keeps_budget", automatic_transaction_busy_keeps_budget());
+    failures += run("pressure_busy_retries_are_spaced", pressure_busy_retries_are_spaced());
+    failures += run("partially_reclaiming_refusal_does_not_self_wake", partially_reclaiming_refusal_does_not_self_wake());
+    failures += run("publication_abandonment_completes_pressure", publication_abandonment_completes_pressure());
+    failures += run("durable_record_delete_preserves_survivors", durable_record_delete_preserves_survivors());
+    failures += run("durable_delete_retains_disk_only_records", durable_delete_retains_disk_only_records());
+    failures += run("pressure_save_waits_out_competing_store_save", pressure_save_waits_out_competing_store_save());
     if (!failures) { std::cout << "automatic checkpoint remediation tests passed\n"; }
     return failures ? 1 : 0;
 }
