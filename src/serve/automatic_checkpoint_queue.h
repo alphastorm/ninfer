@@ -118,11 +118,9 @@ private:
         runtime::DurableReason reason = runtime::DurableReason::None;
         bool completed = false;
         bool settled = false;
-        bool answer_read = false;
         bool pressure = false;
         std::uint32_t attempts = 0;
         std::chrono::steady_clock::time_point pressed_at{};
-        std::chrono::steady_clock::time_point settled_at{};
         std::optional<std::chrono::steady_clock::time_point> window_from;
     };
     static constexpr std::size_t kMaxEntries = 64;

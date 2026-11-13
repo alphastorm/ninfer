@@ -140,15 +140,8 @@ void AutomaticCheckpointCoordinator::drain() noexcept {
 }
 
 bool AutomaticCheckpointCoordinator::make_room_locked() noexcept {
-    const auto now = std::chrono::steady_clock::now();
     for (auto at = entries_.begin(); at != entries_.end();) {
-        const auto& entry = at->second;
-        // Keep fresh settlements until the Engine reads them. Unread answers may age out
-        // after twice the pressure window when their original admission no longer asks.
-        if (entry.completed && entry.settled &&
-            (entry.answer_read || now - entry.settled_at > 2 * timing_.pressure_window)) {
-            at = entries_.erase(at);
-        }
+        if (at->second.completed && at->second.settled) { at = entries_.erase(at); }
         else { ++at; }
     }
     return entries_.size() < kMaxEntries;
@@ -186,27 +179,25 @@ void AutomaticCheckpointCoordinator::save_before_eviction(
         for (auto& victim : victims) {
             try {
                 auto found = entries_.find(victim.session_sha256);
-                if (found != entries_.end() &&
-                    (found->second.tag == victim.checkpoint_tag || found->second.tag.empty())) {
+                if (found != entries_.end() && found->second.tag == victim.checkpoint_tag) {
                     auto& entry = found->second;
                     if (!entry.pressure) {
                         entry.pressure = true;
                         entry.pressed_at = now;
                         entry.window_from.reset();
                     }
-                    // An automatic first run may still be queued or in flight with no tag.
-                    // Promotion applies now; its result is not yet an answer to this victim.
-                    if (entry.tag.empty()) { continue; }
                     if (entry.completed) {
                         victim.reason = entry.reason;
                         if (entry.settled &&
                             (!draining_ || entry.reason == runtime::DurableReason::None)) {
                             victim.outcome = runtime::PressureCheckpointOutcome::Settled;
-                            entry.answer_read = true;
                         }
                     }
                     continue;
                 }
+                // An automatic first run is still queued or in flight with no tag. Its completion
+                // notifies the Engine, whose next ask finds the tagged entry or creates one.
+                if (found != entries_.end() && found->second.tag.empty()) { continue; }
                 if (found == entries_.end() && entries_.size() >= kMaxEntries && !make_room_locked()) {
                     continue;
                 }
@@ -274,10 +265,6 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
             const bool retryable = transient || result.reason == runtime::DurableReason::IoUnavailable ||
                                    result.reason == runtime::DurableReason::Capacity;
             entry.settled = !retryable;
-            if (entry.settled) {
-                entry.settled_at = now;
-                entry.answer_read = false;
-            }
             // Publication waits stay progress-only. Busy pressure refusals have no budget or
             // window, reset any persistent window, and keep their spacing. Other retryable
             // pressure refusals use the unchanged budget and a consecutive-persistent window.
@@ -334,7 +321,7 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
                         now - entry.pressed_at).count()), ++abandoned_total_};
             }
             // Ordinary saves need no pressure cache. Pressure answers retain their turn/tag:
-            // None survives Pending peers; full-table pruning reclaims read or aged settlements.
+            // None survives Pending peers; a full table discards completed/settled entries.
             // During stop, retained non-None answers report Pending for synchronous final save.
             if (!entry.pressure && !deferred) { entries_.erase(found); }
         }
@@ -351,8 +338,6 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
             const auto found = entries_.find(key);
             if (found != entries_.end() && found->second.revision == attempt.revision && !draining_) {
                 found->second.settled = true;
-                found->second.settled_at = std::chrono::steady_clock::now();
-                found->second.answer_read = false;
             }
         } catch (...) {}
     }

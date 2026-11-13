@@ -959,9 +959,10 @@ are not consumed.
 
 Automatic saves have no window; a spent budget drops them until the next completed
 turn. An automatic entry whose turn becomes a pressure victim continues as that
-pressure save, keeping its spent budget and resetting its pressure window. This
-promotion also applies to an empty-tag first run that is queued or in flight;
-it reports `Pending`. The next persistent refusal opens the window.
+pressure save, keeping its spent budget and resetting its pressure window. An
+automatic first run that is still queued or in flight has no tag yet: the victim
+reports `Pending` without adopting that run, and the next ask after its completion
+finds the tagged entry or starts a tagged pressure save.
 
 | Refusal or wait | Rearmed by (or the 1 s fallback) | Pressure class |
 |---|---|---|
@@ -987,11 +988,9 @@ its fallback. A new completed turn resets the bounded per-session retry budget.
 An abandoned or terminal pressure answer is retained for its turn until a new turn
 or tag replaces it, so replanned admission reads the same answer. A saved
 `None`-reason answer is consumed only after every victim in the call is `Settled`,
-not while a peer remains `Pending`. Entries record when they settle and whether a
-settled answer was returned to the Engine. When the 64-entry table is full, only
-completed/settled entries whose answer was read or whose settlement is more than
-twice the pressure window old may be discarded to make room. Fresh unread
-settlements remain; if none is eligible, new work is refused room.
+not while a peer remains `Pending`. When the 64-entry table is full, retained
+completed/settled answers with no work behind them are discarded before new work
+is refused room.
 
 An abandoned pressure save is `Settled` with its non-`None` reason and permits the
 drop without a durable copy, as `quota` does. Stop accounts the session by its final

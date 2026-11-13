@@ -455,122 +455,52 @@ int busy_and_publication_reset_pressure_window() {
     return failures;
 }
 
-int inflight_automatic_entry_is_promoted() {
+// An ask while an automatic first run is queued or in flight (no tag yet) answers Pending
+// without adopting that run. Its untagged result never answers the victim, even when it finds
+// no session records; the next ask starts a tagged pressure save whose answer settles.
+int untagged_first_run_does_not_answer_pressure() {
     ProgressFixture f;
-    f.refusal = Reason::IoUnavailable;
     bool entered = false, release = false;
-    std::vector<PressureAbandonment> abandonments;
+    std::vector<std::optional<std::string>> tags;
     AutomaticCheckpointCoordinator coordinator(
         [&](std::string_view, std::optional<std::string_view> tag) {
-            {
-                std::unique_lock lock(f.mutex);
-                if (f.calls == 0) {
-                    entered = true;
-                    f.cv.notify_all();
-                    f.cv.wait_for(lock, 2s, [&] { return release; });
-                }
+            std::unique_lock lock(f.mutex);
+            tags.emplace_back(tag ? std::optional<std::string>(std::string(*tag)) : std::nullopt);
+            if (tags.size() == 1) {
+                entered = true;
+                f.cv.notify_all();
+                f.cv.wait_for(lock, 2s, [&] { return release; });
             }
-            return f.save(tag);
-        }, [&] { return f.observe(); }, [&] { f.notify(); },
-        [&](const PressureAbandonment& value) {
-            std::lock_guard lock(f.mutex);
-            abandonments.push_back(value);
-            f.cv.notify_all();
-        }, {.fallback = 50ms, .pressure_window = 150ms});
+            ++f.calls;
+            return AutomaticCheckpointResult{tag ? std::string(*tag) : std::string(),
+                                             Reason::NoSessionRecords};
+        }, [&] { return f.observe(); }, [&] { f.notify(); }, {}, kNoFallback);
     Victim victim{std::string(64, '5'), "resp_retry"};
     int failures = check(coordinator.enqueue(victim.session_sha256) ==
                              AutomaticCheckpointEnqueueResult::Enqueued,
-                         "in-flight promotion fixture did not queue");
+                         "untagged first-run fixture did not queue");
     failures += check(f.wait([&] { return entered; }), "automatic first save did not start");
     coordinator.save_before_eviction(std::span(&victim, 1));
-    failures += check(victim.outcome == Outcome::Pending, "in-flight automatic save was not Pending");
+    failures += check(victim.outcome == Outcome::Pending, "in-flight untagged save answered the victim");
     {
         std::lock_guard lock(f.mutex);
         release = true;
         f.cv.notify_all();
     }
-    failures += check(f.wait([&] {
-        return !abandonments.empty() && f.completed >= abandonments[0].attempts;
-    }), "in-flight automatic save did not acquire the pressure bound");
+    failures += check(f.wait([&] { return f.completed >= 1; }), "untagged first save did not complete");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Pending, "untagged result was adopted as the pressure answer");
+    failures += check(f.wait([&] { return f.completed >= 2; }), "no tagged pressure save followed");
     coordinator.save_before_eviction(std::span(&victim, 1));
     {
         std::lock_guard lock(f.mutex);
-        failures += check(abandonments.size() == 1 &&
-                              abandonments[0].limit == PressureAbandonLimit::Window &&
-                              abandonments[0].attempts == f.calls &&
-                              f.calls < 1 + kTransientCheckpointRetries &&
-                              victim.outcome == Outcome::Settled &&
-                              victim.reason == Reason::IoUnavailable,
-                          "empty-tag promotion ran the automatic budget before pressure settlement");
+        failures += check(tags.size() == 2 && !tags[0] &&
+                              tags[1] == std::optional<std::string>("resp_retry"),
+                          "pressure save did not carry the victim's tag");
     }
+    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::NoSessionRecords,
+                      "victim stayed Pending after a tagged no-records answer");
     coordinator.drain();
-    return failures;
-}
-
-int fresh_unread_settlements_survive_table_pressure() {
-    const auto session = [](unsigned index) {
-        constexpr std::string_view digits = "0123456789abcdef";
-        return std::string(62, 'a') + digits[index / 16] + digits[index % 16];
-    };
-    ProgressFixture f;
-    const std::string abandoned_session = session(63);
-    unsigned abandonments = 0;
-    AutomaticCheckpointCoordinator coordinator(
-        [&](std::string_view digest, std::optional<std::string_view> tag) {
-            std::lock_guard lock(f.mutex);
-            ++f.calls;
-            ++f.progress.engine;
-            return AutomaticCheckpointResult{tag ? std::string(*tag) : "resp_retry",
-                digest == abandoned_session ? Reason::Capacity : Reason::UnsupportedCodec};
-        }, [&] { return f.observe(); }, [&] { f.notify(); },
-        [&](const PressureAbandonment&) {
-            std::lock_guard lock(f.mutex);
-            ++abandonments;
-        }, kNoFallback);
-    for (unsigned index = 0; index < 64; ++index) {
-        Victim victim{session(index), "resp_retry"};
-        coordinator.save_before_eviction(std::span(&victim, 1));
-    }
-    constexpr unsigned initial_completions = 64 + kTransientCheckpointRetries;
-    int failures = check(f.wait([&] { return f.completed >= initial_completions; }),
-                         "unread-table fixture did not settle");
-    Victim fresh{session(64), "resp_retry"};
-    coordinator.save_before_eviction(std::span(&fresh, 1));
-    failures += check(coordinator.enqueue(session(65)) == AutomaticCheckpointEnqueueResult::Dropped,
-                      "full table purged fresh unread settlements for an automatic save");
-    failures += check(!f.wait([&] { return f.completed > initial_completions; }, 100ms),
-                      "full table purged fresh unread settlements for a pressure save");
-    Victim abandoned{session(63), "resp_retry"};
-    coordinator.save_before_eviction(std::span(&abandoned, 1));
-    failures += check(abandoned.outcome == Outcome::Settled && abandoned.reason == Reason::Capacity,
-                      "table pressure lost an unread abandonment answer");
-    failures += check(coordinator.enqueue(session(65)) != AutomaticCheckpointEnqueueResult::Dropped,
-                      "a read settlement did not make room for new work");
-    coordinator.drain();
-    {
-        std::lock_guard lock(f.mutex);
-        failures += check(abandonments == 1, "table pressure duplicated an abandonment receipt");
-    }
-
-    ProgressFixture aged;
-    aged.refusal = Reason::UnsupportedCodec;
-    AutomaticCheckpointCoordinator aged_coordinator(
-        [&](std::string_view, std::optional<std::string_view> tag) { return aged.save(tag); },
-        [&] { return aged.observe(); }, [&] { aged.notify(); },
-        {}, {.fallback = 1h, .pressure_window = 50ms});
-    for (unsigned index = 0; index < 64; ++index) {
-        Victim victim{session(index), "resp_retry"};
-        aged_coordinator.save_before_eviction(std::span(&victim, 1));
-    }
-    failures += check(aged.wait([&] { return aged.completed >= 64; }),
-                      "aged-table fixture did not settle");
-    failures += check(!aged.wait([&] { return aged.completed > 64; }, 150ms),
-                      "settled entries unexpectedly restarted while aging");
-    failures += check(aged_coordinator.enqueue(session(64)) != AutomaticCheckpointEnqueueResult::Dropped,
-                      "unread settlement older than twice the window did not make room");
-    failures += check(aged.wait([&] { return aged.completed >= 65; }),
-                      "work admitted after settlement aging did not run");
-    aged_coordinator.drain();
     return failures;
 }
 
@@ -634,6 +564,13 @@ int abandonment_receipt_precedes_settlement() {
             }
             failures += check(f.wait([&] { return f.completed >= 2 + kTransientCheckpointRetries; }),
                               "replacement save did not finish");
+            // The replacement is an ordinary save, not a pressure answer: the next ask starts a
+            // tagged pressure save, which must not inherit the obsolete abandonment.
+            coordinator.save_before_eviction(std::span(&victim, 1));
+            failures += check(victim.outcome == Outcome::Pending,
+                              "obsolete abandonment answered for the new revision");
+            failures += check(f.wait([&] { return f.completed >= 3 + kTransientCheckpointRetries; }),
+                              "tagged pressure save after the replacement did not finish");
             coordinator.save_before_eviction(std::span(&victim, 1));
             failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::None,
                               "obsolete abandonment replaced the new revision's answer");
@@ -1388,8 +1325,7 @@ int main() {
     failures += run("settled_answer_survives_a_pending_peer", settled_answer_survives_a_pending_peer());
     failures += run("saved_answer_survives_a_pending_peer", saved_answer_survives_a_pending_peer());
     failures += run("busy_and_publication_reset_pressure_window", busy_and_publication_reset_pressure_window());
-    failures += run("inflight_automatic_entry_is_promoted", inflight_automatic_entry_is_promoted());
-    failures += run("fresh_unread_settlements_survive_table_pressure", fresh_unread_settlements_survive_table_pressure());
+    failures += run("untagged_first_run_does_not_answer_pressure", untagged_first_run_does_not_answer_pressure());
     failures += run("abandonment_receipt_precedes_settlement", abandonment_receipt_precedes_settlement());
     failures += run("drain_hides_retained_refusal_answers", drain_hides_retained_refusal_answers());
     failures += run("pressure_transaction_busy_waits_without_budget", pressure_transaction_busy_waits_without_budget());
