@@ -26,6 +26,8 @@ using Outcome = ninfer::runtime::PressureCheckpointOutcome;
 using Victim = ninfer::runtime::PressureCheckpointVictim;
 using namespace std::chrono_literals;
 
+const CheckpointRetryTiming kNoFallback{.fallback = 1h, .pressure_window = 1h};
+
 int check(bool value, const char* message) {
     if (value) { return 0; }
     std::cerr << "FAIL: " << message << '\n';
@@ -134,6 +136,7 @@ struct ProgressFixture {
     unsigned calls = 0, completed = 0, probes = 0;
     Reason refusal = Reason::TransactionBusy;
     bool publishing = false;
+    bool busy = false;
 
     bool wait(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = 2s) {
         std::unique_lock lock(mutex);
@@ -148,7 +151,7 @@ struct ProgressFixture {
     AutomaticCheckpointResult save(std::optional<std::string_view> tag) {
         std::lock_guard lock(mutex);
         ++calls;
-        return {tag ? std::string(*tag) : "resp_retry", refusal, publishing};
+        return {tag ? std::string(*tag) : "resp_retry", refusal, publishing, busy};
     }
     void notify() {
         std::lock_guard lock(mutex);
@@ -166,7 +169,7 @@ int automatic_retry_requires_matching_progress() {
         f.refusal = reason;
         AutomaticCheckpointCoordinator coordinator(
             [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
-            [&] { return f.observe(); }, [&] { f.notify(); });
+            [&] { return f.observe(); }, [&] { f.notify(); }, {}, kNoFallback);
         Victim victim{std::string(64, 'b'), "resp_retry"};
         coordinator.save_before_eviction(std::span(&victim, 1));
         failures += check(f.wait([&] { return f.completed == 1 && f.probes >= 3; }),
@@ -347,7 +350,7 @@ int pressure_transaction_busy_waits_without_budget() {
     ProgressFixture f;
     AutomaticCheckpointCoordinator coordinator(
         [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
-        [&] { return f.observe(); }, [&] { f.notify(); });
+        [&] { return f.observe(); }, [&] { f.notify(); }, {}, kNoFallback);
     Victim victim{std::string(64, 'f'), "resp_retry"};
     coordinator.save_before_eviction(std::span(&victim, 1));
     constexpr unsigned refusals = 2 * kTransientCheckpointRetries + 2;
@@ -454,7 +457,7 @@ int partially_reclaiming_refusal_does_not_self_wake() {
             return f.save(tag);
         },
         [&] { auto progress = f.observe(); progress.engine = engine.observed_progress(); return progress; },
-        [&] { engine.notify_progress(false); f.notify(); });
+        [&] { engine.notify_progress(false); f.notify(); }, {}, kNoFallback);
     Victim victim{std::string(64, 'd'), "resp_retry"};
     coordinator.save_before_eviction({&victim, 1});
     int failures = check(f.wait([&] { return f.completed == 1 && f.probes >= 4; }),
@@ -513,6 +516,219 @@ int publication_abandonment_completes_pressure() {
     failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::RequiredResponseMissing,
                       "abandoned publication did not settle with its reported reason");
     coordinator.drain();
+    return failures;
+}
+
+int pressure_window_settles_slow_refusals() {
+    ProgressFixture f;
+    f.refusal = Reason::Capacity;
+    std::vector<PressureAbandonment> abandonments;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment& value) {
+            std::lock_guard lock(f.mutex);
+            abandonments.push_back(value);
+            f.cv.notify_all();
+        }, {.fallback = 100ms, .pressure_window = 250ms});
+    Victim victim{std::string(64, '4'), "resp_window"};
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    int failures = check(f.wait([&] { return !abandonments.empty(); }),
+                         "pressure window did not settle without progress");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(abandonments.size() == 1 &&
+            abandonments[0].limit == PressureAbandonLimit::Window &&
+            abandonments[0].reason == Reason::Capacity &&
+            abandonments[0].attempts >= 3 && abandonments[0].attempts <= 5 &&
+            abandonments[0].attempts == f.calls && abandonments[0].elapsed_ms >= 250 &&
+            victim.outcome == Outcome::Settled && victim.reason == Reason::Capacity,
+            "pressure window did not preserve its last reason and exact attempt count");
+    }
+    coordinator.drain();
+    return failures;
+}
+
+int pressure_abandonment_receipts() {
+    ProgressFixture f;
+    f.refusal = Reason::Capacity;
+    std::vector<PressureAbandonment> abandonments;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment& value) {
+            std::lock_guard lock(f.mutex);
+            abandonments.push_back(value);
+            f.cv.notify_all();
+        }, {.fallback = 10ms, .pressure_window = 1h});
+    int failures = 0;
+    for (unsigned index = 0; index < 2; ++index) {
+        Victim victim{std::string(64, static_cast<char>('5' + index)), "resp_budget"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(f.wait([&] {
+            return abandonments.size() >= index + 1 &&
+                   f.completed >= (index + 1) * (1 + kTransientCheckpointRetries);
+        }),
+                          "budget exhaustion did not publish an abandonment");
+        std::lock_guard lock(f.mutex);
+        failures += check(abandonments.size() == index + 1 &&
+            abandonments.back().reason == Reason::Capacity &&
+            abandonments.back().limit == PressureAbandonLimit::Budget &&
+            abandonments.back().attempts == 1 + kTransientCheckpointRetries &&
+            abandonments.back().total == index + 1 && abandonments.back().elapsed_ms > 0,
+            "abandonment lost its budget, attempt count, elapsed time or cumulative count");
+    }
+    for (const auto reason : {Reason::UnsupportedCodec, Reason::None}) {
+        unsigned completed;
+        {
+            std::lock_guard lock(f.mutex);
+            f.refusal = reason;
+            completed = f.completed;
+        }
+        Victim victim{std::string(64, reason == Reason::None ? '8' : '7'), "resp_terminal"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(f.wait([&] { return f.completed > completed; }),
+                          "terminal pressure outcome never finished");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Settled && victim.reason == reason,
+                          "terminal pressure outcome did not settle");
+    }
+    coordinator.drain();
+    failures += check(abandonments.size() == 2, "success or terminal refusal emitted an abandonment");
+    return failures;
+}
+
+int pinned_busy_capacity_waits_without_budget() {
+    ProgressFixture f;
+    f.refusal = Reason::Capacity;
+    f.busy = true;
+    std::atomic<unsigned> abandoned{0};
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment&) { ++abandoned; }, kNoFallback);
+    Victim victim{std::string(64, '9'), "resp_pinned"};
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    constexpr unsigned refusals = 2 * kTransientCheckpointRetries + 2;
+    int failures = 0;
+    unsigned reached = 0;
+    for (unsigned count = 1; count <= refusals; ++count) {
+        if (!f.wait([&] { return f.completed >= count; })) { break; }
+        reached = count;
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::Capacity,
+                          "pinned capacity settled or lost its public reason");
+        std::lock_guard lock(f.mutex);
+        if (count == refusals) { f.refusal = Reason::None; }
+        ++f.progress.engine;
+    }
+    failures += check(reached == refusals, "pinned capacity spent the persistent retry budget");
+    failures += check(f.wait([&] { return f.completed >= refusals + 1; }),
+                      "pinned capacity did not save once the pin retired");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::None && abandoned == 0,
+                      "pinned capacity was abandoned instead of saved");
+    coordinator.drain();
+
+    ProgressFixture automatic;
+    automatic.refusal = Reason::Capacity;
+    automatic.busy = true;
+    AutomaticCheckpointCoordinator automatic_coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return automatic.save(tag); },
+        [&] { return automatic.observe(); }, [&] { automatic.notify(); },
+        [&](const PressureAbandonment&) { ++abandoned; }, kNoFallback);
+    failures += check(automatic_coordinator.enqueue(std::string(64, 'a')) !=
+                          AutomaticCheckpointEnqueueResult::Dropped,
+                      "automatic pinned-capacity fixture was not queued");
+    for (unsigned count = 1; count <= 1 + kTransientCheckpointRetries; ++count) {
+        failures += check(automatic.wait([&] { return automatic.completed >= count; }),
+                          "automatic pinned-capacity retry did not finish");
+        std::lock_guard lock(automatic.mutex);
+        ++automatic.progress.engine;
+    }
+    failures += check(!automatic.wait([&] { return automatic.calls > 1 + kTransientCheckpointRetries; }, 300ms),
+                      "automatic pinned capacity escaped its retry budget");
+    automatic_coordinator.drain();
+    failures += check(abandoned == 0, "automatic pinned capacity emitted a pressure abandonment");
+    return failures;
+}
+
+int drain_keeps_inflight_pressure_pending() {
+    ProgressFixture f;
+    f.refusal = Reason::Capacity;
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    const auto released = release.get_future().share();
+    std::atomic<unsigned> abandoned{0};
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) {
+            entered.set_value();
+            released.wait();
+            return f.save(tag);
+        }, [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment&) { ++abandoned; });
+    Victim victim{std::string(64, 'b'), "resp_draining"};
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    int failures = check(started.wait_for(2s) == std::future_status::ready,
+                         "drain fixture did not enter the save");
+    auto drained = std::async(std::launch::async, [&] { coordinator.drain(); });
+    failures += check(drained.wait_for(50ms) == std::future_status::timeout,
+                      "drain did not wait for its in-flight attempt");
+    release.set_value();
+    drained.get();
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::Capacity && abandoned == 0,
+                      "drain abandoned the pressure victim before synchronous final save");
+    return failures;
+}
+
+int promoted_automatic_entry_settles() {
+    ProgressFixture f;
+    f.refusal = Reason::IoUnavailable;
+    std::vector<PressureAbandonment> abandonments;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment& value) {
+            std::lock_guard lock(f.mutex);
+            abandonments.push_back(value);
+            f.cv.notify_all();
+        }, {.fallback = 50ms, .pressure_window = 400ms});
+    Victim victim{std::string(64, 'c'), "resp_retry"};
+    int failures = check(coordinator.enqueue(victim.session_sha256) != AutomaticCheckpointEnqueueResult::Dropped,
+                         "promotion fixture was not queued");
+    failures += check(f.wait([&] { return f.completed >= 1; }), "automatic I/O attempt did not finish");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Pending, "automatic entry did not promote as Pending");
+    failures += check(f.wait([&] { return !abandonments.empty(); }), "promoted automatic save stayed Pending");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    unsigned calls;
+    {
+        std::lock_guard lock(f.mutex);
+        calls = f.calls;
+        failures += check(abandonments.size() == 1 && abandonments[0].attempts == calls &&
+            abandonments[0].reason == Reason::IoUnavailable &&
+            victim.outcome == Outcome::Settled && victim.reason == Reason::IoUnavailable,
+            "promoted automatic save lost its attempts or refusal");
+    }
+    failures += check(!f.wait([&] { return f.calls > calls; }, 300ms),
+                      "settled promoted entry restarted without a new turn");
+    coordinator.drain();
+    return failures;
+}
+
+int capacity_busy_mapping() {
+    using Shortage = ninfer::runtime::DurableHostShortage;
+    int failures = check(capacity_refusal_is_busy(Reason::Capacity, Shortage::Busy),
+                         "pinned native capacity was not classified busy");
+    for (const auto shortage : {Shortage::None, Shortage::HostCapacity,
+                                Shortage::HostContiguity, Shortage::NoHostArena}) {
+        failures += check(!capacity_refusal_is_busy(Reason::Capacity, shortage),
+                          "persistent capacity was classified busy");
+    }
+    failures += check(!capacity_refusal_is_busy(Reason::TransactionBusy, Shortage::Busy),
+                      "capacity mapping reinterpreted a different reason");
     return failures;
 }
 
@@ -786,7 +1002,7 @@ int pressure_save_waits_out_competing_store_save() {
             busy += !saved && skip.durable_reason == Reason::TransactionBusy ? 1U : 0U;
             return AutomaticCheckpointResult{std::string(*tag), saved ? Reason::None : skip.durable_reason};
         },
-        [&] { return f.observe(); }, [&] { f.notify(); });
+        [&] { return f.observe(); }, [&] { f.notify(); }, {}, kNoFallback);
     Victim pressure{victim, "resp_victim"};
     coordinator.save_before_eviction(std::span(&pressure, 1));
     constexpr unsigned refusals = kTransientCheckpointRetries + 4;
@@ -836,6 +1052,12 @@ int main() {
     failures += run("pressure_busy_retries_are_spaced", pressure_busy_retries_are_spaced());
     failures += run("partially_reclaiming_refusal_does_not_self_wake", partially_reclaiming_refusal_does_not_self_wake());
     failures += run("publication_abandonment_completes_pressure", publication_abandonment_completes_pressure());
+    failures += run("pressure_window_settles_slow_refusals", pressure_window_settles_slow_refusals());
+    failures += run("pressure_abandonment_receipts", pressure_abandonment_receipts());
+    failures += run("pinned_busy_capacity_waits_without_budget", pinned_busy_capacity_waits_without_budget());
+    failures += run("drain_keeps_inflight_pressure_pending", drain_keeps_inflight_pressure_pending());
+    failures += run("promoted_automatic_entry_settles", promoted_automatic_entry_settles());
+    failures += run("capacity_busy_mapping", capacity_busy_mapping());
     failures += run("durable_record_delete_preserves_survivors", durable_record_delete_preserves_survivors());
     failures += run("durable_delete_retains_disk_only_records", durable_delete_retains_disk_only_records());
     failures += run("pressure_save_waits_out_competing_store_save", pressure_save_waits_out_competing_store_save());

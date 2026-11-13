@@ -384,19 +384,25 @@ An older turn that completes after that is superseded at completion and is never
 a save of its tag therefore reports `Refused(session_not_indexed)`.
 
 `PressureCheckpointVictim::reason` is runtime-only `DurableReason`, default `None`;
-it is not a manifest field or a new serialized enum ordinal. Existing
-`PressureCheckpointOutcome` semantics remain unchanged:
+it is not a manifest field or a new serialized enum ordinal.
+`PressureCheckpointOutcome` has these meanings:
 
 - `Settled` with `reason == None` reports coverage, not a finished proof. Engine
   must pin and stream-validate the native copy, recheck current authenticated
   generation/tag evidence, and retain the pins through the destructive worker turn.
   Failed proof changes the outcome to `Pending` with its typed reason.
-- `Settled` with a reported non-`None` terminal/absent-turn reason retains the
-  existing nonretryable settlement policy; it does not claim byte-validated native
-  recoverability. Responses-only survivors therefore never masquerade as coverage.
-- Retryable failure or still-publishing state remains `Pending`. An unfinished
-  paused request may settle through native replay; a completed native turn still
-  waits for its HTTP publication.
+- `Settled` with a non-`None` reason — a terminal refusal, an absent turn, or a
+  retryable refusal whose bounded retries (K7) are spent — permits the drop without
+  a proof. It does not claim byte-validated native recoverability; an abandoned
+  turn has no durable copy. Responses-only survivors never masquerade as coverage.
+- `Pending` means a save attempt is queued, running or deferred. Deferrals fire in
+  bounded time (K7), except a still-publishing turn's progress-only wait. Busy
+  refusals wait without a time limit because their blocker ends by itself. Other
+  retryable pressure refusals settle with their reason once the six-retry budget
+  or 10 s window is spent. An unfinished paused request may settle through native
+  replay; a completed native turn still waits for HTTP publication. Once stop
+  begins, asynchronous pressure work is drained; a victim answered then stays
+  `Pending` for the synchronous final save.
 
 The production pressure callback performs only bounded coordinator bookkeeping
 and enqueuing. Responses/catalog inspection and save work execute on the checkpoint
@@ -478,6 +484,7 @@ checkpoint progress clock; no-op reclaim tiers emit no capacity/admission notifi
 A refused automatic save cannot wake itself: its reclaim/completion notifications are
 non-observed, and a refused prepare holds no export lease. Prepared export retirement
 releases real pins and advances observed progress to wake other sessions' deferred saves.
+Without matching progress, only its wall-clock fallback (K7) rearms it.
 Native page quotes are not arena occupancy: receipts count actual per-release arena
 deltas before any re-materialization.
 
@@ -493,7 +500,8 @@ pin holds that Device slot until the lease retires on the worker (on every write
 it blocks release, demotion and zero-copy moves of the image but not forks from it, and a
 second export that meets it is Busy (retryable Capacity) until retirement. A staged
 prepare never reclaims, counts in `checkpoint_exports_in_flight_` like any prepared
-export, and is not counted in `prepare_attempts`. Busy and other refusals are unchanged.
+export, and is not counted in `prepare_attempts`. A pressure save refused behind such
+a pin is busy (K7): its public reason stays `capacity`, with no retry budget or window.
 
 The export result returns both proof readers and a reclaim summary. The service holds
 those readers **outside the exporter callback until the full store save returns or
@@ -907,48 +915,70 @@ to skip eviction-time victim generation/tag revalidation.
 |---|---|---|
 | Policy | `store_disabled`, `cache_disabled`, `origin_required`, `unsupported_codec` | no mutation; explicit policy/capability change required |
 | Identity | `incompatible_schema`, `fingerprint_mismatch`, `tag_mismatch` | clean replay; never quarantine solely for compatibility |
-| Race | `stale_publication`, `stale_revision`, `transaction_busy` | preserve newer state; retry only after observed progress |
+| Race | `stale_publication`, `stale_revision`, `transaction_busy` | preserve newer state; retry after observed progress or the bounded fallback |
 | Missing | `no_session_records`, `empty_tag`, `session_not_indexed`, `required_response_missing` | no mutation; no retry loop for absence |
 | Integrity | `origin_mac_mismatch`, `invalid_manifest`, `invalid_index`, `payload_size_mismatch`, `payload_digest_mismatch` | abort; quarantine verified corrupt generation only |
 | Capacity / admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
-| Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retry only after cause/progress changes |
+| Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retryable refusals wait for cause/progress changes or the bounded fallback |
 
 ### Wired cause-sensitive retries
 
 `AutomaticCheckpointCoordinator` uses `TransientRetryBudget` in the production
 automatic-save/pressure path: at most six retry rearms per completed turn, not an
-unconditional retry loop. A pressure save refused `transaction_busy` spends none of that
-budget: a busy transaction ends by itself, so it rearms on every matching progress
-observation, no sooner than 100 ms after its previous attempt, until it saves or meets a
-final refusal. Each retry waits for observed progress
-matching its cause:
+unconditional retry loop. Each deferred retry fires on progress matching its cause
+or `kCheckpointRetryFallback` (1 s) after the refused attempt completes, whichever
+comes first. Only the HTTP-publication wait stays progress-only. A completion
+wakeup cannot manufacture the fallback's wall-clock deadline.
 
-| Refusal or wait | Progress that may rearm it |
-|---|---|
-| `transaction_busy`, `tag_mismatch`, `stale_publication`, `stale_revision` | actual Engine or HTTP-publication progress |
-| `capacity` | actual Engine/admission progress, including storage-origin Capacity |
-| `io_unavailable` | successful storage progress |
-| HTTP response still publishing | HTTP-publication progress only; waiting consumes no save-attempt retry budget |
+Pressure refusals have two classes:
+
+- **Busy:** `transaction_busy`, a response still publishing, or `capacity` behind a
+  pinned State image. These spend no budget, have no retry window, and are at least
+  100 ms apart: the blocker ends by itself.
+- **Persistent:** every other retryable refusal, including storage-origin or native
+  non-busy `capacity`, `io_unavailable`, and the stale/tag races. These use the budget
+  and `kPressureRetryWindow` (10 s), opened at the first persistent pressure refusal.
+
+When the persistent budget or window is spent, or a deferral is refused outside
+drain, the pressure save is **abandoned**: `Settled` with its last reason. The Engine
+may drop the continuation without a durable copy, just as for `quota`; one
+abandonment receipt records this loss. During drain, retryable pressure refusals
+stay `Pending` for synchronous final save instead.
+
+Automatic saves have no window; a spent budget drops them until the next completed
+turn. An automatic entry whose turn becomes a pressure victim continues as that
+pressure save, keeping its spent budget and opening a fresh pressure window.
+
+| Refusal or wait | Rearmed by (or the 1 s fallback) | Pressure class |
+|---|---|---|
+| `transaction_busy`, `tag_mismatch`, `stale_publication`, `stale_revision` | actual Engine or HTTP-publication progress | busy for `transaction_busy`, otherwise persistent |
+| `capacity` | actual Engine/admission progress | busy behind a pinned image, otherwise persistent |
+| `io_unavailable` | successful storage progress | persistent |
+| HTTP response still publishing | HTTP-publication progress only; no fallback or budget | busy |
 
 **N9 storage-capacity retry limitation:** disk-full and filesystem-quota writes use
 K1's `Capacity` classification and HTTP 409 `capacity` response while preserving the prior
-generation and DELETE survivors. `AutomaticCheckpointResult` does not distinguish
-storage-origin Capacity from native-admission Capacity. The automatic-save
-coordinator therefore rearms either on the next observed Engine/admission progress,
-not on external disk reclamation. Reclaiming disk space alone does not trigger an
-automatic retry. An explicit client save after sufficient reclaim succeeds without
-waiting for that progress, subject to the unchanged publication and policy gates.
+generation and DELETE survivors. Storage-origin Capacity and persistent native
+Capacity both rearm on observed Engine/admission progress or the 1 s fallback,
+not on external disk reclamation. Within the budget and window, the next fallback
+notices reclaimed space. After them, a pressure save is abandoned (its turn is not
+durable, and Stop reports the session), while an automatic save waits for the next
+completed turn. An explicit client save after sufficient reclaim succeeds without
+waiting, subject to the unchanged publication and policy gates.
 
 Every completed coordinator task notifies the Engine, including retryable refusal.
 That completion wakeup is excluded from `checkpoint_progress` and cannot trigger
-its own retry. Unrelated or unchanged progress does not rearm the attempt. A new
-completed turn resets the bounded per-session retry budget; entries are retained
-only while their save/retry bookkeeping needs them.
+its own retry. Unrelated or unchanged progress does not rearm an attempt before
+its fallback. A new completed turn resets the bounded per-session retry budget.
+An abandoned or terminal pressure answer is retained for its turn until a new turn
+or tag replaces it, so replanned admission reads the same answer. When the 64-entry
+table is full, retained completed/settled answers with no work behind them are
+discarded before new work is refused room.
 
-Exhausted retryable pressure (`capacity`, `io_unavailable`, the stale/tag races) remains
-`Pending` and does not authorize discarding a live continuation. Reported nonretryable
-refusal or an absent/abandoned publication retains the existing `Settled` policy with its
-non-`None` reason. `None`-reason
+An abandoned pressure save is `Settled` with its non-`None` reason and permits the
+drop without a durable copy, as `quota` does. Stop accounts the session by its final
+outcome; native export of a released continuation reports `session_not_indexed`
+unless a later turn was saved. `None`-reason
 coverage still requires K3's Engine-owned native byte proof. A successful replay-only
 save is not coverage: pressure reports the absence of a native endpoint, rather
 than relabelling replay as a checkpoint hit.
@@ -963,15 +993,22 @@ Detailed receipt reasons are bounded symbolic names, not raw exceptions. Reports
 not include keys, payloads, raw IDs, prompts, checkpoint root paths or machine names.
 
 Operation receipt schema `ninfer-durable-operation/1` has mandatory fields:
-`operation` (`save`/`restore`), `state`, `reason`, `committed` (bool), `origin`
+`operation` (`save`/`restore`/`pressure`), `state`, `reason`, `committed` (bool), `origin`
 (`authenticated`/`unauthenticated`/`not_checked`), `frontier_tokens`, `restored_tokens`,
 `payload_bytes`, `points`, `states`, `pages` (unsigned integers).
 `dir_sync` is mandatory on a successful save acknowledgement and is exactly `fsync`
-or `ntfs-write-through`; absent on failed save or restore (not a fake empty success).
+or `ntfs-write-through`; absent on failed save, restore or pressure abandonment
+(not a fake empty success).
 `committed=true` requires `state=exported` or `imported`, `reason=none`, and all
 applicable byte/visibility/durability gates satisfied. Save success means durable
 publication, not merely Engine export. Engine export stats are not a publication ack.
 Receipts may add bounded elapsed durations/counts, never optional identity bypasses.
+A pressure save abandoned by a spent budget/window or a refused deferral emits one
+receipt with `operation: pressure`, `state: abandoned`, its last non-`none` reason,
+`committed: false`, `origin: not_checked` and zero native statistics. It adds
+unsigned `attempts`, `elapsed_ms`, cumulative process `abandoned_total`, and
+`limit` (`budget`, `window` or `deferral_refused`). It contains no session, tag or
+path, and is emitted before the Engine is notified.
 When export reclaim was considered, explicit, automatic, final and DELETE survivor-save
 receipts also contain unsigned `prepare_attempts`, `reclaimed_owners`, `reclaim_declined`,
 `reclaimed_cache_steps`, and `reclaimed_host_bytes`. Owners are not distinct sessions;

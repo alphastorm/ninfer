@@ -153,9 +153,21 @@ SessionCheckpointService::SessionCheckpointService(Engine& engine, const ServeOp
               return CheckpointSaveProgress{Access::checkpoint_progress(engine_),
                   publication_progress_.load(), storage_progress_.load()};
           },
-          [this] { Access::notify_checkpoint_progress(engine_); }) {}
+          [this] { Access::notify_checkpoint_progress(engine_); },
+          [this](const PressureAbandonment& abandonment) { pressure_abandoned(abandonment); }) {}
 
 SessionCheckpointService::~SessionCheckpointService() { automatic_.drain(); }
+
+void SessionCheckpointService::pressure_abandoned(const PressureAbandonment& abandonment) const noexcept {
+    try {
+        auto value = operation("pressure", "abandoned", abandonment.reason, false);
+        value["attempts"] = abandonment.attempts;
+        value["elapsed_ms"] = abandonment.elapsed_ms;
+        value["abandoned_total"] = abandonment.total;
+        value["limit"] = pressure_abandon_limit_name(abandonment.limit);
+        receipt(value);
+    } catch (...) {}
+}
 
 void SessionCheckpointService::receipt(const Json& value) const noexcept {
     try { std::osyncstream(std::clog) << value.dump() << '\n'; } catch (...) {}
@@ -454,8 +466,8 @@ void SessionCheckpointService::response_stored(std::string_view session, std::ui
     try {
         const bool worthwhile = checkpoint_worth_saving(frontier_tokens, options_.session_checkpoint_min_tokens,
                                                         store_.may_hold(session));
-        // A completed short turn still rearms an outstanding pressure save, including one
-        // whose previous turn exhausted its bounded race budget.
+        // A short turn rearms outstanding queued, running or deferred pressure work.
+        // An abandoned pressure answer is final for its turn.
         (void)automatic_.enqueue(std::string(session), !worthwhile);
     } catch (...) {}
 }
@@ -497,9 +509,11 @@ AutomaticCheckpointResult SessionCheckpointService::automatic_save(
     if (expected_tag && outcome.replay_only && outcome.saved) {
         receipt("save", "refused", Reason::SessionNotIndexed, false);
     }
-    return {outcome.tag, outcome.saved || outcome.covered
+    const auto reason = outcome.saved || outcome.covered
         ? (expected_tag && outcome.replay_only ? Reason::SessionNotIndexed : Reason::None)
-        : outcome.skip.durable_reason};
+        : outcome.skip.durable_reason;
+    return {outcome.tag, reason, false,
+            capacity_refusal_is_busy(reason, outcome.reclaim.host_shortage)};
 }
 
 void SessionCheckpointService::save_before_eviction(

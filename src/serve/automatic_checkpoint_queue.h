@@ -38,8 +38,8 @@ public:
     AutomaticCheckpointQueue& operator=(AutomaticCheckpointQueue&&)      = delete;
 
     [[nodiscard]] AutomaticCheckpointEnqueueResult enqueue(std::string session_digest) noexcept;
-    // Waiting is not a retry. Only a changed, cause-appropriate progress observation makes
-    // the predicate true; shutdown drops deferred work rather than manufacturing progress.
+    // Waiting is not a retry. The coordinator's predicate chooses cause-appropriate progress or
+    // a wall-clock fallback. Poll every 25 ms; shutdown drops deferred work, not inventing progress.
     [[nodiscard]] bool defer(std::string session_digest, std::function<bool()> ready) noexcept;
     void drain() noexcept;
 
@@ -65,20 +65,44 @@ struct CheckpointSaveProgress {
     std::uint64_t storage = 0;
 };
 
+enum class PressureAbandonLimit : std::uint8_t { Budget, Window, DeferralRefused };
+
+[[nodiscard]] constexpr std::string_view pressure_abandon_limit_name(PressureAbandonLimit limit) noexcept {
+    switch (limit) {
+    case PressureAbandonLimit::Budget: return "budget";
+    case PressureAbandonLimit::Window: return "window";
+    case PressureAbandonLimit::DeferralRefused: return "deferral_refused";
+    }
+    return "deferral_refused";
+}
+
+struct PressureAbandonment {
+    runtime::DurableReason reason = runtime::DurableReason::None;
+    PressureAbandonLimit limit = PressureAbandonLimit::Budget;
+    std::uint32_t attempts = 0;
+    std::uint64_t elapsed_ms = 0;
+    std::uint64_t total = 0;
+};
+
 struct AutomaticCheckpointResult {
     std::string tag;
     runtime::DurableReason reason = runtime::DurableReason::None;
     bool awaiting_publication = false;
+    // Native capacity behind an in-flight pin; the public reason and receipts stay capacity.
+    bool busy = false;
 };
 
 // The production pressure callback only consults bounded bookkeeping and queues work. In
 // particular, it never acquires Responses/catalog locks or waits for an Engine command.
+// Persistent pressure refusals settle in bounded time; Pending has an attempt behind it.
 class AutomaticCheckpointCoordinator final : public runtime::PressureCheckpointHandler {
 public:
     using Save = std::function<AutomaticCheckpointResult(
         std::string_view, std::optional<std::string_view>)>;
     using Progress = std::function<CheckpointSaveProgress()>;
-    AutomaticCheckpointCoordinator(Save save, Progress progress, std::function<void()> notify);
+    using Abandoned = std::function<void(const PressureAbandonment&)>;
+    AutomaticCheckpointCoordinator(Save save, Progress progress, std::function<void()> notify,
+                                   Abandoned abandoned = {}, CheckpointRetryTiming timing = {});
     ~AutomaticCheckpointCoordinator();
     [[nodiscard]] AutomaticCheckpointEnqueueResult enqueue(
         std::string session, bool only_if_pending = false) noexcept;
@@ -93,15 +117,24 @@ private:
         bool completed = false;
         bool settled = false;
         bool pressure = false;
+        std::uint32_t attempts = 0;
+        std::chrono::steady_clock::time_point pressed_at{};
+        std::optional<std::chrono::steady_clock::time_point> window_from;
     };
+    static constexpr std::size_t kMaxEntries = 64;
+    [[nodiscard]] bool make_room_locked() noexcept;
     void run(std::string_view session) noexcept;
     Save save_;
     Progress progress_;
     std::function<void()> notify_;
+    Abandoned abandoned_;
+    const CheckpointRetryTiming timing_;
     std::mutex mutex_;
     std::unordered_map<std::string, Entry> entries_;
     TransientRetryBudget retries_;
     std::uint64_t next_revision_ = 1;
+    std::uint64_t abandoned_total_ = 0;
+    bool draining_ = false;
     AutomaticCheckpointQueue queue_;
 };
 

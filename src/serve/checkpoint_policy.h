@@ -29,18 +29,31 @@ checkpoint_refusal_is_transient(const runtime::SessionCheckpointSkipDetail& skip
     }
 }
 
-// Retries a save gets per completed turn before a transient refusal counts as final: an automatic
-// save requeues, and save-before-evict keeps its victim resident for another admission pass.
-// Each retry waits for the engine to quiesce again, so this bounds work, not latency. A pressure
-// save refused as TransactionBusy spends none of it: a busy transaction ends by itself, and an
-// exhausted pressure save would keep its victim (and every request that needs it) waiting for good.
+// Retries per completed turn, waiting for matching progress or kCheckpointRetryFallback.
+// A spent budget drops an automatic save until the next turn and settles a pressure save with
+// its reason, permitting release without a durable copy. Busy pressure refusals (a transaction,
+// a response still publishing, or capacity behind a pinned image) spend none: their blocker ends
+// by itself.
 inline constexpr unsigned kTransientCheckpointRetries = 6;
 
-// A pressure save refused as TransactionBusy is attempted again no sooner than this. Its remaining
-// causes (the session's own active request, the store's single save slot, a publication) can
-// outlast many Engine progress ticks, and an attempt may stage a responses snapshot before the
-// refusal; this caps the retry rate at ten per second without a retry budget.
+// Busy pressure saves are at least this far apart. A transaction, publication or State image
+// pinned by another export can outlast many Engine progress ticks; cap attempts at ten per second.
 inline constexpr std::chrono::milliseconds kBusyPressureRetrySpacing{100};
+
+// Every deferral except an HTTP-publication wait fires by this deadline without matching progress.
+inline constexpr std::chrono::milliseconds kCheckpointRetryFallback{1000};
+// From the first persistent pressure refusal; keep well inside the smallest shipped pending timeout.
+inline constexpr std::chrono::milliseconds kPressureRetryWindow{10000};
+
+struct CheckpointRetryTiming {
+    std::chrono::milliseconds fallback = kCheckpointRetryFallback;
+    std::chrono::milliseconds pressure_window = kPressureRetryWindow;
+};
+
+[[nodiscard]] inline bool capacity_refusal_is_busy(
+    runtime::DurableReason reason, runtime::DurableHostShortage shortage) noexcept {
+    return reason == runtime::DurableReason::Capacity && shortage == runtime::DurableHostShortage::Busy;
+}
 
 // Whether a completed turn is worth an automatic checkpoint. A session below the configured minimum
 // is cheaper to prefill again than to write out after every turn, so automatic saves skip it; a

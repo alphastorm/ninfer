@@ -558,13 +558,14 @@ struct SessionRestoreSkipDetail {
 
 // What save-before-evict found for one victim.
 enum class PressureCheckpointOutcome : std::uint8_t {
-    // Dropping the continuation loses nothing more: the checkpoint covers the turn, the turn is
-    // not the session's newest stored response and never will be, or its save was refused for a
-    // reason retrying cannot fix (the handler reports that refusal).
+    // Dropping is permitted: the checkpoint covers the turn, the turn is not the session's newest
+    // stored response and never will be, or its save cannot be made durable. The last case is a
+    // terminal refusal or a retryable refusal whose bounded retries were spent; the handler
+    // reports its reason, and the dropped turn then has no durable copy.
     Settled,
-    // The turn may still become savable: its response is still being stored, or its save hit a
-    // gate that clears once the engine quiesces. The engine keeps the continuation and asks again
-    // when it next plans an admission that drops it.
+    // A save is queued, running or deferred: publication is unfinished, a transaction or pinned
+    // image that ends by itself refused it, or it remains within bounded retries. The engine
+    // retains the continuation and asks again when it next plans an admission that drops it.
     Pending,
 };
 
@@ -575,7 +576,8 @@ struct PressureCheckpointVictim {
     std::string checkpoint_tag;
     PressureCheckpointOutcome outcome = PressureCheckpointOutcome::Pending;
     // None means durable coverage and requires Engine's pinned native byte proof.
-    // A reported terminal refusal/absent turn keeps the frozen Settled policy.
+    // Any other reason on a Settled victim reports a refusal or absent turn: terminal, or
+    // retryable with bounded retries spent, and permits the drop without a durable copy.
     DurableReason reason = DurableReason::None;
 };
 
@@ -592,8 +594,9 @@ public:
     PressureCheckpointHandler& operator=(const PressureCheckpointHandler&) = delete;
 
     // Answers every victim through its outcome. The engine drops only Settled victims; a plan that
-    // would drop a Pending one is abandoned, so the waiting request waits - bounded by its own
-    // deadline - rather than trading a turn that can still be saved for cache.
+    // would drop a Pending one is abandoned, and the waiting request waits. Pending has a save
+    // attempt behind it; a save that cannot be made durable settles in bounded time. Only busy
+    // refusals, whose blocker ends by itself, wait without a time bound.
     virtual void save_before_eviction(std::span<PressureCheckpointVictim> victims) noexcept = 0;
 };
 

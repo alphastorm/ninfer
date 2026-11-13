@@ -61,6 +61,7 @@ private:
     [[nodiscard]] std::shared_ptr<std::mutex> session_operation(std::string_view session);
     [[nodiscard]] AutomaticCheckpointResult automatic_save(
         std::string_view session, std::optional<std::string_view> expected_tag);
+    void pressure_abandoned(const PressureAbandonment& abandonment) const noexcept;
     void receipt(const nlohmann::json& value) const noexcept;
     void receipt(std::string_view operation, std::string_view state, runtime::DurableReason reason,
                  bool committed, const runtime::DurableCheckpointStats& stats = {},

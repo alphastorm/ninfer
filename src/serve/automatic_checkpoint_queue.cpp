@@ -1,5 +1,6 @@
 #include "serve/automatic_checkpoint_queue.h"
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -123,19 +124,39 @@ void AutomaticCheckpointQueue::run(std::stop_token stop) noexcept {
 }
 
 AutomaticCheckpointCoordinator::AutomaticCheckpointCoordinator(
-    Save save, Progress progress, std::function<void()> notify)
+    Save save, Progress progress, std::function<void()> notify,
+    Abandoned abandoned, CheckpointRetryTiming timing)
     : save_(std::move(save)), progress_(std::move(progress)), notify_(std::move(notify)),
-      queue_([this](std::string_view session) { run(session); }) {}
+      abandoned_(std::move(abandoned)), timing_(timing),
+      queue_([this](std::string_view session) { run(session); }, kMaxEntries) {}
 
 AutomaticCheckpointCoordinator::~AutomaticCheckpointCoordinator() { drain(); }
-void AutomaticCheckpointCoordinator::drain() noexcept { queue_.drain(); }
+void AutomaticCheckpointCoordinator::drain() noexcept {
+    {
+        std::lock_guard lock(mutex_);
+        draining_ = true;
+    }
+    queue_.drain();
+}
+
+bool AutomaticCheckpointCoordinator::make_room_locked() noexcept {
+    for (auto at = entries_.begin(); at != entries_.end();) {
+        if (at->second.completed && at->second.settled) { at = entries_.erase(at); }
+        else { ++at; }
+    }
+    return entries_.size() < kMaxEntries;
+}
 
 AutomaticCheckpointEnqueueResult AutomaticCheckpointCoordinator::enqueue(
     std::string session, bool only_if_pending) noexcept {
     try {
         std::lock_guard lock(mutex_);
-        if (only_if_pending && !entries_.contains(session)) { return AutomaticCheckpointEnqueueResult::Dropped; }
-        if (!entries_.contains(session) && entries_.size() >= 64) {
+        const auto found = entries_.find(session);
+        if (only_if_pending && (found == entries_.end() ||
+                                (found->second.completed && found->second.settled))) {
+            return AutomaticCheckpointEnqueueResult::Dropped;
+        }
+        if (found == entries_.end() && entries_.size() >= kMaxEntries && !make_room_locked()) {
             return AutomaticCheckpointEnqueueResult::Dropped;
         }
         retries_.settle(session);
@@ -153,22 +174,29 @@ void AutomaticCheckpointCoordinator::save_before_eviction(
         victim.reason = runtime::DurableReason::None;
         try {
             std::lock_guard lock(mutex_);
+            const auto now = std::chrono::steady_clock::now();
             auto found = entries_.find(victim.session_sha256);
             if (found != entries_.end() && found->second.tag == victim.checkpoint_tag) {
+                if (!found->second.pressure) {
+                    found->second.pressure = true;
+                    found->second.pressed_at = now;
+                    found->second.window_from.reset();
+                }
                 if (found->second.completed) {
                     victim.reason = found->second.reason;
                     if (found->second.settled) {
                         victim.outcome = runtime::PressureCheckpointOutcome::Settled;
-                        entries_.erase(found);
+                        if (victim.reason == runtime::DurableReason::None) { entries_.erase(found); }
                     }
                 }
                 continue;
             }
             if (found != entries_.end() && found->second.tag.empty()) { continue; }
-            if (found == entries_.end() && entries_.size() >= 64) { continue; }
+            if (found == entries_.end() && entries_.size() >= kMaxEntries && !make_room_locked()) { continue; }
             retries_.settle(victim.session_sha256);
             entries_[victim.session_sha256] = {
-                .tag = victim.checkpoint_tag, .revision = next_revision_++, .pressure = true};
+                .tag = victim.checkpoint_tag, .revision = next_revision_++, .pressure = true,
+                .pressed_at = now};
             if (queue_.enqueue(victim.session_sha256) == AutomaticCheckpointEnqueueResult::Dropped) {
                 entries_.erase(victim.session_sha256);
             }
@@ -181,6 +209,7 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
     Entry attempt;
     CheckpointSaveProgress before;
     AutomaticCheckpointResult result;
+    std::optional<PressureAbandonment> abandonment;
     try {
         key.assign(session);
         {
@@ -201,46 +230,81 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
         const auto found = entries_.find(key);
         if (found != entries_.end() && found->second.revision == attempt.revision) {
             auto& entry = found->second;
+            const auto now = std::chrono::steady_clock::now();
             if (entry.tag.empty()) { entry.tag = std::move(result.tag); }
             entry.completed = true;
             entry.reason = result.reason;
+            ++entry.attempts;
             runtime::SessionCheckpointSkipDetail skip;
             skip.durable_reason = result.reason;
             const bool transient = checkpoint_refusal_is_transient(skip);
             const bool retryable = transient || result.reason == runtime::DurableReason::IoUnavailable ||
                                    result.reason == runtime::DurableReason::Capacity;
             entry.settled = !retryable;
-            // A busy transaction is not an inability to save: a pressure save it refuses waits for
-            // the next progress change without spending the retry budget, so no busy refusal can
-            // leave the victim Pending for good, and at least the busy spacing apart, which bounds
-            // the attempt rate while the blocker lasts. Capacity, I/O and the races keep their budget.
-            const bool busy = entry.pressure && result.reason == runtime::DurableReason::TransactionBusy;
+            // Publication waits stay progress-only. Busy pressure refusals have no budget or
+            // window, but keep their spacing. All other retryable pressure refusals are bounded
+            // by both the retry budget and a window opened at the first persistent refusal.
+            const bool publication = result.awaiting_publication;
+            const bool busy = entry.pressure &&
+                (result.reason == runtime::DurableReason::TransactionBusy ||
+                 (result.reason == runtime::DurableReason::Capacity && result.busy));
+            const bool persistent = retryable && !publication && !busy;
+            if (entry.pressure && persistent && !entry.window_from) { entry.window_from = now; }
+            const bool window_spent = entry.pressure && persistent &&
+                now - *entry.window_from >= timing_.pressure_window;
+            std::optional<PressureAbandonLimit> limit;
             bool deferred = false;
-            if (retryable && (result.awaiting_publication || busy || retries_.retry(key))) {
-                const auto reason = result.reason;
-                const auto not_before = busy ? std::chrono::steady_clock::now() + kBusyPressureRetrySpacing
-                                             : std::chrono::steady_clock::time_point{};
-                deferred = queue_.defer(key, [this, before, reason, not_before,
-                                              publication = result.awaiting_publication] {
-                    if (std::chrono::steady_clock::now() < not_before) { return false; }
-                    const auto now = progress_();
-                    if (publication) { return now.publication != before.publication; }
-                    if (reason == runtime::DurableReason::IoUnavailable) {
-                        return now.storage != before.storage;
+            if (retryable) {
+                if (window_spent) {
+                    limit = PressureAbandonLimit::Window;
+                } else if (!publication && !busy && !retries_.retry(key)) {
+                    limit = PressureAbandonLimit::Budget;
+                } else {
+                    const auto reason = result.reason;
+                    const auto not_before = busy ? now + kBusyPressureRetrySpacing
+                                                 : std::chrono::steady_clock::time_point{};
+                    auto fire_at = publication ? std::chrono::steady_clock::time_point::max()
+                                               : now + timing_.fallback;
+                    if (entry.pressure && persistent) {
+                        fire_at = std::min(fire_at, *entry.window_from + timing_.pressure_window);
                     }
-                    if (reason == runtime::DurableReason::Capacity) { return now.engine != before.engine; }
-                    return now.engine != before.engine || now.publication != before.publication;
-                });
-                if (!deferred) { retries_.settle(key); }
-            } else {
-                retries_.settle(key);
+                    std::function<bool()> ready;
+                    try {
+                        ready = [this, before, reason, not_before, fire_at, publication] {
+                            const auto tick = std::chrono::steady_clock::now();
+                            if (tick < not_before) { return false; }
+                            if (tick >= fire_at) { return true; }
+                            const auto progress = progress_();
+                            if (publication) { return progress.publication != before.publication; }
+                            if (reason == runtime::DurableReason::IoUnavailable) {
+                                return progress.storage != before.storage;
+                            }
+                            if (reason == runtime::DurableReason::Capacity) {
+                                return progress.engine != before.engine;
+                            }
+                            return progress.engine != before.engine || progress.publication != before.publication;
+                        };
+                    } catch (...) {}
+                    deferred = queue_.defer(key, std::move(ready));
+                    if (!deferred) { limit = PressureAbandonLimit::DeferralRefused; }
+                }
             }
-            // Ordinary completed saves need no pressure cache. A subsequent pressure request
-            // can inspect coverage on the checkpoint thread. Exhausted retryable pressure
-            // failures remain Pending, never become permission to discard resident state.
+            if (!deferred) { retries_.settle(key); }
+            if (entry.pressure && limit && !draining_) {
+                entry.settled = true;
+                abandonment = PressureAbandonment{result.reason, *limit, entry.attempts,
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - entry.pressed_at).count()), ++abandoned_total_};
+            }
+            // Ordinary saves need no pressure cache. A pressure answer stays for its turn,
+            // settled or with an attempt behind it, until a new turn, tag or full table replaces it.
             if (!entry.pressure && !deferred) { entries_.erase(found); }
         }
     } catch (...) {}
+    // Publish the abandonment before waking the Engine, with no coordinator lock held.
+    if (abandonment && abandoned_) {
+        try { abandoned_(*abandonment); } catch (...) {}
+    }
     // Even a retryable refusal completes this task and releases the Engine Pending latch.
     // This notification is deliberately excluded from the observed Engine progress clock.
     try { notify_(); } catch (...) {}
