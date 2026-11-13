@@ -1,5 +1,20 @@
 # NInfer native Windows lanes
 
+## 2026-11-13 — Native component 0.8.0-beta.4 (qualification pending)
+
+The native component candidates are `v0.8.0-qwen38-4090-beta.4` and
+`v0.8.0-qwen38-3090-beta.4`. Both include bounded pressure saves (#122): a
+pressure save that cannot be made durable (a full checkpoint volume or store
+quota, a storage outage, a stale tag) settles after six retries or 10 seconds,
+and its continuation is released with one `pressure`/`abandoned` receipt instead
+of holding admission until requests time out with HTTP 503. Release, deployment
+and build identities advance together; model bytes, runtime shape, admission
+reserves and GPU-owner policies remain unchanged from `0.8.0-beta.3`.
+
+Package-build receipts remain `hardware-pending`. Both candidates require fresh
+exact-source build, package, GPU, lifecycle and restoration evidence before
+qualification; prior-component receipts are not evidence for these bytes.
+
 ## 2026-11-11 — Native component 0.8.0-beta.3 (qualification pending)
 
 The native component candidates are `v0.8.0-qwen38-4090-beta.3` and
