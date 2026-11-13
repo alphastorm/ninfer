@@ -140,8 +140,15 @@ void AutomaticCheckpointCoordinator::drain() noexcept {
 }
 
 bool AutomaticCheckpointCoordinator::make_room_locked() noexcept {
+    const auto now = std::chrono::steady_clock::now();
     for (auto at = entries_.begin(); at != entries_.end();) {
-        if (at->second.completed && at->second.settled) { at = entries_.erase(at); }
+        const auto& entry = at->second;
+        // Keep fresh settlements until the Engine reads them. Unread answers may age out
+        // after twice the pressure window when their original admission no longer asks.
+        if (entry.completed && entry.settled &&
+            (entry.answer_read || now - entry.settled_at > 2 * timing_.pressure_window)) {
+            at = entries_.erase(at);
+        }
         else { ++at; }
     }
     return entries_.size() < kMaxEntries;
@@ -172,36 +179,62 @@ void AutomaticCheckpointCoordinator::save_before_eviction(
     for (auto& victim : victims) {
         victim.outcome = runtime::PressureCheckpointOutcome::Pending;
         victim.reason = runtime::DurableReason::None;
-        try {
-            std::lock_guard lock(mutex_);
-            const auto now = std::chrono::steady_clock::now();
-            auto found = entries_.find(victim.session_sha256);
-            if (found != entries_.end() && found->second.tag == victim.checkpoint_tag) {
-                if (!found->second.pressure) {
-                    found->second.pressure = true;
-                    found->second.pressed_at = now;
-                    found->second.window_from.reset();
-                }
-                if (found->second.completed) {
-                    victim.reason = found->second.reason;
-                    if (found->second.settled) {
-                        victim.outcome = runtime::PressureCheckpointOutcome::Settled;
-                        if (victim.reason == runtime::DurableReason::None) { entries_.erase(found); }
-                    }
-                }
-                continue;
-            }
-            if (found != entries_.end() && found->second.tag.empty()) { continue; }
-            if (found == entries_.end() && entries_.size() >= kMaxEntries && !make_room_locked()) { continue; }
-            retries_.settle(victim.session_sha256);
-            entries_[victim.session_sha256] = {
-                .tag = victim.checkpoint_tag, .revision = next_revision_++, .pressure = true,
-                .pressed_at = now};
-            if (queue_.enqueue(victim.session_sha256) == AutomaticCheckpointEnqueueResult::Dropped) {
-                entries_.erase(victim.session_sha256);
-            }
-        } catch (...) {}
     }
+    try {
+        std::lock_guard lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& victim : victims) {
+            try {
+                auto found = entries_.find(victim.session_sha256);
+                if (found != entries_.end() &&
+                    (found->second.tag == victim.checkpoint_tag || found->second.tag.empty())) {
+                    auto& entry = found->second;
+                    if (!entry.pressure) {
+                        entry.pressure = true;
+                        entry.pressed_at = now;
+                        entry.window_from.reset();
+                    }
+                    // An automatic first run may still be queued or in flight with no tag.
+                    // Promotion applies now; its result is not yet an answer to this victim.
+                    if (entry.tag.empty()) { continue; }
+                    if (entry.completed) {
+                        victim.reason = entry.reason;
+                        if (entry.settled &&
+                            (!draining_ || entry.reason == runtime::DurableReason::None)) {
+                            victim.outcome = runtime::PressureCheckpointOutcome::Settled;
+                            entry.answer_read = true;
+                        }
+                    }
+                    continue;
+                }
+                if (found == entries_.end() && entries_.size() >= kMaxEntries && !make_room_locked()) {
+                    continue;
+                }
+                retries_.settle(victim.session_sha256);
+                entries_[victim.session_sha256] = {
+                    .tag = victim.checkpoint_tag, .revision = next_revision_++, .pressure = true,
+                    .pressed_at = now};
+                if (queue_.enqueue(victim.session_sha256) == AutomaticCheckpointEnqueueResult::Dropped) {
+                    entries_.erase(victim.session_sha256);
+                }
+            } catch (...) {}
+        }
+        // A Pending peer makes the Engine discard the whole plan. Consume saved answers
+        // only after answering every victim, so the next plan can read all of them together.
+        // Non-None answers retain their turn/tag lifetime and the bounded table pruning rule.
+        if (std::all_of(victims.begin(), victims.end(), [](const auto& victim) {
+                return victim.outcome == runtime::PressureCheckpointOutcome::Settled;
+            })) {
+            for (const auto& victim : victims) {
+                if (victim.reason != runtime::DurableReason::None) { continue; }
+                const auto found = entries_.find(victim.session_sha256);
+                if (found != entries_.end() && found->second.tag == victim.checkpoint_tag &&
+                    found->second.settled && found->second.reason == runtime::DurableReason::None) {
+                    entries_.erase(found);
+                }
+            }
+        }
+    } catch (...) {}
 }
 
 void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
@@ -241,14 +274,19 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
             const bool retryable = transient || result.reason == runtime::DurableReason::IoUnavailable ||
                                    result.reason == runtime::DurableReason::Capacity;
             entry.settled = !retryable;
+            if (entry.settled) {
+                entry.settled_at = now;
+                entry.answer_read = false;
+            }
             // Publication waits stay progress-only. Busy pressure refusals have no budget or
-            // window, but keep their spacing. All other retryable pressure refusals are bounded
-            // by both the retry budget and a window opened at the first persistent refusal.
+            // window, reset any persistent window, and keep their spacing. Other retryable
+            // pressure refusals use the unchanged budget and a consecutive-persistent window.
             const bool publication = result.awaiting_publication;
             const bool busy = entry.pressure &&
                 (result.reason == runtime::DurableReason::TransactionBusy ||
                  (result.reason == runtime::DurableReason::Capacity && result.busy));
             const bool persistent = retryable && !publication && !busy;
+            if (entry.pressure && (busy || publication)) { entry.window_from.reset(); }
             if (entry.pressure && persistent && !entry.window_from) { entry.window_from = now; }
             const bool window_spent = entry.pressure && persistent &&
                 now - *entry.window_from >= timing_.pressure_window;
@@ -291,19 +329,32 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
             }
             if (!deferred) { retries_.settle(key); }
             if (entry.pressure && limit && !draining_) {
-                entry.settled = true;
                 abandonment = PressureAbandonment{result.reason, *limit, entry.attempts,
                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - entry.pressed_at).count()), ++abandoned_total_};
             }
-            // Ordinary saves need no pressure cache. A pressure answer stays for its turn,
-            // settled or with an attempt behind it, until a new turn, tag or full table replaces it.
+            // Ordinary saves need no pressure cache. Pressure answers retain their turn/tag:
+            // None survives Pending peers; full-table pruning reclaims read or aged settlements.
+            // During stop, retained non-None answers report Pending for synchronous final save.
             if (!entry.pressure && !deferred) { entries_.erase(found); }
         }
     } catch (...) {}
-    // Publish the abandonment before waking the Engine, with no coordinator lock held.
-    if (abandonment && abandoned_) {
-        try { abandoned_(*abandonment); } catch (...) {}
+    // The best-effort receipt precedes any Engine-visible abandonment, not just its wakeup.
+    // No lock is held across the callback; a new revision supersedes this answer without
+    // another receipt, and stop keeps it Pending for synchronous final save.
+    if (abandonment) {
+        if (abandoned_) {
+            try { abandoned_(*abandonment); } catch (...) {}
+        }
+        try {
+            std::lock_guard lock(mutex_);
+            const auto found = entries_.find(key);
+            if (found != entries_.end() && found->second.revision == attempt.revision && !draining_) {
+                found->second.settled = true;
+                found->second.settled_at = std::chrono::steady_clock::now();
+                found->second.answer_read = false;
+            }
+        } catch (...) {}
     }
     // Even a retryable refusal completes this task and releases the Engine Pending latch.
     // This notification is deliberately excluded from the observed Engine progress clock.

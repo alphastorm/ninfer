@@ -94,7 +94,9 @@ struct AutomaticCheckpointResult {
 
 // The production pressure callback only consults bounded bookkeeping and queues work. In
 // particular, it never acquires Responses/catalog locks or waits for an Engine command.
-// Persistent pressure refusals settle in bounded time; Pending has an attempt behind it.
+// Persistent pressure refusals settle in bounded time, after their abandonment receipt.
+// Saved answers survive partial plans; stopping reports retained non-None answers as Pending
+// for synchronous final save rather than authorizing release.
 class AutomaticCheckpointCoordinator final : public runtime::PressureCheckpointHandler {
 public:
     using Save = std::function<AutomaticCheckpointResult(
@@ -116,9 +118,11 @@ private:
         runtime::DurableReason reason = runtime::DurableReason::None;
         bool completed = false;
         bool settled = false;
+        bool answer_read = false;
         bool pressure = false;
         std::uint32_t attempts = 0;
         std::chrono::steady_clock::time_point pressed_at{};
+        std::chrono::steady_clock::time_point settled_at{};
         std::optional<std::chrono::steady_clock::time_point> window_from;
     };
     static constexpr std::size_t kMaxEntries = 64;

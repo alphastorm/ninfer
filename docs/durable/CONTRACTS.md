@@ -391,6 +391,9 @@ it is not a manifest field or a new serialized enum ordinal.
   must pin and stream-validate the native copy, recheck current authenticated
   generation/tag evidence, and retain the pins through the destructive worker turn.
   Failed proof changes the outcome to `Pending` with its typed reason.
+  The coordinator computes every victim's answer before consuming any saved
+  (`None`-reason) answer. It consumes these answers only if every victim in that
+  call is `Settled`; a `Pending` peer leaves them available for the next plan.
 - `Settled` with a non-`None` reason — a terminal refusal, an absent turn, or a
   retryable refusal whose bounded retries (K7) are spent — permits the drop without
   a proof. It does not claim byte-validated native recoverability; an abandoned
@@ -401,8 +404,12 @@ it is not a manifest field or a new serialized enum ordinal.
   retryable pressure refusals settle with their reason once the six-retry budget
   or 10 s window is spent. An unfinished paused request may settle through native
   replay; a completed native turn still waits for HTTP publication. Once stop
-  begins, asynchronous pressure work is drained; a victim answered then stays
-  `Pending` for the synchronous final save.
+  begins, asynchronous pressure work is drained; retained non-`None` settled
+  answers report `Pending` without being consumed, for the synchronous final save.
+  Saved `None`-reason answers still require the native proof above.
+
+A pressure abandonment receipt precedes any Engine-visible settlement of that
+abandonment, not merely the completion notification (K7).
 
 The production pressure callback performs only bounded coordinator bookkeeping
 and enqueuing. Responses/catalog inspection and save work execute on the checkpoint
@@ -934,20 +941,27 @@ Pressure refusals have two classes:
 
 - **Busy:** `transaction_busy`, a response still publishing, or `capacity` behind a
   pinned State image. These spend no budget, have no retry window, and are at least
-  100 ms apart: the blocker ends by itself.
+  100 ms apart: the blocker ends by itself. A busy or publication-wait refusal
+  resets any open persistent pressure window.
 - **Persistent:** every other retryable refusal, including storage-origin or native
   non-busy `capacity`, `io_unavailable`, and the stale/tag races. These use the budget
-  and `kPressureRetryWindow` (10 s), opened at the first persistent pressure refusal.
+  and `kPressureRetryWindow` (10 s), opened at the first persistent pressure refusal
+  after creation, promotion, or the latest busy/publication wait. The window measures
+  consecutive persistent-refusal time; resetting it does not reset the retry budget.
 
 When the persistent budget or window is spent, or a deferral is refused outside
 drain, the pressure save is **abandoned**: `Settled` with its last reason. The Engine
 may drop the continuation without a durable copy, just as for `quota`; one
-abandonment receipt records this loss. During drain, retryable pressure refusals
-stay `Pending` for synchronous final save instead.
+abandonment receipt records this loss before the answer becomes visible to the
+Engine. During drain, retryable pressure refusals and retained non-`None` settled
+answers report `Pending` for synchronous final save instead; those retained answers
+are not consumed.
 
 Automatic saves have no window; a spent budget drops them until the next completed
 turn. An automatic entry whose turn becomes a pressure victim continues as that
-pressure save, keeping its spent budget and opening a fresh pressure window.
+pressure save, keeping its spent budget and resetting its pressure window. This
+promotion also applies to an empty-tag first run that is queued or in flight;
+it reports `Pending`. The next persistent refusal opens the window.
 
 | Refusal or wait | Rearmed by (or the 1 s fallback) | Pressure class |
 |---|---|---|
@@ -971,9 +985,13 @@ That completion wakeup is excluded from `checkpoint_progress` and cannot trigger
 its own retry. Unrelated or unchanged progress does not rearm an attempt before
 its fallback. A new completed turn resets the bounded per-session retry budget.
 An abandoned or terminal pressure answer is retained for its turn until a new turn
-or tag replaces it, so replanned admission reads the same answer. When the 64-entry
-table is full, retained completed/settled answers with no work behind them are
-discarded before new work is refused room.
+or tag replaces it, so replanned admission reads the same answer. A saved
+`None`-reason answer is consumed only after every victim in the call is `Settled`,
+not while a peer remains `Pending`. Entries record when they settle and whether a
+settled answer was returned to the Engine. When the 64-entry table is full, only
+completed/settled entries whose answer was read or whose settlement is more than
+twice the pressure window old may be discarded to make room. Fresh unread
+settlements remain; if none is eligible, new work is refused room.
 
 An abandoned pressure save is `Settled` with its non-`None` reason and permits the
 drop without a durable copy, as `quota` does. Stop accounts the session by its final
@@ -1008,7 +1026,12 @@ receipt with `operation: pressure`, `state: abandoned`, its last non-`none` reas
 `committed: false`, `origin: not_checked` and zero native statistics. It adds
 unsigned `attempts`, `elapsed_ms`, cumulative process `abandoned_total`, and
 `limit` (`budget`, `window` or `deferral_refused`). It contains no session, tag or
-path, and is emitted before the Engine is notified.
+path. The coordinator decides abandonment under its lock without settling the
+entry, invokes the receipt callback with no lock held, then re-locks and settles
+only the same revision, unless stopping has begun, before notifying the Engine.
+Thus the receipt precedes any Engine-visible abandonment settlement. A revision
+change during the callback suppresses the old settlement without a second receipt.
+Receipt output remains best-effort: a logging failure does not block serving.
 When export reclaim was considered, explicit, automatic, final and DELETE survivor-save
 receipts also contain unsigned `prepare_attempts`, `reclaimed_owners`, `reclaim_declined`,
 `reclaimed_cache_steps`, and `reclaimed_host_bytes`. Owners are not distinct sessions;

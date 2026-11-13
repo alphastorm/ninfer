@@ -297,6 +297,12 @@ int settled_entries_do_not_fill_the_table() {
     }
     int failures = check(f.wait([&] { return f.completed >= 64; }),
                          "settled-table fixture did not finish its first 64 saves");
+    for (unsigned index = 0; index < 64; ++index) {
+        Victim settled{session(index), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&settled, 1));
+        failures += check(settled.outcome == Outcome::Settled,
+                          "settled-table fixture could not read its completed answers");
+    }
     Victim victim{session(64), "resp_retry"};
     coordinator.save_before_eviction(std::span(&victim, 1));
     failures += check(f.wait([&] { return f.completed >= 65; }),
@@ -340,6 +346,335 @@ int settled_answer_survives_a_pending_peer() {
     failures += check(victims[0].outcome == Outcome::Settled && victims[1].outcome == Outcome::Settled,
                       "peer settlements never coincided");
     coordinator.drain();
+    return failures;
+}
+
+int saved_answer_survives_a_pending_peer() {
+    ProgressFixture f;
+    const std::string x(64, '2'), y(64, '3');
+    bool peer_entered = false, release_peer = false;
+    unsigned x_calls = 0;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            std::unique_lock lock(f.mutex);
+            ++f.calls;
+            if (session == x) { ++x_calls; }
+            else {
+                peer_entered = true;
+                f.cv.notify_all();
+                f.cv.wait_for(lock, 2s, [&] { return release_peer; });
+            }
+            return AutomaticCheckpointResult{std::string(*tag), Reason::None};
+        }, [&] { return f.observe(); }, [&] { f.notify(); }, {}, kNoFallback);
+    std::array<Victim, 2> victims{{{x, "resp_x"}, {y, "resp_y"}}};
+    coordinator.save_before_eviction(victims);
+    int failures = check(f.wait([&] { return f.completed >= 1 && peer_entered; }),
+                         "saved-peer fixture did not hold its second save");
+    for (unsigned ask = 0; ask < 2; ++ask) {
+        coordinator.save_before_eviction(victims);
+        failures += check(victims[0].outcome == Outcome::Settled &&
+                              victims[0].reason == Reason::None &&
+                              victims[1].outcome == Outcome::Pending,
+                          "saved answer disappeared while another victim remained Pending");
+    }
+    {
+        std::lock_guard lock(f.mutex);
+        release_peer = true;
+        f.cv.notify_all();
+    }
+    failures += check(f.wait([&] { return f.completed >= 2; }), "saved peer did not finish");
+    coordinator.save_before_eviction(victims);
+    failures += check(victims[0].outcome == Outcome::Settled &&
+                          victims[1].outcome == Outcome::Settled,
+                      "saved peer answers never aligned in one plan");
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(x_calls == 1, "saved peer was unnecessarily saved again");
+    }
+    coordinator.save_before_eviction(victims);
+    failures += check(victims[0].outcome == Outcome::Pending &&
+                          victims[1].outcome == Outcome::Pending,
+                      "fully answered saved plan did not release its cached proofs");
+    coordinator.drain();
+    return failures;
+}
+
+int busy_and_publication_reset_pressure_window() {
+    int failures = 0;
+    for (unsigned wait_kind = 0; wait_kind < 3; ++wait_kind) {
+        ProgressFixture f;
+        f.refusal = Reason::Capacity;
+        unsigned abandonments = 0;
+        AutomaticCheckpointCoordinator coordinator(
+            [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+            [&] { return f.observe(); }, [&] { f.notify(); },
+            [&](const PressureAbandonment&) {
+                std::lock_guard lock(f.mutex);
+                ++abandonments;
+            }, {.fallback = 1h, .pressure_window = 100ms});
+        Victim victim{std::string(64, '4'), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(f.wait([&] { return f.completed >= 1; }),
+                          "window-reset fixture did not refuse persistently");
+        {
+            std::lock_guard lock(f.mutex);
+            f.refusal = wait_kind == 1 ? Reason::Capacity : Reason::TransactionBusy;
+            f.busy = wait_kind == 1;
+            f.publishing = wait_kind == 2;
+            ++f.progress.engine;
+        }
+        failures += check(f.wait([&] { return f.completed >= 2; }),
+                          "window-reset fixture did not enter its busy wait");
+        failures += check(!f.wait([&] { return f.completed > 2; }, 250ms),
+                          "busy wait unexpectedly retried without progress");
+        {
+            std::lock_guard lock(f.mutex);
+            f.refusal = Reason::Capacity;
+            f.busy = f.publishing = false;
+            ++f.progress.engine;
+            ++f.progress.publication;
+        }
+        failures += check(f.wait([&] { return f.completed >= 3; }),
+                          "persistent refusal did not resume after the busy wait");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::Capacity,
+                          "busy or publication time spent the persistent pressure window");
+        {
+            std::lock_guard lock(f.mutex);
+            failures += check(abandonments == 0,
+                              "resumed persistent refusal emitted a premature abandonment");
+            f.refusal = Reason::None;
+            ++f.progress.engine;
+        }
+        if (victim.outcome == Outcome::Pending) {
+            failures += check(f.wait([&] { return f.completed >= 4; }),
+                              "reset pressure window did not permit recovery");
+        }
+        coordinator.drain();
+    }
+    return failures;
+}
+
+int inflight_automatic_entry_is_promoted() {
+    ProgressFixture f;
+    f.refusal = Reason::IoUnavailable;
+    bool entered = false, release = false;
+    std::vector<PressureAbandonment> abandonments;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) {
+            {
+                std::unique_lock lock(f.mutex);
+                if (f.calls == 0) {
+                    entered = true;
+                    f.cv.notify_all();
+                    f.cv.wait_for(lock, 2s, [&] { return release; });
+                }
+            }
+            return f.save(tag);
+        }, [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment& value) {
+            std::lock_guard lock(f.mutex);
+            abandonments.push_back(value);
+            f.cv.notify_all();
+        }, {.fallback = 50ms, .pressure_window = 150ms});
+    Victim victim{std::string(64, '5'), "resp_retry"};
+    int failures = check(coordinator.enqueue(victim.session_sha256) ==
+                             AutomaticCheckpointEnqueueResult::Enqueued,
+                         "in-flight promotion fixture did not queue");
+    failures += check(f.wait([&] { return entered; }), "automatic first save did not start");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Pending, "in-flight automatic save was not Pending");
+    {
+        std::lock_guard lock(f.mutex);
+        release = true;
+        f.cv.notify_all();
+    }
+    failures += check(f.wait([&] {
+        return !abandonments.empty() && f.completed >= abandonments[0].attempts;
+    }), "in-flight automatic save did not acquire the pressure bound");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(abandonments.size() == 1 &&
+                              abandonments[0].limit == PressureAbandonLimit::Window &&
+                              abandonments[0].attempts == f.calls &&
+                              f.calls < 1 + kTransientCheckpointRetries &&
+                              victim.outcome == Outcome::Settled &&
+                              victim.reason == Reason::IoUnavailable,
+                          "empty-tag promotion ran the automatic budget before pressure settlement");
+    }
+    coordinator.drain();
+    return failures;
+}
+
+int fresh_unread_settlements_survive_table_pressure() {
+    const auto session = [](unsigned index) {
+        constexpr std::string_view digits = "0123456789abcdef";
+        return std::string(62, 'a') + digits[index / 16] + digits[index % 16];
+    };
+    ProgressFixture f;
+    const std::string abandoned_session = session(63);
+    unsigned abandonments = 0;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view digest, std::optional<std::string_view> tag) {
+            std::lock_guard lock(f.mutex);
+            ++f.calls;
+            ++f.progress.engine;
+            return AutomaticCheckpointResult{tag ? std::string(*tag) : "resp_retry",
+                digest == abandoned_session ? Reason::Capacity : Reason::UnsupportedCodec};
+        }, [&] { return f.observe(); }, [&] { f.notify(); },
+        [&](const PressureAbandonment&) {
+            std::lock_guard lock(f.mutex);
+            ++abandonments;
+        }, kNoFallback);
+    for (unsigned index = 0; index < 64; ++index) {
+        Victim victim{session(index), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+    }
+    constexpr unsigned initial_completions = 64 + kTransientCheckpointRetries;
+    int failures = check(f.wait([&] { return f.completed >= initial_completions; }),
+                         "unread-table fixture did not settle");
+    Victim fresh{session(64), "resp_retry"};
+    coordinator.save_before_eviction(std::span(&fresh, 1));
+    failures += check(coordinator.enqueue(session(65)) == AutomaticCheckpointEnqueueResult::Dropped,
+                      "full table purged fresh unread settlements for an automatic save");
+    failures += check(!f.wait([&] { return f.completed > initial_completions; }, 100ms),
+                      "full table purged fresh unread settlements for a pressure save");
+    Victim abandoned{session(63), "resp_retry"};
+    coordinator.save_before_eviction(std::span(&abandoned, 1));
+    failures += check(abandoned.outcome == Outcome::Settled && abandoned.reason == Reason::Capacity,
+                      "table pressure lost an unread abandonment answer");
+    failures += check(coordinator.enqueue(session(65)) != AutomaticCheckpointEnqueueResult::Dropped,
+                      "a read settlement did not make room for new work");
+    coordinator.drain();
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(abandonments == 1, "table pressure duplicated an abandonment receipt");
+    }
+
+    ProgressFixture aged;
+    aged.refusal = Reason::UnsupportedCodec;
+    AutomaticCheckpointCoordinator aged_coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return aged.save(tag); },
+        [&] { return aged.observe(); }, [&] { aged.notify(); },
+        {}, {.fallback = 1h, .pressure_window = 50ms});
+    for (unsigned index = 0; index < 64; ++index) {
+        Victim victim{session(index), "resp_retry"};
+        aged_coordinator.save_before_eviction(std::span(&victim, 1));
+    }
+    failures += check(aged.wait([&] { return aged.completed >= 64; }),
+                      "aged-table fixture did not settle");
+    failures += check(!aged.wait([&] { return aged.completed > 64; }, 150ms),
+                      "settled entries unexpectedly restarted while aging");
+    failures += check(aged_coordinator.enqueue(session(64)) != AutomaticCheckpointEnqueueResult::Dropped,
+                      "unread settlement older than twice the window did not make room");
+    failures += check(aged.wait([&] { return aged.completed >= 65; }),
+                      "work admitted after settlement aging did not run");
+    aged_coordinator.drain();
+    return failures;
+}
+
+int abandonment_receipt_precedes_settlement() {
+    int failures = 0;
+    for (const bool replace_revision : {false, true}) {
+        ProgressFixture f;
+        f.refusal = Reason::Capacity;
+        bool receipt_entered = false, release_receipt = false;
+        bool replacement_entered = false, release_replacement = false;
+        unsigned receipts = 0;
+        AutomaticCheckpointCoordinator coordinator(
+            [&](std::string_view, std::optional<std::string_view> tag) {
+                {
+                    std::unique_lock lock(f.mutex);
+                    if (replace_revision && f.calls >= 1 + kTransientCheckpointRetries) {
+                        replacement_entered = true;
+                        f.cv.notify_all();
+                        f.cv.wait_for(lock, 2s, [&] { return release_replacement; });
+                    }
+                }
+                return f.save(tag);
+            }, [&] { return f.observe(); }, [&] { f.notify(); },
+            [&](const PressureAbandonment&) {
+                std::unique_lock lock(f.mutex);
+                ++receipts;
+                receipt_entered = true;
+                f.cv.notify_all();
+                f.cv.wait_for(lock, 2s, [&] { return release_receipt; });
+            }, {.fallback = 1ms, .pressure_window = 1h});
+        Victim victim{std::string(64, '6'), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(f.wait([&] { return receipt_entered; }),
+                          "receipt-order fixture did not reach abandonment");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Pending && victim.reason == Reason::Capacity,
+                          "engine observed settlement before the abandonment receipt completed");
+        if (replace_revision) {
+            failures += check(coordinator.enqueue(victim.session_sha256) !=
+                                  AutomaticCheckpointEnqueueResult::Dropped,
+                              "receipt callback prevented a new revision");
+        }
+        {
+            std::lock_guard lock(f.mutex);
+            release_receipt = true;
+            f.cv.notify_all();
+        }
+        failures += check(f.wait([&] {
+            return f.completed >= 1 + kTransientCheckpointRetries &&
+                   (!replace_revision || replacement_entered);
+        }), "receipt completion did not release its task");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == (replace_revision ? Outcome::Pending : Outcome::Settled),
+                          "receipt completion settled the wrong entry revision");
+        if (replace_revision) {
+            {
+                std::lock_guard lock(f.mutex);
+                f.refusal = Reason::None;
+                release_replacement = true;
+                f.cv.notify_all();
+            }
+            failures += check(f.wait([&] { return f.completed >= 2 + kTransientCheckpointRetries; }),
+                              "replacement save did not finish");
+            coordinator.save_before_eviction(std::span(&victim, 1));
+            failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::None,
+                              "obsolete abandonment replaced the new revision's answer");
+        }
+        coordinator.drain();
+        {
+            std::lock_guard lock(f.mutex);
+            failures += check(receipts == 1, "revision change emitted a second abandonment receipt");
+        }
+    }
+    return failures;
+}
+
+int drain_hides_retained_refusal_answers() {
+    int failures = 0;
+    for (const auto reason : {Reason::UnsupportedCodec, Reason::Capacity}) {
+        ProgressFixture f;
+        f.refusal = reason;
+        AutomaticCheckpointCoordinator coordinator(
+            [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+            [&] { return f.observe(); }, [&] { f.notify(); },
+            {}, {.fallback = 1ms, .pressure_window = 1h});
+        Victim victim{std::string(64, '7'), "resp_retry"};
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        const unsigned attempts = reason == Reason::Capacity ? 1 + kTransientCheckpointRetries : 1;
+        failures += check(f.wait([&] { return f.completed >= attempts; }),
+                          "retained-drain fixture did not settle");
+        coordinator.save_before_eviction(std::span(&victim, 1));
+        failures += check(victim.outcome == Outcome::Settled && victim.reason == reason,
+                          "retained-drain fixture did not expose its pre-stop answer");
+        coordinator.drain();
+        for (unsigned ask = 0; ask < 2; ++ask) {
+            coordinator.save_before_eviction(std::span(&victim, 1));
+            failures += check(victim.outcome == Outcome::Pending && victim.reason == reason,
+                              "drain exposed a retained non-None settlement before final save");
+        }
+        {
+            std::lock_guard lock(f.mutex);
+            failures += check(f.calls == attempts, "drain erased or restarted a retained answer");
+        }
+    }
     return failures;
 }
 
@@ -533,7 +868,9 @@ int pressure_window_settles_slow_refusals() {
         }, {.fallback = 100ms, .pressure_window = 250ms});
     Victim victim{std::string(64, '4'), "resp_window"};
     coordinator.save_before_eviction(std::span(&victim, 1));
-    int failures = check(f.wait([&] { return !abandonments.empty(); }),
+    int failures = check(f.wait([&] {
+        return !abandonments.empty() && f.completed >= abandonments[0].attempts;
+    }),
                          "pressure window did not settle without progress");
     coordinator.save_before_eviction(std::span(&victim, 1));
     {
@@ -701,7 +1038,9 @@ int promoted_automatic_entry_settles() {
     failures += check(f.wait([&] { return f.completed >= 1; }), "automatic I/O attempt did not finish");
     coordinator.save_before_eviction(std::span(&victim, 1));
     failures += check(victim.outcome == Outcome::Pending, "automatic entry did not promote as Pending");
-    failures += check(f.wait([&] { return !abandonments.empty(); }), "promoted automatic save stayed Pending");
+    failures += check(f.wait([&] {
+        return !abandonments.empty() && f.completed >= abandonments[0].attempts;
+    }), "promoted automatic save stayed Pending");
     coordinator.save_before_eviction(std::span(&victim, 1));
     unsigned calls;
     {
@@ -1047,6 +1386,12 @@ int main() {
     failures += run("persistent_refusal_retries_without_progress", persistent_refusal_retries_without_progress());
     failures += run("settled_entries_do_not_fill_the_table", settled_entries_do_not_fill_the_table());
     failures += run("settled_answer_survives_a_pending_peer", settled_answer_survives_a_pending_peer());
+    failures += run("saved_answer_survives_a_pending_peer", saved_answer_survives_a_pending_peer());
+    failures += run("busy_and_publication_reset_pressure_window", busy_and_publication_reset_pressure_window());
+    failures += run("inflight_automatic_entry_is_promoted", inflight_automatic_entry_is_promoted());
+    failures += run("fresh_unread_settlements_survive_table_pressure", fresh_unread_settlements_survive_table_pressure());
+    failures += run("abandonment_receipt_precedes_settlement", abandonment_receipt_precedes_settlement());
+    failures += run("drain_hides_retained_refusal_answers", drain_hides_retained_refusal_answers());
     failures += run("pressure_transaction_busy_waits_without_budget", pressure_transaction_busy_waits_without_budget());
     failures += run("automatic_transaction_busy_keeps_budget", automatic_transaction_busy_keeps_budget());
     failures += run("pressure_busy_retries_are_spaced", pressure_busy_retries_are_spaced());
