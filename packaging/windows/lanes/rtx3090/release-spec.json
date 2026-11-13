@@ -107,7 +107,7 @@
         100,
         390
       ],
-      "managed_power_envelope_w": 351,
+      "managed_power_envelope_w": 355,
       "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,
       "actions": [

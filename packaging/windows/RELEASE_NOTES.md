@@ -10,10 +10,13 @@ filesystem quota, a storage outage, a stale tag) settles after six retries or
 receipt instead of holding admission until requests time out with HTTP 503.
 The store's own quota (`--session-checkpoint-quota-mib`, reason `quota`) was
 already terminal: it settles on the first refusal and emits no
-`pressure`/`abandoned` receipt. The copy of these notes packaged in the
-0.8.0-beta.4 components predates this correction. Release, deployment and build
-identities advance together; model bytes, runtime shape, admission reserves and
-GPU-owner policies remain unchanged from `0.8.0-beta.3`.
+`pressure`/`abandoned` receipt. Release, deployment and build identities advance
+together; model bytes, runtime shape, admission reserves and GPU-owner policies
+remain unchanged from `0.8.0-beta.3`.
+
+The RTX 3090 managed C1 power check now proves the 350 W cap is enforced on every
+sample and bounds the 1-second power reading at 355 W (the earlier 351 W bound
+sat inside the reading's ±5 W accuracy).
 
 Package-build receipts remain `hardware-pending`. Both candidates require fresh
 exact-source build, package, GPU, lifecycle and restoration evidence before

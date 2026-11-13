@@ -633,7 +633,7 @@ class MultiGpuHostTests(unittest.TestCase):
                          "GpuUuid={ps_quote(self.gpu_uuid)}", "'--device',[string]$gpuIndex",
                          "'--spec',[string]$c.speculative.backend,'--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft'",
                          "EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'",
-                         "pressure server_start GPU UUID mismatch", 'gpu_metrics(release["gpu_uuid"])'):
+                         "pressure server_start GPU UUID mismatch", 'gpu_metrics(release["gpu_uuid"], power_limits)'):
             self.assertIn(contract, harness)
         self.assertNotIn("$c.engine.device", harness)
         self.assertNotRegex(harness, r"\$env:CUDA_DEVICE_ORDER\s*=")

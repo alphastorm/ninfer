@@ -1895,6 +1895,8 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
 
     def benchmark(self) -> dict[str, Any]:
         arguments: list[str] = []
+        if self.lane.qualified_power_limit_w:
+            arguments += ["--qualified-power-limit-w", str(self.lane.qualified_power_limit_w)]
         if self.lane.managed_power_envelope_w is not None:
             arguments += ["--power-envelope-w", str(self.lane.managed_power_envelope_w)]
         return self.target_internal("_benchmark", *arguments, timeout=1800)
@@ -2347,16 +2349,62 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     return receipt
 
 
-def gpu_metrics(gpu_uuid: str) -> tuple[float, float, int, int]:
-    rows = run(["nvidia-smi", "-i", gpu_uuid, "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used", "--format=csv,noheader,nounits"]).stdout.strip().splitlines()
+GPU_METRIC_FIELDS = ("power.draw", "temperature.gpu", "utilization.gpu", "memory.used")
+POWER_LIMIT_FIELDS = ("enforced.power.limit", "power.limit")
+
+
+def gpu_metrics(gpu_uuid: str, power_limits: bool = False) -> tuple[float | int, ...]:
+    """One row of the selected GPU's C1 telemetry; with ``power_limits`` the same query also
+    reads the enforced and configured power limits, so each draw is paired with its cap."""
+    fields = GPU_METRIC_FIELDS + (POWER_LIMIT_FIELDS if power_limits else ())
+    rows = run(["nvidia-smi", "-i", gpu_uuid, "--query-gpu=" + ",".join(fields), "--format=csv,noheader,nounits"]).stdout.strip().splitlines()
     if len(rows) != 1:
         raise LaneError("selected GPU metrics returned more or fewer than one row")
     output = rows[0]
     values = [item.strip() for item in output.split(",")]
-    return float(values[0]), float(values[1]), int(values[2]), int(values[3])
+    if len(values) != len(fields):
+        raise LaneError("selected GPU metrics returned an unexpected field count")
+    return (float(values[0]), float(values[1]), int(values[2]), int(values[3]),
+            *(float(value) for value in values[4:]))
+
+
+def c1_power_check(samples: list[tuple[float | int, ...]], qualified_w: int, envelope_w: float) -> tuple[dict[str, Any], list[str]]:
+    """Prove the managed cap on every sample; bound power.draw only as a gross check.
+
+    nvidia-smi power.draw is a 1-second average accurate to +/-5 W, so a capped card can read
+    slightly above its limit. The enforced and configured limits are the direct evidence."""
+    draws = [sample[0] for sample in samples]
+    enforced = [sample[4] for sample in samples]
+    limits = [sample[5] for sample in samples]
+    mismatched = sum(1 for cap, limit in zip(enforced, limits) if cap != qualified_w or limit != qualified_w)
+    over = sum(1 for draw in draws if draw > envelope_w)
+    fields = {
+        "qualified_power_limit_w": qualified_w,
+        "power_envelope_w": envelope_w,
+        "power_samples": len(samples),
+        "min_enforced_power_limit_w": min(enforced),
+        "max_enforced_power_limit_w": max(enforced),
+        "min_power_limit_w": min(limits),
+        "max_power_limit_w": max(limits),
+        "power_limit_mismatched_samples": mismatched,
+        "power_samples_over_envelope": over,
+    }
+    failures = []
+    if mismatched:
+        failures.append(
+            f"the qualified {qualified_w} W cap was not in effect on {mismatched} of {len(samples)} samples "
+            f"(enforced {min(enforced):g}-{max(enforced):g} W, limit {min(limits):g}-{max(limits):g} W)")
+    if over:
+        failures.append(
+            f"power.draw exceeded the {envelope_w:g} W envelope on {over} of {len(samples)} samples "
+            f"(max {max(draws):g} W)")
+    return fields, failures
 
 
 def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    if (args.qualified_power_limit_w is None) != (args.power_envelope_w is None):
+        raise LaneError("the qualified power limit and the C1 power envelope must be given together")
+    power_limits = args.qualified_power_limit_w is not None
     evidence = Path(args.evidence_root)
     state_root = Path(args.state_root)
     state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
@@ -2372,14 +2420,13 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     before = len(log.read_text(encoding="utf-8").splitlines())
     paragraph = "A reliable GPU inference service separates admission control, scheduling, memory accounting, observability, and failure recovery. "
     prompt = (paragraph * (28000 // len(paragraph) + 2))[:28000]
-    maximums = list(gpu_metrics(release["gpu_uuid"]))
+    samples = [gpu_metrics(release["gpu_uuid"], power_limits)]
     stop = threading.Event()
     poll_errors: list[Exception] = []
     def poll() -> None:
         try:
             while not stop.wait(0.1):
-                values = gpu_metrics(release["gpu_uuid"])
-                for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
+                samples.append(gpu_metrics(release["gpu_uuid"], power_limits))
         except Exception as error:
             poll_errors.append(error)
             stop.set()
@@ -2401,13 +2448,20 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             done[0].get("schema_version") != 30):
         raise LaneError("managed C1 request log is not schema 30")
     record = done[0]; result = record["result"]; timing = record["timings_seconds"]; spec = record["speculative"]
+    maximums = [max(sample[index] for sample in samples) for index in range(len(GPU_METRIC_FIELDS))]
     receipt = {"status": "passed", "completion_tokens": 1024, "prompt_tokens": result["prompt_tokens"], "computed_prefill_tokens": result["computed_prefill_tokens"], "decode_tokens_per_second": 1024 / timing["decode"], "prefill_tokens_per_second": result["computed_prefill_tokens"] / timing["prefill"], "wall_seconds": wall, "max_power_w": maximums[0], "max_temperature_c": maximums[1], "max_gpu_utilization_percent": maximums[2], "max_memory_used_mib": maximums[3], "mtp_acceptance_percent": 100 * spec["accepted_tokens"] / spec["drafted_tokens"]}
-    if args.power_envelope_w is not None:
-        receipt["power_envelope_w"] = args.power_envelope_w
-        if receipt["max_power_w"] > args.power_envelope_w:
-            raise LaneError(f"managed C1 exceeded the {args.power_envelope_w:g} W qualification envelope")
+    failures: list[str] = []
+    if power_limits:
+        power, failures = c1_power_check(samples, args.qualified_power_limit_w, args.power_envelope_w)
+        receipt.update(power)
+    if failures:
+        receipt["status"] = "failed"
+        receipt["failures"] = failures
     receipt["gpu_uuid"] = release["gpu_uuid"]
+    # A failed power check is evidence too: record the measured peak before refusing.
     atomic_json(evidence / "managed-c1.json", receipt)
+    if failures:
+        raise LaneError("managed C1 power check failed: " + "; ".join(failures))
     return receipt
 
 
@@ -2419,6 +2473,7 @@ def internal_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixture")
     parser.add_argument("--model-id", default="q38-ninfer")
     parser.add_argument("--power-envelope-w", type=float)
+    parser.add_argument("--qualified-power-limit-w", type=int)
     parser.add_argument("--gpu-uuid", type=gpu_uuid_argument)
     parser.add_argument("--source-root")
     parser.add_argument("--runtime-bin")
