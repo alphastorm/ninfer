@@ -6,8 +6,9 @@ One orchestrator serves every native lane. ``--lane`` selects the lane directory
 package names, GPU, architecture, power policy, task and state-root names) and its server
 configuration the model id. The builder host compiles a neutral deterministic candidate and
 packages it twice; the target host installs it beside the incumbent lineage, proves the
-protocol, 128K retrieval, restart continuation, rollback (when a previous release exists),
-state security, the OMP client run, and the bounded C1 benchmark, then restores its found state.
+protocol, the OMP client run and bounded C1 benchmark before the pressure, 128K retrieval,
+restart continuation, rollback (when a previous release exists) and state-security checks,
+then restores its found state.
 When the builder and target are different hosts the package travels between them directly as
 ranged HTTP (``--transfer-tool``, a script with ``serve``/``fetch`` subcommands such as
 omp-ninfer's ``scripts/hosts/pscp.py``); one host copies locally.
@@ -43,13 +44,13 @@ PHASES = (
     "package",
     "transfer_install",
     "protocol",
+    "omp",
+    "benchmark_c1",
     "pressure_protocol",
     "context_128k",
     "restart",
     "rollback",
     "security",
-    "omp",
-    "benchmark_c1",
     "receipt",
     "restore",
 )
@@ -926,6 +927,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
                 revisions.append(state.get("orchestrator_sha256"))
                 state["orchestrator_sha256"] = self.script_sha
                 state["qualification_tool_commit"] = self.tool_head
+                # Checkpoints bind phase names, not their insertion order. Preserve measured
+                # evidence; execute() visits the new early checks before later checkpoints.
                 atomic_json(self.state_path, state)
             return state
         state = {
@@ -1382,13 +1385,30 @@ if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
                 "privacy_scope_sha256": hashlib.sha256(privacy_scope.encode()).hexdigest(),
                 "public_generic_references": generic_references}
 
-    def package(self) -> dict[str, Any]:
+    def package(self, *, expected_package_sha256: str | None = None) -> dict[str, Any]:
+        """Keep both scratch builds and all scans; reuse only a frozen public package digest.
+
+        A qualified executable-build receipt alone proves neither packaging nor privacy.
+        Only the staged chain supplies the existing independently built candidate pin; without
+        both that pin and qualified runtime inputs, public packaging still runs twice.
+        """
         epoch = run(["git", "show", "-s", "--format=%ct", self.tool_head], cwd=self.config.source_root).stdout.strip()
         config_bytes = subprocess.check_output(
             ["git", "show", f"{self.tool_head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
             cwd=self.config.source_root,
         )
         config_sha = hashlib.sha256(config_bytes).hexdigest()
+        if self.config.qualified_runtime_bin and expected_package_sha256:
+            public_comparison = f"""
+if([string]$a.package.sha256 -cne {ps_quote(expected_package_sha256)}){{throw 'qualification package differs from the frozen candidate'}}
+"""
+        else:
+            public_comparison = f"""
+Build-One {ps_quote(self.builder_out_b)} ''
+$b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
+$outerB=(Get-FileHash (Join-Path {ps_quote(self.builder_out_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+if([string]$a.package.sha256 -cne [string]$b.package.sha256 -or $outerA -cne $outerB){{throw 'public distribution is not deterministic'}}
+"""
         package_script = f"""
 $ErrorActionPreference='Stop'
 $source={ps_quote(self.builder_source)}
@@ -1410,12 +1430,9 @@ function Build-One([string]$Out,[string]$Config){{
   &(Join-Path $source 'packaging\\windows\\New-Package.ps1') @parameters|Out-Null
 }}
 Build-One {ps_quote(self.builder_out_a)} ''
-Build-One {ps_quote(self.builder_out_b)} ''
 $a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
-$b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
 $outerA=(Get-FileHash (Join-Path {ps_quote(self.builder_out_a)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
-$outerB=(Get-FileHash (Join-Path {ps_quote(self.builder_out_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
-if([string]$a.package.sha256 -cne [string]$b.package.sha256 -or $outerA -cne $outerB){{throw 'public distribution is not deterministic'}}
+{public_comparison}
 $publicConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
 $scratchConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
 $scratchConfig.listen.port={self.config.scratch_port}
@@ -2078,13 +2095,13 @@ $owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-O
             ("package", self.package),
             ("transfer_install", self.transfer_install),
             ("protocol", self.protocol),
+            ("omp", self.omp),
+            ("benchmark_c1", self.benchmark),
             ("pressure_protocol", self.pressure_protocol),
             ("context_128k", self.context),
             ("restart", self.restart),
             ("rollback", self.rollback),
             ("security", self.security),
-            ("omp", self.omp),
-            ("benchmark_c1", self.benchmark),
             ("receipt", self.receipt),
             ("restore", self.restore),
         )

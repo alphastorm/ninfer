@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run the native chain in isolated, locked stages; inventory stays outside the repo."""
+"""Run the native chain in isolated, locked stages; inventory stays outside the repo.
+
+The protocol group keeps the managed service up through OMP and the bounded power check.
+Qualified-runtime packaging compares its first public build to the independently frozen
+candidate instead of building that configuration twice. Scratch determinism and all privacy
+scans remain local obligations; the consumed executable-build receipt does not bind them.
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,10 +21,10 @@ from tools.qualification import qualify_native as native
 
 GROUPS = {
     'cpu': ('preflight', 'neutral_build', 'private_path_scan', 'package'),
-    'protocol': ('transfer_install', 'protocol'),
+    'protocol': ('transfer_install', 'protocol', 'omp', 'benchmark_c1'),
     'correctness': ('pressure_protocol', 'context_128k', 'restart', 'rollback'),
     'security': ('security',),
-    'finish': ('omp', 'benchmark_c1', 'receipt', 'restore'),
+    'finish': ('receipt', 'restore'),
 }
 METHODS = {'private_path_scan': 'private_scan', 'context_128k': 'context', 'benchmark_c1': 'benchmark'}
 IMMUTABLE_INPUTS = (
@@ -161,7 +167,11 @@ New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
         for name in GROUPS[part]:
             if name == 'restore':
                 cleanup_started = True
-            orchestrator.phase(name, getattr(orchestrator, METHODS.get(name, name)))
+            action = getattr(orchestrator, METHODS.get(name, name))
+            if name == 'package':
+                action = lambda: orchestrator.package(
+                    expected_package_sha256=settings['expected_package_sha256'])
+            orchestrator.phase(name, action)
             if name == 'package':
                 package = orchestrator.state['phases'][name]['receipt']['package']['sha256']
                 if package != settings['expected_package_sha256']:

@@ -177,7 +177,7 @@ class DriverInvariantTests(unittest.TestCase):
                 return {'status': 'passed'}
 
             def __getattr__(self, name):
-                return lambda: {'status': 'passed'}
+                return lambda **kwargs: {'status': 'passed'}
 
             def phase(self, name, action):
                 calls.append(name)
@@ -431,7 +431,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
         for name in chain.native.PHASES:
             if name in ('preflight', 'restore'):
                 continue
-            def provider(subject, name=name):
+            def provider(subject, name=name, **kwargs):
                 case.calls.append(name)
                 case.assertFalse(case.host['incumbent_running'], 'successor did not quiesce incumbent')
                 receipt = {'status': 'passed'}
@@ -551,8 +551,10 @@ class NativeChainBoundaryTests(unittest.TestCase):
         self.assertEqual(self.stage_state('protocol')['status'], 'failed')
         self.assertEqual(self.instances[-1].state['phases']['benchmark_c1']['status'], 'failed')
         self.assertFalse(self.host['candidate_running'])
-        with self.assertRaises(ValueError):
+        self.assertFalse((self.root / 'outputs/attempt/protocol.json').exists())
+        with self.assertRaises(FileNotFoundError):
             self.run_part('correctness')
+        self.assertFalse((self.root / 'outputs/attempt/correctness.started').exists())
         with self.assertRaises(FileExistsError):
             self.run_part('protocol')
         self.assertNotIn('pressure_protocol', self.calls)
