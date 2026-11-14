@@ -1385,30 +1385,13 @@ if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
                 "privacy_scope_sha256": hashlib.sha256(privacy_scope.encode()).hexdigest(),
                 "public_generic_references": generic_references}
 
-    def package(self, *, expected_package_sha256: str | None = None) -> dict[str, Any]:
-        """Keep both scratch builds and all scans; reuse only a frozen public package digest.
-
-        A qualified executable-build receipt alone proves neither packaging nor privacy.
-        Only the staged chain supplies the existing independently built candidate pin; without
-        both that pin and qualified runtime inputs, public packaging still runs twice.
-        """
+    def package(self) -> dict[str, Any]:
         epoch = run(["git", "show", "-s", "--format=%ct", self.tool_head], cwd=self.config.source_root).stdout.strip()
         config_bytes = subprocess.check_output(
             ["git", "show", f"{self.tool_head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
             cwd=self.config.source_root,
         )
         config_sha = hashlib.sha256(config_bytes).hexdigest()
-        if self.config.qualified_runtime_bin and expected_package_sha256:
-            public_comparison = f"""
-if([string]$a.package.sha256 -cne {ps_quote(expected_package_sha256)}){{throw 'qualification package differs from the frozen candidate'}}
-"""
-        else:
-            public_comparison = f"""
-Build-One {ps_quote(self.builder_out_b)} ''
-$b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
-$outerB=(Get-FileHash (Join-Path {ps_quote(self.builder_out_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
-if([string]$a.package.sha256 -cne [string]$b.package.sha256 -or $outerA -cne $outerB){{throw 'public distribution is not deterministic'}}
-"""
         package_script = f"""
 $ErrorActionPreference='Stop'
 $source={ps_quote(self.builder_source)}
@@ -1430,9 +1413,12 @@ function Build-One([string]$Out,[string]$Config){{
   &(Join-Path $source 'packaging\\windows\\New-Package.ps1') @parameters|Out-Null
 }}
 Build-One {ps_quote(self.builder_out_a)} ''
+Build-One {ps_quote(self.builder_out_b)} ''
 $a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
+$b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
 $outerA=(Get-FileHash (Join-Path {ps_quote(self.builder_out_a)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
-{public_comparison}
+$outerB=(Get-FileHash (Join-Path {ps_quote(self.builder_out_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+if([string]$a.package.sha256 -cne [string]$b.package.sha256 -or $outerA -cne $outerB){{throw 'public distribution is not deterministic'}}
 $publicConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
 $scratchConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
 $scratchConfig.listen.port={self.config.scratch_port}

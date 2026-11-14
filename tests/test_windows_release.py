@@ -1824,7 +1824,7 @@ class ScratchQualificationTests(unittest.TestCase):
             "protocol", "protocol_under_pool_pressure", "long_session", "persistence", "rollback",
             "state_security", "golden_equivalent", "benchmark_c1"})
 
-    def package_subject(self, root: Path, *, qualified: bool) -> tuple[qualify_native.Orchestrator, list, list]:
+    def package_subject(self, root: Path) -> tuple[qualify_native.Orchestrator, list, list]:
         """Execute generated packaging control flow with a local, receipt-producing packager."""
         subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
         subject.lane = self.lane
@@ -1837,7 +1837,6 @@ class ScratchQualificationTests(unittest.TestCase):
         subject.builder_scratch_a, subject.builder_scratch_b = str(root / "scratch-a"), str(root / "scratch-b")
         subject.config = SimpleNamespace(
             source_root=root, builder="not-contacted", scratch_port=18210,
-            qualified_runtime_bin="qualified-bin" if qualified else None,
             dependency_sbom_tool="sbom.py", vcpkg_resolved="vcpkg.json", cuda_inventory="cuda.json",
             third_party_inventory="third-party.json", runtime_inventory="runtime.json")
         subject.privacy_scope_argument = lambda: "fixture-scope"
@@ -1895,53 +1894,15 @@ Copy-Item -LiteralPath (Join-Path $fixture ($kind+'.json')) -Destination (Join-P
             self.addCleanup(mocked.stop)
         return subject, scripts, scans
 
-    def test_qualified_runtime_reuses_frozen_public_digest_but_keeps_scratch_builds_and_scans(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subject, _, scans = self.package_subject(root, qualified=True)
-            receipt = subject.package(expected_package_sha256="a" * 64)
-            self.assertEqual((root / "builds.txt").read_text().splitlines(), [
-                "public-a", "scratch-a", "scratch-b"])
-            self.assertEqual([Path(args[args.index("--path") + 1]).parent.name for args in scans],
-                             ["public-a", "scratch-a", "public-a"])
-            self.assertIn("--source-archive", scans[-1])
-            self.assertEqual(set(receipt["privacy_scans"]), {"public_binary", "scratch_binary", "source_archive"})
-            self.assertEqual(receipt["package"]["sha256"], "a" * 64)
-            self.assertEqual(receipt["scratch_package"]["package"]["sha256"], "d" * 64)
-            state, summary = self.stage_fixture()
-            state["phases"]["package"]["receipt"] = receipt
-            staged = qualify_native.stage_lane_qualification(state, summary, self.lane)
-            self.assertEqual(staged["package"]["sha256"], "a" * 64)
-            self.assertEqual(staged["scratch_equivalence"]["scratch_package_sha256"], "d" * 64)
-            self.assertEqual(len(staged["deterministic_gates"]), 8)
-
-    def test_frozen_digest_mismatch_stops_qualified_packaging_before_scratch_work(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subject, _, scans = self.package_subject(root, qualified=True)
-            with self.assertRaisesRegex(qualify_native.LaneError, "package differs from the frozen candidate"):
-                subject.package(expected_package_sha256="0" * 64)
-            self.assertEqual((root / "builds.txt").read_text().splitlines(), ["public-a"])
-            self.assertEqual(scans, [])
-
     def test_full_build_path_keeps_both_public_and_both_scratch_builds_and_all_scans(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            subject, _, scans = self.package_subject(root, qualified=False)
-            receipt = subject.package(expected_package_sha256="a" * 64)
+            subject, _, scans = self.package_subject(root)
+            receipt = subject.package()
             self.assertEqual((root / "builds.txt").read_text().splitlines(), [
                 "public-a", "public-b", "scratch-a", "scratch-b"])
             self.assertEqual(len(scans), 3)
             self.assertEqual(receipt["scratch_equivalence"]["status"], "passed")
-
-    def test_qualified_runtime_without_frozen_digest_keeps_both_public_builds(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subject, _, scans = self.package_subject(root, qualified=True)
-            subject.package()
-            self.assertEqual((root / "builds.txt").read_text().splitlines(), [
-                "public-a", "public-b", "scratch-a", "scratch-b"])
-            self.assertEqual(len(scans), 3)
 
     def test_stage_adapter_refuses_missing_failed_or_misbound_evidence(self) -> None:
         for damage in (

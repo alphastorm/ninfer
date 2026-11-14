@@ -177,7 +177,7 @@ class DriverInvariantTests(unittest.TestCase):
                 return {'status': 'passed'}
 
             def __getattr__(self, name):
-                return lambda **kwargs: {'status': 'passed'}
+                return lambda: {'status': 'passed'}
 
             def phase(self, name, action):
                 calls.append(name)
@@ -431,7 +431,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
         for name in chain.native.PHASES:
             if name in ('preflight', 'restore'):
                 continue
-            def provider(subject, name=name, **kwargs):
+            def provider(subject, name=name):
                 case.calls.append(name)
                 case.assertFalse(case.host['incumbent_running'], 'successor did not quiesce incumbent')
                 receipt = {'status': 'passed'}
