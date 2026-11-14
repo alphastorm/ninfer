@@ -6,8 +6,9 @@ One orchestrator serves every native lane. ``--lane`` selects the lane directory
 package names, GPU, architecture, power policy, task and state-root names) and its server
 configuration the model id. The builder host compiles a neutral deterministic candidate and
 packages it twice; the target host installs it beside the incumbent lineage, proves the
-protocol, 128K retrieval, restart continuation, rollback (when a previous release exists),
-state security, the OMP client run, and the bounded C1 benchmark, then restores its found state.
+protocol, the OMP client run and bounded C1 benchmark before the pressure, 128K retrieval,
+restart continuation, rollback (when a previous release exists) and state-security checks,
+then restores its found state.
 When the builder and target are different hosts the package travels between them directly as
 ranged HTTP (``--transfer-tool``, a script with ``serve``/``fetch`` subcommands such as
 omp-ninfer's ``scripts/hosts/pscp.py``); one host copies locally.
@@ -43,13 +44,13 @@ PHASES = (
     "package",
     "transfer_install",
     "protocol",
+    "omp",
+    "benchmark_c1",
     "pressure_protocol",
     "context_128k",
     "restart",
     "rollback",
     "security",
-    "omp",
-    "benchmark_c1",
     "receipt",
     "restore",
 )
@@ -926,6 +927,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
                 revisions.append(state.get("orchestrator_sha256"))
                 state["orchestrator_sha256"] = self.script_sha
                 state["qualification_tool_commit"] = self.tool_head
+                # Checkpoints bind phase names, not their insertion order. Preserve measured
+                # evidence; execute() visits the new early checks before later checkpoints.
                 atomic_json(self.state_path, state)
             return state
         state = {
@@ -2078,13 +2081,13 @@ $owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-O
             ("package", self.package),
             ("transfer_install", self.transfer_install),
             ("protocol", self.protocol),
+            ("omp", self.omp),
+            ("benchmark_c1", self.benchmark),
             ("pressure_protocol", self.pressure_protocol),
             ("context_128k", self.context),
             ("restart", self.restart),
             ("rollback", self.rollback),
             ("security", self.security),
-            ("omp", self.omp),
-            ("benchmark_c1", self.benchmark),
             ("receipt", self.receipt),
             ("restore", self.restore),
         )

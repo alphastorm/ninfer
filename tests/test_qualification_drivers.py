@@ -524,6 +524,51 @@ class NativeChainBoundaryTests(unittest.TestCase):
         self.assertEqual(self.calls.count('neutral_build'), 1)
         driver.require_phases(subject.state, subject.config.state_dir, chain.prior_phases('correctness'))
 
+    def test_cheap_checks_run_in_protocol_group_before_correctness(self):
+        expected = (
+            'preflight', 'neutral_build', 'private_path_scan', 'package', 'transfer_install',
+            'protocol', 'omp', 'benchmark_c1', 'pressure_protocol', 'context_128k',
+            'restart', 'rollback', 'security', 'receipt', 'restore')
+        self.assertEqual(tuple(name for phases in chain.GROUPS.values() for name in phases), expected)
+        self.assertEqual(chain.native.PHASES, expected)
+        self.assertEqual(chain.prior_phases('correctness'), list(expected[:8]))
+        self.assertEqual(chain.GROUPS['finish'], ('receipt', 'restore'))
+        self.run_part('cpu')
+        self.run_part('protocol')
+        self.assertEqual(self.calls[-4:], ['transfer_install', 'protocol', 'omp', 'benchmark_c1'])
+
+    def test_failed_early_benchmark_blocks_correctness_and_preserves_attempt(self):
+        self.run_part('cpu')
+        def fail(subject):
+            self.calls.append('benchmark_c1')
+            self.assertTrue(self.host['candidate_running'], 'protocol service must still be up')
+            raise RuntimeError('injected early power failure')
+        with patch.object(self.orchestrator, 'benchmark', fail):
+            with self.assertRaisesRegex(RuntimeError, 'injected early power failure'):
+                self.run_part('protocol')
+        self.assertEqual(self.calls[-3:], ['protocol', 'omp', 'benchmark_c1'])
+        self.assertNotIn('pressure_protocol', self.calls)
+        self.assertEqual(self.stage_state('protocol')['status'], 'failed')
+        self.assertEqual(self.instances[-1].state['phases']['benchmark_c1']['status'], 'failed')
+        self.assertFalse(self.host['candidate_running'])
+        self.assertFalse((self.root / 'outputs/attempt/protocol.json').exists())
+        with self.assertRaises(FileNotFoundError):
+            self.run_part('correctness')
+        self.assertFalse((self.root / 'outputs/attempt/correctness.started').exists())
+        with self.assertRaises(FileExistsError):
+            self.run_part('protocol')
+        self.assertNotIn('pressure_protocol', self.calls)
+
+    def test_qualified_runtime_still_refuses_a_package_outside_the_frozen_candidate(self):
+        self.values['qualified_runtime_bin'] = 'R:/inputs/runtime'
+        self.values['qualified_build_receipt'] = 'R:/inputs/build.json'
+        self.settings['expected_package_sha256'] = 'different-package'
+        with self.assertRaisesRegex(ValueError, 'package differs from the frozen candidate'):
+            self.run_part('cpu')
+        self.assertEqual(self.stage_state('cpu')['status'], 'failed')
+        self.assertEqual(self.instances[-1].state['status'], 'failed')
+        self.assertNotIn('transfer_install', self.calls)
+
     def test_real_constructor_loads_complete_repository_lane_schema(self):
         self.run_part('cpu')
         lane = self.instances[-1].lane

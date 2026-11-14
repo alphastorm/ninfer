@@ -1059,6 +1059,27 @@ class QualificationRestorationTests(unittest.TestCase):
             cleanup.assert_not_called()
             self.assertEqual(subject.state["phases"], {})
 
+    def test_standalone_benchmark_failure_precedes_pressure_and_still_cleans_up(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.config.dry_run = False
+            subject.config.through_phase = None
+            calls = []
+            def phase(name, action):
+                calls.append(name)
+                if name == "benchmark_c1":
+                    raise qualify_native.LaneError("injected power failure")
+                return {}
+            with patch.object(subject, "preflight_protocol"), \
+                    patch.object(subject, "phase", side_effect=phase), \
+                    patch.object(subject, "cleanup") as cleanup:
+                with self.assertRaisesRegex(qualify_native.LaneError, "injected power failure"):
+                    subject.execute()
+            self.assertEqual(calls, [
+                "preflight", "neutral_build", "private_path_scan", "package", "transfer_install",
+                "protocol", "omp", "benchmark_c1"])
+            cleanup.assert_called_once_with()
+
     def test_c1_only_c2_refuses_constructor_before_checkpoint_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = SimpleNamespace(
@@ -1153,6 +1174,50 @@ class QualificationRestorationTests(unittest.TestCase):
                         patch.object(subject, name, return_value=fresh) as action:
                     self.assertEqual(subject.phase(name, action), fresh)
                     action.assert_called_once_with()
+
+    def test_tool_only_upgrade_preserves_named_evidence_but_uses_new_execution_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.config.resume = subject.config.upgrade_orchestrator_state = True
+            subject.config.scratch_port, subject.config.pressure_port = 18210, 18200
+            subject.config.dry_run = False
+            subject.config.through_phase = "pressure_protocol"
+            subject.tool_head, subject.script_sha = "advanced-tool-source", "advanced-orchestrator"
+            old_order = (
+                "preflight", "neutral_build", "private_path_scan", "package", "transfer_install",
+                "protocol", "pressure_protocol", "context_128k", "restart", "rollback", "security")
+            predecessor = {
+                **subject.state, "schema_version": 2, "source_commit": subject.head,
+                "lane": subject.lane.name, "orchestrator_sha256": "predecessor-orchestrator",
+                "scratch_binding": {
+                    "state_root_sha256": hashlib.sha256(
+                        str(qualify_native.PureWindowsPath(subject.state_root)).casefold().encode()
+                    ).hexdigest(),
+                    "task_suffix": subject.config.scratch_task_suffix,
+                    "port": 18210, "pressure_port": 18200,
+                },
+                "phases": {name: {"status": "passed", "receipt": {"status": "passed"},
+                                  "receipt_sha256": "f" * 64} for name in old_order},
+            }
+            qualify_native.atomic_json(subject.state_path, predecessor)
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")):
+                subject.state = subject._load_state()
+            self.assertEqual(subject.state["schema_version"], 2)
+            self.assertEqual(subject.state["phases"], predecessor["phases"])
+            with patch.object(subject, "preflight_protocol"), \
+                    patch.object(subject, "verify_checkpoint", side_effect=lambda name, receipt: name != "preflight"), \
+                    patch.object(subject, "preflight", return_value={"status": "passed"}), \
+                    patch.object(subject, "omp", return_value={"status": "passed"}) as omp, \
+                    patch.object(subject, "benchmark", return_value={"status": "passed"}) as benchmark, \
+                    patch.object(subject, "phase", wraps=subject.phase) as phase, \
+                    patch.object(subject, "cleanup"):
+                subject.execute()
+            self.assertEqual([call.args[0] for call in phase.call_args_list], [
+                *old_order[:6], "omp", "benchmark_c1", "pressure_protocol"])
+            omp.assert_called_once_with()
+            benchmark.assert_called_once_with()
+            self.assertEqual(subject.state["phases"]["pressure_protocol"],
+                             predecessor["phases"]["pressure_protocol"])
 
     def test_resume_requires_matching_integer_protocol_concurrency(self) -> None:
         for capacity in (1, 2):
@@ -1743,6 +1808,101 @@ class ScratchQualificationTests(unittest.TestCase):
         self.assertEqual(staged["configuration"]["speculative_draft_tokens"], 7)
         self.assertEqual(staged["runtime_shape"]["max_concurrency"], 2)
         self.assertEqual(staged["runtime_shape"]["fit"]["device_state_slots"], 2)
+
+    def test_reordered_phases_preserve_every_staged_receipt_field_and_all_eight_gates(self) -> None:
+        state, summary = self.stage_fixture()
+        old_order = (
+            "preflight", "neutral_build", "private_path_scan", "package", "transfer_install",
+            "protocol", "pressure_protocol", "context_128k", "restart", "rollback", "security",
+            "omp", "benchmark_c1", "receipt", "restore")
+        state["phases"] = {name: state["phases"][name] for name in old_order}
+        before = qualify_native.stage_lane_qualification(state, summary, self.lane)
+        state["phases"] = {name: state["phases"][name] for name in qualify_native.PHASES}
+        after = qualify_native.stage_lane_qualification(state, summary, self.lane)
+        self.assertEqual(after, before)
+        self.assertEqual(set(after["deterministic_gates"]), {
+            "protocol", "protocol_under_pool_pressure", "long_session", "persistence", "rollback",
+            "state_security", "golden_equivalent", "benchmark_c1"})
+
+    def package_subject(self, root: Path) -> tuple[qualify_native.Orchestrator, list, list]:
+        """Execute generated packaging control flow with a local, receipt-producing packager."""
+        subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+        subject.lane = self.lane
+        subject.head = subject.tool_head = "a" * 40
+        subject.builder_root = str(root)
+        subject.builder_source = str(root / "source")
+        subject.builder_bin = str(root / "bin")
+        subject.builder_script = str(root / "qualify_native.py")
+        subject.builder_out_a, subject.builder_out_b = str(root / "public-a"), str(root / "public-b")
+        subject.builder_scratch_a, subject.builder_scratch_b = str(root / "scratch-a"), str(root / "scratch-b")
+        subject.config = SimpleNamespace(
+            source_root=root, builder="not-contacted", scratch_port=18210,
+            dependency_sbom_tool="sbom.py", vcpkg_resolved="vcpkg.json", cuda_inventory="cuda.json",
+            third_party_inventory="third-party.json", runtime_inventory="runtime.json")
+        subject.privacy_scope_argument = lambda: "fixture-scope"
+        config = root / "source" / "packaging" / "windows" / "lanes" / self.lane.name / "server-config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(self.config), encoding="utf-8")
+        (root / "bin").mkdir()
+        state, _ = self.stage_fixture()
+        public = copy.deepcopy(state["phases"]["package"]["receipt"])
+        scratch = public.pop("scratch_package")
+        public.pop("scratch_equivalence")
+        for name, receipt in (("public", public), ("scratch", scratch)):
+            receipt["package"]["filename"] = self.lane.package_name
+            receipt["source_archive"] = {"name": "fixture-source.tar.gz", "sha256": "f" * 64}
+            (root / (name + ".json")).write_text(json.dumps(receipt), encoding="utf-8")
+        packager = root / "source" / "packaging" / "windows" / "New-Package.ps1"
+        packager.write_text(r"""
+param($Lane,$SourceRoot,$BuildProfile,$NInferExecutable,$ServerExecutable,$BenchmarkExecutable,
+ $ReleaseHeadSha,$RuntimeSourceSha,$RuntimeFile,$DependencySbomTool,$VcpkgResolved,$CudaInventory,
+ $ThirdPartyInventory,$RuntimeInventory,$PythonExecutable,$SourceDateEpoch,$OutputDirectory,$ServerConfig)
+$fixture=Split-Path $SourceRoot
+$kind=if($ServerConfig){'scratch'}else{'public'}
+Add-Content -LiteralPath (Join-Path $fixture 'builds.txt') -Value (Split-Path $OutputDirectory -Leaf)
+New-Item -ItemType Directory -Path $OutputDirectory|Out-Null
+Copy-Item -LiteralPath (Join-Path $fixture ($kind+'.json')) -Destination (Join-Path $OutputDirectory 'package-build-receipt.json')
+[IO.File]::WriteAllText((Join-Path $OutputDirectory 'SHA256SUMS'),$kind)
+""", encoding="utf-8")
+        scripts, scans = [], []
+        def remote(host, script, **kwargs):
+            self.assertEqual(host, "not-contacted")
+            scripts.append(script)
+            path = root / "generated.ps1"
+            path.write_text(script, encoding="utf-8")
+            executable = shutil.which("pwsh")
+            self.assertIsNotNone(executable, "PowerShell is required for packaging control-flow contracts")
+            result = subprocess.run([executable, "-NoProfile", "-NonInteractive", "-File", str(path)],
+                                    text=True, capture_output=True, timeout=60)
+            if result.returncode:
+                raise qualify_native.LaneError(result.stderr)
+            return json.loads(result.stdout)
+        def command(args, **kwargs):
+            if args[0] == "ssh":
+                self.assertIn("_scan-archive", args)
+                scans.append(args)
+                return SimpleNamespace(stdout='{"files":1,"bytes":1,"findings":0}')
+            self.assertEqual(args[:2], ["git", "show"])
+            return SimpleNamespace(stdout="1700000000")
+        subject.remote_json = remote
+        for target, name, replacement in (
+            (qualify_native, "run", command),
+            (qualify_native.subprocess, "check_output", lambda *args, **kwargs: config.read_bytes()),
+        ):
+            mocked = patch.object(target, name, replacement)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        return subject, scripts, scans
+
+    def test_full_build_path_keeps_both_public_and_both_scratch_builds_and_all_scans(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subject, _, scans = self.package_subject(root)
+            receipt = subject.package()
+            self.assertEqual((root / "builds.txt").read_text().splitlines(), [
+                "public-a", "public-b", "scratch-a", "scratch-b"])
+            self.assertEqual(len(scans), 3)
+            self.assertEqual(receipt["scratch_equivalence"]["status"], "passed")
 
     def test_stage_adapter_refuses_missing_failed_or_misbound_evidence(self) -> None:
         for damage in (
