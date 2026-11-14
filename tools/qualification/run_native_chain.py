@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run the native chain in isolated, locked stages; inventory stays outside the repo."""
+"""Run the native chain in isolated, locked stages; inventory stays outside the repo.
+
+The protocol group keeps the managed service up through OMP and the bounded power check.
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,10 +18,10 @@ from tools.qualification import qualify_native as native
 
 GROUPS = {
     'cpu': ('preflight', 'neutral_build', 'private_path_scan', 'package'),
-    'protocol': ('transfer_install', 'protocol'),
+    'protocol': ('transfer_install', 'protocol', 'omp', 'benchmark_c1'),
     'correctness': ('pressure_protocol', 'context_128k', 'restart', 'rollback'),
     'security': ('security',),
-    'finish': ('omp', 'benchmark_c1', 'receipt', 'restore'),
+    'finish': ('receipt', 'restore'),
 }
 METHODS = {'private_path_scan': 'private_scan', 'context_128k': 'context', 'benchmark_c1': 'benchmark'}
 IMMUTABLE_INPUTS = (
