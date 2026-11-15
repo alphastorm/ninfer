@@ -7,6 +7,12 @@ ninfer_add_test(ninfer_qwen_tool_constraints_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/qwen/test_tool_constraints.cpp"
   LIBRARIES ninfer_model_runtime ninfer_grammar ninfer::json)
 
+ninfer_add_test(ninfer_qwen_grammar_mask_identity_test
+  HOST_LANES bounded native
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/qwen/test_grammar_mask_identity.cpp"
+  NEEDS_SOURCE_DIR
+  LIBRARIES ninfer_model_runtime ninfer_grammar ninfer_core ninfer::json)
+
 add_test(NAME ninfer_qwen_tool_schema_oracle_test
   COMMAND ${CMAKE_COMMAND} -E env
     "NINFER_TOOL_PROBE=$<TARGET_FILE:ninfer_qwen_tool_constraints_test>"
