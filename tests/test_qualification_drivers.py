@@ -4,6 +4,7 @@ import hashlib
 import json
 import ntpath
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,23 @@ class DriverInvariantTests(unittest.TestCase):
         for name in ('../escape', '.', 'nested/name', ''):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 driver.claim_attempt(self.root, name)
+
+    def test_attempt_name_matches_upgrade_task_suffix_bound(self):
+        source = (ROOT / 'packaging/windows/Invoke-UpgradeRehearsal.ps1').read_text(encoding='utf-8')
+        match = re.search(r"\[ValidatePattern\('([^']+)'\)\]\[string\]\$Attempt\b", source)
+        self.assertIsNotNone(match, 'upgrade rehearsal Attempt must declare its validation pattern')
+        pattern = re.compile(match.group(1))
+        max_length = max(length for length in range(1, 33) if pattern.fullmatch('a' * length))
+        self.assertLessEqual(max_length + 1 + len('rollback'), 32)
+        for length in range(1, 33):
+            with self.subTest(length=length):
+                attempt = 'a' * length
+                try:
+                    driver.claim_attempt(self.root, attempt)
+                    accepted = True
+                except ValueError:
+                    accepted = False
+                self.assertEqual(accepted, pattern.fullmatch(attempt) is not None)
 
     def test_full_document_accepts_pretty_json(self):
         value = {'power_limit_w': 100, 'rows': [{'pid': 17}]}
