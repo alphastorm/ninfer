@@ -10,8 +10,9 @@ import re
 
 
 def claim_attempt(parent: Path, attempt: str) -> Path:
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,23}", attempt) is None:
-        raise ValueError("attempt must be 1-24 letters, digits or hyphens")
+    # Upgrade scratch task suffixes allow 32 characters: 32 - len("-rollback") = 23.
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,22}", attempt) is None:
+        raise ValueError("attempt must be 1-23 letters, digits or hyphens")
     path = parent / attempt
     path.mkdir(parents=True, exist_ok=False)
     return path
