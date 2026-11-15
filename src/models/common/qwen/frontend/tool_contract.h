@@ -12,7 +12,7 @@
 
 namespace ninfer::models::qwen::frontend {
 
-inline constexpr std::string_view kParserCodec = "qwen-parser/1";
+inline constexpr std::string_view kParserCodec = "qwen-parser/2";
 
 // Immutable declarations and parameter codecs shared by the grammar builder and output decoder.
 struct ToolCallOutputContract {
