@@ -233,12 +233,10 @@ ProgramImpl::advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* f
 runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     std::span<const std::uint32_t> lanes, std::span<const std::uint32_t> accepted_tokens,
     std::span<const std::uint8_t> terminal, std::span<const std::uint8_t> discarded,
-    std::span<const std::optional<std::uint32_t>> prefix_execution_splits,
     runtime::ExecutionTiming* failed_timing) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Post, failed_timing);
     if (lanes.empty() || lanes.size() > max_concurrency || accepted_tokens.size() != lanes.size() ||
-        terminal.size() != lanes.size() || discarded.size() != lanes.size() ||
-        prefix_execution_splits.size() != lanes.size()) {
+        terminal.size() != lanes.size() || discarded.size() != lanes.size()) {
         throw std::invalid_argument("pending batch resolution has inconsistent membership");
     }
 
@@ -257,7 +255,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             timing.pause();
             timing.include(resolve_non_speculative_pending(
                 active_sequence(lane), requests[lane], accepted_tokens.front(),
-                terminal.front() != 0, prefix_execution_splits.front(), failed_timing));
+                terminal.front() != 0, failed_timing));
             timing.resume_post();
         }
         return timing.finish();
@@ -276,7 +274,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 timing.pause();
                 timing.include(resolve_non_speculative_pending(
                     active_sequence(lane), requests[lane], accepted_tokens[row], terminal[row] != 0,
-                    prefix_execution_splits[row], failed_timing));
+                    failed_timing));
                 timing.resume_post();
             }
         }
@@ -468,8 +466,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     : dflash_host_egress->licensed_tokens.data() + row * width;
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
             commit_generated_prefix_identity(sequence, pending.base_S,
-                                             std::span<const TokenId>(token_base, committed),
-                                             prefix_execution_splits[row]);
+                                             std::span<const TokenId>(token_base, committed));
             sequence.continuation.metadata.execution_frontier =
                 pending.base.metadata.execution_frontier + committed;
             sequence.ledger_frontier = pending.base_S + committed;
@@ -627,14 +624,6 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                         ? std::optional<std::uint32_t>(
                               request.capture_groups[request.next_capture].frontier)
                         : std::nullopt;
-                std::optional<std::uint32_t> split_frontier = capture_frontier;
-                const auto rewrite_split                    = std::upper_bound(
-                    staged.prompt.identity.rewrite_execution_frontiers.begin(),
-                    staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
-                if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
-                    (!split_frontier || *rewrite_split < *split_frontier)) {
-                    split_frontier = *rewrite_split;
-                }
                 execution::PrefillChunkResult result;
                 timing.pause();
                 if (staged.vision) {
@@ -644,11 +633,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     mark_workspace_usage(workspace_plan.vision->capacity_bytes);
                     result = execution::prefill_multimodal_chunk(schedule_state, staged.prompt,
                                                                  *staged.vision, remaining,
-                                                                 split_frontier, final_candidate);
+                                                                 capture_frontier, final_candidate);
                 } else {
                     result = execution::prefill_text_chunk(
                         schedule_state, std::span<const TokenId>(staged.prompt.token_ids),
-                        remaining, split_frontier, final_candidate);
+                        remaining, capture_frontier, final_candidate);
                 }
                 timing.include(result.timing);
                 timing.resume_post();

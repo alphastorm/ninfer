@@ -281,8 +281,8 @@ PendingBatch Program::decode(std::span<const SequenceHandle> s,
 
 runtime::ExecutionTiming Program::append_forced_tokens(
     std::span<const SequenceHandle> s, std::span<const TokenId> ids, std::uint32_t stride,
-    std::span<const std::optional<std::uint32_t>> splits, runtime::ExecutionTiming* t) {
-    return impl_->append_forced_tokens(s, ids, stride, splits, t);
+    runtime::ExecutionTiming* t) {
+    return impl_->append_forced_tokens(s, ids, stride, t);
 }
 
 CommitResult Program::commit(PendingBatch&& p, std::span<const runtime::CommitDecision> d,

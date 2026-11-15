@@ -137,10 +137,7 @@ CommitResult Program::commit(PendingBatch&& batch,
             ((d.cancelled || d.failed)
                  ? (!d.terminal || d.accepted_tokens != 0)
                  : (d.accepted_tokens == 0 || d.accepted_tokens > produced ||
-                    (!d.terminal && d.accepted_tokens != produced) || p.pending_failed[row])) ||
-            (d.prefix_execution_split_after &&
-             (!*d.prefix_execution_split_after ||
-              *d.prefix_execution_split_after > d.accepted_tokens)))
+                    (!d.terminal && d.accepted_tokens != produced) || p.pending_failed[row])))
             throw std::logic_error("invalid generated-prefix commit decision");
     }
     const auto started = detail::Clock::now();
@@ -176,10 +173,8 @@ CommitResult Program::commit(PendingBatch&& batch,
         const auto tokens =
             std::span<const TokenId>(batch.tokens_).subspan(row * batch.stride_, d.accepted_tokens);
         s.identity.tokens.insert(s.identity.tokens.end(), tokens.begin(), tokens.end());
-        s.identity.positions.append_generated(tokens.size(), s.continuation.metadata.rope_delta,
-                                              d.prefix_execution_split_after);
-        s.identity.digests.append_generated(tokens, s.continuation.metadata.rope_delta,
-                                            d.prefix_execution_split_after);
+        s.identity.positions.append_generated(tokens.size(), s.continuation.metadata.rope_delta);
+        s.identity.digests.append_generated(tokens, s.continuation.metadata.rope_delta);
         s.phase         = d.terminal ? detail::Phase::Finished : detail::Phase::Active;
         s.recovery_peak = 0;
         p.settle(s);

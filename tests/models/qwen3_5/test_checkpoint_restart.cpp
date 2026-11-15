@@ -247,9 +247,8 @@ Generated generate(DeviceContext& device, q35::Program& program,
         if (partial) exercised = true;
         if (!terminal && !exercised && scenario == "forced") {
             const std::array<TokenId, 3> forced{198, 198, 199};
-            const std::array<std::optional<std::uint32_t>, 1> splits{std::nullopt};
             reserve(q35::ExecutionUnitKind::Control, forced.size());
-            (void)program.append_forced_tokens(members, forced, forced.size(), splits);
+            (void)program.append_forced_tokens(members, forced, forced.size());
             result.tokens.insert(result.tokens.end(), forced.begin(), forced.end());
             exercised = true;
         }
@@ -311,8 +310,7 @@ models::qwen::PreparedPrompt continuation_prompt(models::qwen::Frontend& fronten
     // Fixture-owned, non-const storage; do not add a production mutation API for test input.
     auto& prompt = const_cast<models::qwen::PreparedPromptData&>(
         models::qwen::PreparedPromptAccess::view(prepared));
-    // A Chat checkpoint includes execution splits as well as token IDs. Preserve its
-    // exact native prefix rather than asking a raw-token prompt to match a different identity.
+    // Preserve the native token types and positions, including shifted RoPE coordinates.
     std::copy_n(identity.token_types.begin(), point.frontier, prompt.token_types.begin());
     for (std::size_t axis = 0; axis < identity.positions.size(); ++axis) {
         auto begin = prompt.positions.begin() + axis * prompt.token_ids.size();
@@ -321,8 +319,6 @@ models::qwen::PreparedPrompt continuation_prompt(models::qwen::Frontend& fronten
             begin[i] = static_cast<std::int32_t>(i) + point.rope_delta;
     }
     prompt.rope_delta = point.rope_delta;
-    for (const auto frontier : identity.execution_frontiers)
-        if (frontier <= point.frontier) prompt.identity.rewrite_execution_frontiers.push_back(frontier);
     return prepared;
 }
 void release(q35::Program& program, const std::vector<q35::CheckpointHandle>& points) {

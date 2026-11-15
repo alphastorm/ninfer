@@ -179,10 +179,10 @@ ReplayProgress Program::advance_replay(SequenceHandle h, runtime::ExecutionTimin
 
 runtime::ExecutionTiming Program::append_forced_tokens(
     std::span<const SequenceHandle> members, std::span<const TokenId> forced, std::uint32_t stride,
-    std::span<const std::optional<std::uint32_t>> splits, runtime::ExecutionTiming* failed) {
+    runtime::ExecutionTiming* failed) {
     auto& p = *impl_;
     if (p.pending_transaction || members.empty() || members.size() > p.shape.max_concurrency ||
-        !stride || forced.size() != members.size() * stride || splits.size() != members.size())
+        !stride || forced.size() != members.size() * stride)
         throw std::logic_error("invalid control window");
     std::vector<detail::Sequence*> rows;
     rows.reserve(members.size());
@@ -192,7 +192,6 @@ runtime::ExecutionTiming Program::append_forced_tokens(
             s.permit->kind != ExecutionUnitKind::Control ||
             s.identity.tokens.size() != s.continuation.metadata.main_frontier + 1 ||
             std::uint64_t(s.continuation.metadata.main_frontier) + stride > s.permitted_frontier ||
-            (splits[row] && (!*splits[row] || *splits[row] > stride)) ||
             std::find(rows.begin(), rows.end(), &s) != rows.end())
             throw std::logic_error("control row is not executable");
         rows.push_back(&s);
@@ -207,10 +206,8 @@ runtime::ExecutionTiming Program::append_forced_tokens(
             auto& s        = *rows[row];
             const auto ids = forced.subspan(row * stride, stride);
             s.identity.tokens.insert(s.identity.tokens.end(), ids.begin(), ids.end());
-            s.identity.positions.append_generated(stride, s.continuation.metadata.rope_delta,
-                                                  splits[row]);
-            s.identity.digests.append_generated(ids, s.continuation.metadata.rope_delta,
-                                                splits[row]);
+            s.identity.positions.append_generated(stride, s.continuation.metadata.rope_delta);
+            s.identity.digests.append_generated(ids, s.continuation.metadata.rope_delta);
         }
         if (stride == 1) {
             (void)p.forward(rows, 1, false);

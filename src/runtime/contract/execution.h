@@ -52,9 +52,6 @@ struct CommitDecision {
     bool cancelled                = false;
     // A native mask dead end or a frontend preview rejection. Both release only this row.
     bool failed                   = false;
-    // Copied unchanged from the corresponding OutputDecision; still relative to this row's
-    // accepted span.
-    std::optional<std::uint32_t> prefix_execution_split_after;
 };
 
 struct BeginSummary {

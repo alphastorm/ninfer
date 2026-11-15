@@ -1,5 +1,6 @@
 #include "core/io/durable_file.h"
 #include "core/sha256.h"
+#include "models/common/qwen/prefix_identity.h"
 #include "runtime/engine/checkpoint_control.h"
 #include "runtime/engine/checkpoint_identity.h"
 #include "serve/session_checkpoint_store.h"
@@ -865,6 +866,94 @@ int test_export_refusal_diagnostics() {
                           input_message.view().find(runtime::continuation_export_skip_reason_name(
                               ExportReason::StoreInputInvalid)) != std::string_view::npos,
                       "invalid input is diagnosed without entering export or changing its category");
+    return failures;
+}
+
+// qwen-identity/2 names a semantic prefix identity: tokens, token types, MRoPE positions and
+// Vision items. Neither a prepared prompt nor a resident identity carries execution splits.
+template <class Identity>
+concept RecordsExecutionFrontiers = requires(const Identity& identity) {
+    identity.execution_frontiers();
+};
+template <class Identity>
+concept CarriesRewriteFrontiers = requires(const Identity& identity) {
+    identity.rewrite_execution_frontiers;
+};
+template <class Identity>
+concept AppendsExecutionSplit = requires(Identity& identity) {
+    identity.append_generated(std::size_t{1}, std::int32_t{0}, std::optional<std::uint32_t>{1U});
+};
+static_assert(!RecordsExecutionFrontiers<models::qwen::ResidentPrefixIdentity>);
+static_assert(!CarriesRewriteFrontiers<models::qwen::PromptIdentity>);
+static_assert(!AppendsExecutionSplit<models::qwen::ResidentPrefixIdentity>);
+
+int test_split_free_identity_upgrade() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    auto old_identity = fingerprint();
+    old_identity["frontend"]["identity_codec"] = "qwen-identity/1";
+    refresh_config_digest(old_identity);
+    auto new_identity = old_identity;
+    new_identity["frontend"]["identity_codec"] = std::string(models::qwen::kIdentityCodec);
+    refresh_config_digest(new_identity);
+    auto queue = std::make_shared<TestReadQueue>();
+    const SessionCheckpointStoreOptions options{
+        .root = temporary.path, .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes = 1ULL << 20, .origin_mac_key = std::string(32, 'k'),
+        .require_origin_auth = true, .read_queue = queue};
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    {
+        SessionCheckpointStore store(options);
+        const auto saved = store.save(responses, old_identity, exporter, publish_fixture);
+        if (!saved || !saved->origin_authenticated) {
+            return check(false, "pre-upgrade identity did not publish an authenticated checkpoint");
+        }
+    }
+    SessionCheckpointStore restarted(options);
+    const auto reads = queue->submit_count;
+    const auto refused = restarted.load(responses.client_session_sha256, new_identity,
+                                         responses.latest_response_id);
+    int failures = check(models::qwen::kIdentityCodec == "qwen-identity/2" &&
+                             refused.state == SessionCheckpointLoadState::Incompatible &&
+                             refused.reason == runtime::DurableReason::FingerprintMismatch &&
+                             !refused.checkpoint && queue->submit_count == reads,
+                         "old split identity reached native import or was not refused cleanly");
+    {
+        auto rollback = restarted.load(responses.client_session_sha256, old_identity);
+        failures += check(rollback.state == SessionCheckpointLoadState::Available &&
+                              rollback.checkpoint && rollback.checkpoint->origin_authenticated,
+                          "identity mismatch quarantined the authenticated old generation");
+    }
+    const auto saved = restarted.save(responses, new_identity, exporter, publish_fixture);
+    failures += check(saved && saved->origin_authenticated,
+                      "split-free identity did not publish a replacement checkpoint");
+    auto loaded = restarted.load(responses.client_session_sha256, new_identity);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint && loaded.checkpoint->origin_authenticated,
+                      "same-version split-free identity failed to restore");
+    if (loaded.checkpoint) {
+        std::vector<std::byte> restored(payload.size());
+        failures += check(loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, restored) &&
+                              restored == payload && loaded.checkpoint->engine->verify_complete(),
+                          "same-version identity changed authenticated payload bytes");
+    }
+    // Rollback: an identity/1 binary on the same root refuses the /2 generation before native
+    // reads and without quarantine, so the upgraded build keeps restoring it.
+    const auto rollback_reads = queue->submit_count;
+    const auto rolled_back = restarted.load(responses.client_session_sha256, old_identity,
+                                            responses.latest_response_id);
+    failures += check(rolled_back.state == SessionCheckpointLoadState::Incompatible &&
+                          rolled_back.reason == runtime::DurableReason::FingerprintMismatch &&
+                          !rolled_back.checkpoint && queue->submit_count == rollback_reads,
+                      "rollback identity reached native import or was not refused cleanly");
+    const auto upgraded = restarted.load(responses.client_session_sha256, new_identity);
+    failures += check(upgraded.state == SessionCheckpointLoadState::Available && upgraded.checkpoint,
+                      "rollback refusal quarantined the split-free generation");
     return failures;
 }
 
@@ -3411,6 +3500,7 @@ int main(int argc, char** argv) {
     failures += test_checkpoint_failure_diagnostics_are_content_safe();
     failures += test_effective_engine_identity();
     failures += test_fp32_checkpoint_restart_compatibility();
+    failures += test_split_free_identity_upgrade();
     failures += test_quota_stale_publication_preserves_unrelated_currents();
     failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
     failures += test_replay_only_survivors_are_durable_without_native_authority();
