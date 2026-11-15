@@ -13,8 +13,9 @@
 
 namespace {
 
-using Json   = nlohmann::json;
-namespace fi = ninfer::models::qwen::frontend;
+using Json        = nlohmann::json;
+using OrderedJson = nlohmann::ordered_json;
+namespace fi      = ninfer::models::qwen::frontend;
 
 int fail(const std::string& message) {
     std::cerr << "FAIL: " << message << '\n';
@@ -210,19 +211,20 @@ int test_string_values_preserve_embedded_tool_markup() {
     return failures;
 }
 
-int test_unrepresentable_parameter_delimiters_fall_back() {
+int test_unbalanced_parameter_delimiters_recover() {
     const auto contract = contract_for("bash", Json{{"command", Json{{"type", "string"}}}});
-    const std::string unmatched_open =
-        tool_call("bash", {{"command", "echo '<parameter=unterminated>'"}});
-    const std::string standalone_close = tool_call("bash", {{"command", "echo '</parameter>'"}});
+    const std::string unmatched_open   = "echo '<parameter=unterminated>'";
+    const std::string standalone_close = "echo '</parameter>'";
 
     int failures = 0;
-    failures += check_rejected(unmatched_open, contract,
-                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                               "unbalanced nested parameter open was silently repaired");
-    failures += check_rejected(standalone_close, contract,
-                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                               "standalone parameter close was guessed to be string content");
+    for (const auto& command : {unmatched_open, standalone_close}) {
+        const auto parsed = fi::parse_qwen_tool_call_output(
+            tool_call("bash", {{"command", command}}), 64, contract);
+        failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                              parsed.tool_calls.front().arguments_json ==
+                                  Json{{"command", command}}.dump(),
+                          "unbalanced parameter delimiter was not kept as value text: " + command);
+    }
     return failures;
 }
 
@@ -843,8 +845,10 @@ int test_fork_balanced_markup_and_atomic_fallback() {
                                "</function> </tool_call>\n";
     const auto expected = Json{{"value", markup}}.dump();
     int failures = check_parse_and_stream(parameter_call(markup), strings, &expected);
-    for (const auto value : {"echo '<parameter=unterminated>'", "echo '</parameter>'"})
-        failures += check_parse_and_stream(parameter_call(value), strings, nullptr);
+    for (const auto value : {"echo '<parameter=unterminated>'", "echo '</parameter>'"}) {
+        const auto recovered = Json{{"value", value}}.dump();
+        failures += check_parse_and_stream(parameter_call(value), strings, &recovered);
+    }
     const auto duplicate = tool_call("configure", {{"value", "first"}, {"value", "second"}});
     failures += check_parse_and_stream(duplicate, strings, nullptr);
     const auto boolean = output_contract_for("configure", {{"value", {{"type", "boolean"}}}});
@@ -884,6 +888,106 @@ int test_large_malformed_region_without_rescans() {
     for (const char& byte : text) { visible += decoder.feed(std::string_view(&byte, 1)); }
     visible += decoder.finish().content;
     failures += check(visible == text, "large malformed stream lost bytes");
+    return failures;
+}
+
+int test_literal_delimiters_in_values() {
+    const auto bash = output_contract_for("bash", {{"command", {{"type", "string"}}}});
+    const auto edit = output_contract_for("Edit", {{"file_path", {{"type", "string"}}},
+                                                   {"old_string", {{"type", "string"}}},
+                                                   {"new_string", {{"type", "string"}}},
+                                                   {"replace_all", {{"type", "boolean"}}}});
+    int failures = 0;
+
+    // A declared string keeps a standalone close or an unmatched opening as literal text.
+    for (const std::string command : {"echo '</parameter>'", "echo '<parameter=unterminated>'"}) {
+        const auto expected = Json{{"command", command}}.dump();
+        failures += check_parse_and_stream("prefix  \n" + tool_call("bash", {{"command", command}}),
+                                           bash, &expected);
+    }
+
+    // An agent editing tool-call markup: the old text closes a whole call before the next argument.
+    const std::string old_markup = "x\n</parameter>\n</function>\n</tool_call>";
+    const auto edited = "prefix  \n" + tool_call("Edit", {{"file_path", "/tmp/calls.txt"},
+                                                          {"old_string", old_markup},
+                                                          {"new_string", "y"}});
+    const auto edit_arguments = OrderedJson{{"file_path", "/tmp/calls.txt"},
+                                            {"old_string", old_markup},
+                                            {"new_string", "y"}}
+                                    .dump();
+    failures += check_parse_and_stream(edited, edit, &edit_arguments);
+
+    // A function close without a parameter close never ended a value.
+    const std::string function_close = "x\n</function>\n</tool_call>";
+    const auto function_expected = Json{{"command", function_close}}.dump();
+    failures += check_parse_and_stream(
+        "prefix  \n" + tool_call("bash", {{"command", function_close}}), bash, &function_expected);
+
+    // A successful balanced parse stays authoritative where recovery would read one longer value.
+    const auto strings = output_contract_for("configure", {{"value", {{"type", "string"}}}});
+    const std::string balanced = R"({"value":"a","b":"c"})";
+    failures += check_parse_and_stream(parameter_call("a</parameter>\n<parameter=b>\nc"), strings,
+                                       &balanced);
+
+    // A literal close before a declared opening is a boundary. When that boundary repeats a
+    // parameter, the region falls back with the balanced pass's reason instead of guessing.
+    for (const auto& ambiguous :
+         {tool_call("Edit", {{"old_string", "x\n</parameter>\n<parameter=new_string>\ny"},
+                             {"new_string", "z"}}),
+          tool_call("Edit", {{"old_string", "x"},
+                             {"new_string", "y\n</parameter>\n<parameter=old_string>\nz"}})}) {
+        failures += check_parse_and_stream(ambiguous, edit, nullptr);
+        failures += check_rejected(ambiguous, *edit,
+                                   ninfer::ToolCallParseFallbackReason::DuplicateParameter,
+                                   "ambiguous literal parameter boundary was repaired");
+    }
+
+    // An undeclared opening after a close may be text or a parameter the model emitted, so
+    // recovery refuses instead of merging that parameter into the value before it.
+    using Reason = ninfer::ToolCallParseFallbackReason;
+    for (const auto& [undeclared, reason] :
+         {std::pair{tool_call("bash", {{"command", "echo '</parameter>'"}, {"description", "q"}}),
+                    Reason::MalformedStructure},
+          std::pair{tool_call("bash", {{"command", "ls"}, {"description", "a"},
+                                       {"description", "b"}}),
+                    Reason::DuplicateParameter}}) {
+        failures += check_parse_and_stream(undeclared, bash, nullptr);
+        failures += check_rejected(undeclared, *bash, reason,
+                                   "undeclared parameter was merged into a recovered value");
+    }
+    return failures;
+}
+
+int test_free_continuation_rejects_recovered_call() {
+    const auto contract = output_contract_for("bash", {{"command", {{"type", "string"}}}});
+    bool rejected       = false;
+    try {
+        fi::ToolCallOutputDecoder decoder(contract, 64);
+        decoder.initialize_continuation(tool_call("bash", {{"command", "echo '</parameter>'"}}));
+    } catch (const ninfer::RequestError& error) {
+        rejected = error.kind() == ninfer::RequestErrorKind::InvalidToolConstraint;
+    }
+    return check(rejected, "free continuation accepted a recovered complete call");
+}
+
+int test_large_literal_delimiter_value_without_rescans() {
+    std::string command;
+    for (int i = 0; i < 50000; ++i) { command += "'</parameter>'"; }
+    const auto contract    = output_contract_for("bash", {{"command", {{"type", "string"}}}});
+    const std::string text = tool_call("bash", {{"command", command}});
+    const auto expected    = Json{{"command", command}}.dump();
+    const auto parsed      = fi::parse_qwen_tool_call_output(text, 128, *contract);
+    int failures           = check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                                       parsed.tool_calls.front().arguments_json == expected,
+                                   "large literal-delimiter value was not recovered");
+    fi::ToolCallOutputDecoder decoder(contract, 128);
+    std::string visible;
+    for (const char& byte : text) { visible += decoder.feed(std::string_view(&byte, 1)); }
+    const auto terminal = decoder.finish();
+    failures += check(visible.empty() && terminal.content.empty() &&
+                          terminal.tool_calls.size() == 1 &&
+                          terminal.tool_calls.front().arguments_json == expected,
+                      "large literal-delimiter stream was not recovered");
     return failures;
 }
 
@@ -936,7 +1040,7 @@ int main() {
     failures += test_multiple_calls();
     failures += test_declared_strings_preserve_text();
     failures += test_string_values_preserve_embedded_tool_markup();
-    failures += test_unrepresentable_parameter_delimiters_fall_back();
+    failures += test_unbalanced_parameter_delimiters_recover();
     failures += test_declared_json_types();
     failures += test_boolean_boundary();
     failures += test_exact_integer_boundary();
@@ -955,6 +1059,9 @@ int main() {
     failures += test_fork_balanced_markup_and_atomic_fallback();
     failures += test_deep_supported_union_without_recursive_compilation();
     failures += test_large_malformed_region_without_rescans();
+    failures += test_literal_delimiters_in_values();
+    failures += test_free_continuation_rejects_recovered_call();
+    failures += test_large_literal_delimiter_value_without_rescans();
     failures += test_custom_raw_input_and_history_contracts();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

@@ -2270,7 +2270,7 @@ int test_loaded_durable_frontend_identity() {
                              identity.tokenizer_sha256 == fi::sha256_hex(fi::sha256(source.tokenizer_json)) &&
                              valid_digest(identity.resources_sha256) &&
                              identity.vision_preprocessing == "disabled" &&
-                             identity.parser_codec == "qwen-parser/1" &&
+                             identity.parser_codec == "qwen-parser/2" &&
                              identity.identity_codec == "qwen-identity/2",
                          "loaded frontend identity did not bind actual resources and codec versions");
     for (auto field : {&FrontendResources::tokenizer_json,
