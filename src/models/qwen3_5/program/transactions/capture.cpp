@@ -112,7 +112,7 @@ void ProgramImpl::prepare_capture_boundary(std::uint32_t lane) {
     while (const auto prepared = prepare_capture(sequence_handle(lane))) {
         if (prepared->reserved) { return; }
         // Direct Native callers can omit optional saving; Engine handles admission before
-        // advancing. Unavailable optional splits never change required identity boundaries.
+        // advancing. Skipping an optional capture never changes the prefix identity.
         skip_capture(sequence_handle(lane));
     }
 }

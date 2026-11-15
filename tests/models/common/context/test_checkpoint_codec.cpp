@@ -3,6 +3,8 @@
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 using namespace ninfer::runtime;
 namespace codec = ninfer::models::qwen3_5::detail::checkpoint_codec;
@@ -67,6 +69,12 @@ int main() {
         require(nlohmann::json::from_cbor(bytes)["identities"][0]["execution_frontiers"] ==
                     nlohmann::json::array() && decoded.identities[0].execution_frontiers.empty(),
                 "qwen-identity/2 must retain the empty schema-3 execution_frontiers key");
+        const auto encoded_identity = nlohmann::json::from_cbor(bytes).at("identities").at(0);
+        std::vector<std::string> identity_keys;
+        for (const auto& item : encoded_identity.items()) identity_keys.push_back(item.key());
+        require(identity_keys == std::vector<std::string>{"execution_frontiers", "ledger", "positions",
+                                                          "shortlist_tag", "token_types", "vision_items"},
+                "qwen-identity/2 identity map must keep exactly the schema-3 keys");
         require(codec::encode(decoded) == bytes && decoded.histories.size() == 1 && decoded.points.size() == 3 &&
                 decoded.points[2].dflash_context_frontier == 65 && decoded.points[0].rope_delta == -3 &&
                 decoded.identities[0].vision_items[0].timestamps_bits[0] == "3ff0000000000000",
@@ -83,6 +91,12 @@ int main() {
         auto old_identity = nlohmann::json::from_cbor(bytes);
         old_identity["identities"][0]["execution_frontiers"] = {32, 48};
         rejects_cbor(old_identity);
+        auto missing_reserved = nlohmann::json::from_cbor(bytes);
+        missing_reserved["identities"][0].erase("execution_frontiers");
+        rejects_cbor(missing_reserved);
+        auto extra_identity = nlohmann::json::from_cbor(bytes);
+        extra_identity["identities"][0]["rewrite_execution_frontiers"] = nlohmann::json::array();
+        rejects_cbor(extra_identity);
         rejects([](auto& x) { x.identities[0].vision_items[0].timestamps_bits[0] = "7ff0000000000000"; });
         rejects([](auto& x) { x.identities[0].vision_items[0].token_spans[0] = {64, 2}; });
         rejects([](auto& x) { x.states.push_back(x.states[0]); });

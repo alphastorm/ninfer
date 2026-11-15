@@ -869,6 +869,24 @@ int test_export_refusal_diagnostics() {
     return failures;
 }
 
+// qwen-identity/2 names a semantic prefix identity: tokens, token types, MRoPE positions and
+// Vision items. Neither a prepared prompt nor a resident identity carries execution splits.
+template <class Identity>
+concept RecordsExecutionFrontiers = requires(const Identity& identity) {
+    identity.execution_frontiers();
+};
+template <class Identity>
+concept CarriesRewriteFrontiers = requires(const Identity& identity) {
+    identity.rewrite_execution_frontiers;
+};
+template <class Identity>
+concept AppendsExecutionSplit = requires(Identity& identity) {
+    identity.append_generated(std::size_t{1}, std::int32_t{0}, std::optional<std::uint32_t>{1U});
+};
+static_assert(!RecordsExecutionFrontiers<models::qwen::ResidentPrefixIdentity>);
+static_assert(!CarriesRewriteFrontiers<models::qwen::PromptIdentity>);
+static_assert(!AppendsExecutionSplit<models::qwen::ResidentPrefixIdentity>);
+
 int test_split_free_identity_upgrade() {
     TemporaryDirectory temporary;
     const auto responses = sample_snapshot();
@@ -924,6 +942,18 @@ int test_split_free_identity_upgrade() {
                               restored == payload && loaded.checkpoint->engine->verify_complete(),
                           "same-version identity changed authenticated payload bytes");
     }
+    // Rollback: an identity/1 binary on the same root refuses the /2 generation before native
+    // reads and without quarantine, so the upgraded build keeps restoring it.
+    const auto rollback_reads = queue->submit_count;
+    const auto rolled_back = restarted.load(responses.client_session_sha256, old_identity,
+                                            responses.latest_response_id);
+    failures += check(rolled_back.state == SessionCheckpointLoadState::Incompatible &&
+                          rolled_back.reason == runtime::DurableReason::FingerprintMismatch &&
+                          !rolled_back.checkpoint && queue->submit_count == rollback_reads,
+                      "rollback identity reached native import or was not refused cleanly");
+    const auto upgraded = restarted.load(responses.client_session_sha256, new_identity);
+    failures += check(upgraded.state == SessionCheckpointLoadState::Available && upgraded.checkpoint,
+                      "rollback refusal quarantined the split-free generation");
     return failures;
 }
 

@@ -113,6 +113,15 @@ constexpr auto kSession                    = "session";
 constexpr auto kPublicationHold = 500ms;
 constexpr auto kEventTimeout    = 10s;
 
+// qwen-identity/2: an output decision licenses a token prefix only. EngineCore transports no
+// prefix execution split from the output policy into a Program commit.
+template <class Decision>
+concept CarriesPrefixExecutionSplit = requires(const Decision& decision) {
+    decision.prefix_execution_split_after;
+};
+static_assert(!CarriesPrefixExecutionSplit<rt::OutputDecision>);
+static_assert(!CarriesPrefixExecutionSplit<rt::CommitDecision>);
+
 void require(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
 }

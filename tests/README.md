@@ -80,10 +80,13 @@ from this Op test.
 
 Split-free Qwen prefill uses `qwen-identity/2`. The frontend and runtime-mechanism suites
 cover reasoning/output-budget handling and generated-versus-rebuilt prefix identity.
-`ninfer_checkpoint_codec_test` retains the empty schema-3 `execution_frontiers` key and rejects
-nonempty provenance. `ninfer_session_checkpoint_store_test` writes an authenticated `/1`
-checkpoint, refuses `/2` without reading native payloads or quarantining it, and restores a
-new `/2` checkpoint with exact bytes. The native transaction `chat-markers` scenario checks
+`ninfer_checkpoint_codec_test` keeps exactly the schema-3 identity keys, with an empty
+`execution_frontiers`, and rejects nonempty provenance or a missing or extra identity key.
+`ninfer_session_checkpoint_store_test` writes an authenticated `/1` checkpoint, refuses it under
+`/2` without reading native payloads or quarantining it, restores a new `/2` checkpoint with exact
+bytes, and has a `/1` rollback refuse that `/2` checkpoint the same way. It and
+`ninfer_engine_core_test` assert at compile time that no prompt identity, resident identity or
+output decision carries an execution split. The native transaction `chat-markers` scenario checks
 one-chunk chat completion; its `CHAT_PREFILL_TOKENS` output can be matched against the existing
 NVTX `prefill.chunk` range payload to prove a single mathematical pass, not just one scheduler
 unit. Native transaction/restart suites also cover forced control, Replay and checkpoint import.
