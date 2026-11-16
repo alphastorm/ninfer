@@ -246,9 +246,14 @@ is opaque text, including JSON-looking text; its kind and raw bytes survive outp
 history, with the history wrapper added only for template rendering.
 
 On the unconstrained route, function string parameters preserve function/tool-call markers and balanced nested
-`<parameter=...>...</parameter>` text as value bytes. The Qwen wire format has no delimiter escape,
-so an unmatched nested parameter opener or a standalone `</parameter>` cannot be represented
-unambiguously; either causes the complete tool-call region to fall back to ordinary content.
+`<parameter=...>...</parameter>` text as value bytes. The Qwen wire format has no delimiter escape.
+When that balanced reading fails, the region is read once more with each value ending at its first
+`</parameter>` followed by an opening of a declared parameter (any name when the tool declares
+none), or by `</function>` and `</tool_call>` at the end of the region or before the next
+`<tool_call>`. An unmatched nested parameter opener or a standalone `</parameter>` inside a value
+then stays value text. If a close is followed by an undeclared parameter name, or the second
+reading repeats a parameter, does not parse, or fails normalization, the complete tool-call region
+falls back to ordinary content.
 
 ### Tool constraints
 

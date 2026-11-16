@@ -289,11 +289,20 @@ NormalizedParameter normalize_parameter(std::string_view encoded_value,
     return {.json_value = encode_json_string(value)};
 }
 
+// The Qwen wire format cannot escape a delimiter inside a value. The balanced pass is
+// authoritative; only when it fails structurally does a structural pass reinterpret the region.
+enum class CloseResolution : std::uint8_t { Balanced, Structural };
+
+// What follows a candidate parameter close during structural recovery.
+enum class CloseLookahead : std::uint8_t { ValueText, Boundary, Ambiguous };
+
 class QwenToolRegionParser {
 public:
     QwenToolRegionParser(std::string_view text, std::size_t max_name_length,
-                         const Contract& contract)
-        : text_(text), max_name_length_(max_name_length), contract_(contract) {}
+                         const Contract& contract,
+                         CloseResolution resolution = CloseResolution::Balanced)
+        : text_(text), max_name_length_(max_name_length), contract_(contract),
+          resolution_(resolution) {}
 
     FallbackReason parse(std::vector<RawToolCall>& calls) const {
         std::size_t pos = 0;
@@ -349,7 +358,7 @@ private:
         for (;;) {
             skip_format_whitespace(text_, pos);
             if (consume(pos, kFunctionClose)) { return FallbackReason::None; }
-            const FallbackReason failure = parse_parameter(pos, call);
+            const FallbackReason failure = parse_parameter(pos, call, *tool);
             if (failure != FallbackReason::None) { return failure; }
         }
     }
@@ -385,7 +394,8 @@ private:
         return FallbackReason::MalformedStructure;
     }
 
-    FallbackReason parse_parameter(std::size_t& pos, RawToolCall& call) const {
+    FallbackReason parse_parameter(std::size_t& pos, RawToolCall& call,
+                                   const Contract::Tool& tool) const {
         if (!consume(pos, kParamOpen)) { return FallbackReason::MalformedStructure; }
         const std::size_t name_begin = pos;
         const std::size_t name_end   = text_.find('>', name_begin);
@@ -400,9 +410,10 @@ private:
 
         const std::size_t value_begin = name_end + 1;
         std::size_t value_end         = 0;
-        if (!find_parameter_close(value_begin, value_end)) {
-            return FallbackReason::MalformedStructure;
-        }
+        const bool closed = resolution_ == CloseResolution::Balanced
+                                ? find_parameter_close(value_begin, value_end)
+                                : find_structural_close(value_begin, tool, value_end);
+        if (!closed) { return FallbackReason::MalformedStructure; }
         call.parameters.push_back(RawParameter{
             .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
         pos = value_end + kParamClose.size();
@@ -451,10 +462,64 @@ private:
         }
     }
 
+    // A recovered value ends at the leftmost close followed by a declared parameter opening, or
+    // by the call's closing tags at the end of the region or before the next call. Recovery never
+    // reads a well-formed opening after a close as text: a repeated name ends the value and the
+    // duplicate check refuses it, and an undeclared name refuses recovery outright. Each
+    // lookahead stops at the first byte that cannot continue either form, so candidates inspect
+    // disjoint text and the scan stays linear.
+    bool find_structural_close(std::size_t value_begin, const Contract::Tool& tool,
+                               std::size_t& value_end) const {
+        for (std::size_t close = text_.find(kParamClose, value_begin);
+             close != std::string_view::npos;
+             close = text_.find(kParamClose, close + kParamClose.size())) {
+            const CloseLookahead next = lookahead_after_close(close + kParamClose.size(), tool);
+            if (next == CloseLookahead::Ambiguous) { return false; }
+            if (next == CloseLookahead::Boundary) {
+                value_end = close;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    CloseLookahead lookahead_after_close(std::size_t pos, const Contract::Tool& tool) const {
+        skip_format_whitespace(text_, pos);
+        if (consume(pos, kParamOpen)) {
+            const std::size_t name_end = text_.find_first_of("<>\r\n", pos);
+            if (name_end == std::string_view::npos || name_end == pos || text_[name_end] != '>') {
+                return CloseLookahead::ValueText;
+            }
+            const bool declared =
+                tool.parameters.empty() ||
+                find_parameter_contract(tool, text_.substr(pos, name_end - pos)) != nullptr;
+            return declared ? CloseLookahead::Boundary : CloseLookahead::Ambiguous;
+        }
+        if (!consume(pos, kFunctionClose)) { return CloseLookahead::ValueText; }
+        skip_format_whitespace(text_, pos);
+        if (!consume(pos, kToolClose)) { return CloseLookahead::ValueText; }
+        skip_format_whitespace(text_, pos);
+        const bool call_ends = pos == text_.size() || starts_with_at(text_, pos, kToolOpen);
+        return call_ends ? CloseLookahead::Boundary : CloseLookahead::ValueText;
+    }
+
     std::string_view text_;
     std::size_t max_name_length_;
     const Contract& contract_;
+    CloseResolution resolution_;
 };
+
+// A continuation prefix may not hold any call that either pass completes.
+bool region_has_completed_call(std::string_view region, std::size_t max_name_length,
+                               const Contract& contract) {
+    std::vector<RawToolCall> calls;
+    (void)QwenToolRegionParser(region, max_name_length, contract).parse(calls);
+    if (calls.empty()) {
+        (void)QwenToolRegionParser(region, max_name_length, contract, CloseResolution::Structural)
+            .parse(calls);
+    }
+    return !calls.empty();
+}
 
 std::optional<GeneratedToolCall>
 normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
@@ -493,6 +558,20 @@ normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
     arguments.push_back('}');
 
     return GeneratedToolCall{.name = std::string(raw.name), .arguments_json = std::move(arguments)};
+}
+
+// Publishes every call or none; normalization diagnostics accumulate in `out`.
+bool normalize_raw_tool_calls(const std::vector<RawToolCall>& raw_calls, const Contract& contract,
+                              ParsedToolCallOutput& out) {
+    out.tool_calls.reserve(raw_calls.size());
+    for (const RawToolCall& raw : raw_calls) {
+        auto call = normalize_raw_tool_call(raw, contract, out.diagnostics);
+        if (!call) { return false; }
+        out.tool_calls.push_back(std::move(*call));
+    }
+    out.diagnostics.structured_call_count = static_cast<std::uint32_t>(out.tool_calls.size());
+    out.is_tool_call_response             = true;
+    return true;
 }
 
 // Canonical constrained calls are parsed one at a time. A terminal interruption can discard the
@@ -665,21 +744,23 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
     const std::string_view tool_region = std::string_view(text).substr(first);
     const QwenToolRegionParser parser(tool_region, max_tool_name_length, contract);
     const FallbackReason failure = parser.parse(raw_calls);
-    if (failure != FallbackReason::None) {
-        out.diagnostics.fallback_reason = failure;
-        return fallback(text, out.diagnostics);
+    if (failure == FallbackReason::None) {
+        if (!normalize_raw_tool_calls(raw_calls, contract, out)) {
+            return fallback(text, out.diagnostics);
+        }
+        return out;
     }
 
-    out.tool_calls.reserve(raw_calls.size());
-    for (const RawToolCall& raw : raw_calls) {
-        auto call = normalize_raw_tool_call(raw, contract, out.diagnostics);
-        if (!call) { return fallback(text, out.diagnostics); }
-        out.tool_calls.push_back(std::move(*call));
+    // Recovery replaces a structural failure only with calls that all normalize; otherwise the
+    // balanced pass's fallback stands with its diagnostics unchanged.
+    raw_calls.clear();
+    const QwenToolRegionParser recovery(tool_region, max_tool_name_length, contract,
+                                        CloseResolution::Structural);
+    if (recovery.parse(raw_calls) == FallbackReason::None &&
+        normalize_raw_tool_calls(raw_calls, contract, out)) {
+        return out;
     }
-
-    out.diagnostics.structured_call_count = static_cast<std::uint32_t>(out.tool_calls.size());
-    out.is_tool_call_response             = true;
-    return out;
+    return fallback(text, {.marker_seen = true, .fallback_reason = failure});
 }
 
 ToolCallOutputDecoder::ToolCallOutputDecoder(std::shared_ptr<const ToolCallOutputContract> contract,
@@ -748,9 +829,7 @@ void ToolCallOutputDecoder::initialize_continuation(std::string_view prefix) {
             throw RequestError(RequestErrorKind::InvalidToolConstraint,
                                "tool continuation must contain no completed or malformed calls");
     } else if (saw_tool_marker_) {
-        std::vector<RawToolCall> calls;
-        (void)QwenToolRegionParser(tool_region_, max_tool_name_length_, *contract_).parse(calls);
-        if (!calls.empty())
+        if (region_has_completed_call(tool_region_, max_tool_name_length_, *contract_))
             throw RequestError(RequestErrorKind::InvalidToolConstraint,
                                "tool continuation must contain no completed calls");
     }

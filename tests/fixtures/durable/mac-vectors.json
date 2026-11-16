@@ -20,14 +20,14 @@
     {
       "file": "manifest-text.json",
       "mac_file": "manifest-text.mac",
-      "sha256": "46c904a6015a582ec7554211a053dede1d21717b23801e1a30724d1417f0e541",
-      "hmac_sha256": "f9712b52ed016e00834c756034a16862705279a9670e50b74afc50eed3eb96a6"
+      "sha256": "a31c974fb6ccd7260ab420ab782d7f56107b019ba64b0661be35536802af9efa",
+      "hmac_sha256": "d6e049d177c0b5635529c100a4e83e7e5aab00e18e52c9ea40996d2b3df7faf6"
     },
     {
       "file": "manifest-dflash2.json",
       "mac_file": "manifest-dflash2.mac",
-      "sha256": "4e35d5294c4787ea49298ee21c14c9d4658ec986d8f95925ff3dcbd149fef0a5",
-      "hmac_sha256": "8f0adcdb0fe91c9caeb39fd87433573cd358e1c13aa67b9131d40e16c25fdef8"
+      "sha256": "be0d0a073b1b70f1c3ce0966079556f0174cf7177e939651f2940354e0e444ac",
+      "hmac_sha256": "79fb0dd38fe5f90c9d05527120135bd9ec4cf141078b857bc780934d3bd24f99"
     }
   ]
 }
