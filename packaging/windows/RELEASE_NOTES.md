@@ -1,5 +1,36 @@
 # NInfer native Windows lanes
 
+## 2026-11-15 — Native component 0.8.0-beta.5 (qualification pending)
+
+The native component candidates are `v0.8.0-qwen38-3090-beta.5` and
+`v0.8.0-qwen38-4090-beta.5`. Compared with the published RTX 3090
+`0.8.0-beta.4` and RTX 4090 `0.8.0-beta.3` packages, both candidates add:
+
+- Tool-call recovery for a literal `</parameter>` inside a value, an unmatched
+  literal `<parameter=` opener, or a call-closing sequence inside a value. A lone
+  `</function>` already parsed before this change. The parser codec advances to
+  `qwen-parser/2`.
+- xgrammar cache eviction and token-boundary fixes.
+- Removal of rewrite-only prefill splits. This changes execution boundaries and
+  can change generated output. The identity codec advances to `qwen-identity/2`;
+  with the parser codec change, each saved session has one cold first turn after
+  upgrade before new checkpoints can be reused.
+- A 23-character attempt-id bound at the Python claim boundary, matching the
+  upgrade rehearsal's scratch task suffix limit.
+
+The RTX 4090 additionally gains the bounded pressure-save retries already
+shipped on the RTX 3090: a save that remains non-durable after six retries or
+10 seconds releases its continuation with one `pressure`/`abandoned` receipt.
+The store's own checkpoint quota remains terminal on the first refusal.
+
+Release, deployment and build identities advance together. Model bytes, runtime
+shape, admission reserves and GPU-owner policies remain unchanged from each
+lane's published package.
+
+Package-build receipts remain `hardware-pending`. Both candidates require fresh
+exact-source build, package, GPU, lifecycle and restoration evidence before
+qualification; prior-component receipts are not evidence for these bytes.
+
 ## 2026-11-13 — Native component 0.8.0-beta.4 (qualification pending)
 
 The native component candidates are `v0.8.0-qwen38-4090-beta.4` and
